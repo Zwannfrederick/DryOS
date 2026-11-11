@@ -137,6 +137,7 @@ pub fn start_cpu_timer_for_phase(pcpu: &'static PerCpuData) {
     pcpu.quantum_rem.store(QUANTUM_TICKS, Ordering::Release);
     pcpu.storm_streak.store(0, Ordering::Release);
     pcpu.storm_slot.store(u64::MAX, Ordering::Release);
+    pcpu.timer_needs_rearm.store(false, Ordering::Release);
     pcpu.timer_armed.store(true, Ordering::Release);
     crate::apic::arm_default_oneshot_tick();
 }
@@ -144,6 +145,7 @@ pub fn start_cpu_timer_for_phase(pcpu: &'static PerCpuData) {
 pub fn stop_cpu_timer_for_phase(pcpu: &'static PerCpuData) {
     cli();
     pcpu.timer_armed.store(false, Ordering::Release);
+    pcpu.timer_needs_rearm.store(false, Ordering::Release);
     crate::apic::stop_cpu_lapic_timer();
     // Drain at most one already-latched IRR edge while `timer_armed == false` so no stale IRQ
     // survives into a subsequent phase; leaves `RFLAGS.IF == 0` on exit.
@@ -229,14 +231,22 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
         return;
     }
 
+    pcpu.timer_needs_rearm.store(true, Ordering::Relaxed);
+
     if !PREEMPT_MODE_ACTIVE.load(Ordering::Acquire) {
-        crate::apic::arm_default_oneshot_tick();
+        pcpu.timer_needs_rearm.store(false, Ordering::Relaxed);
+        crate::apic::rearm_oneshot_tick_count_only();
         pcpu.irq_depth.fetch_sub(1, Ordering::Release);
         return;
     }
 
     let online_for_dl = ONLINE_SCHED_CPUS.load(Ordering::Relaxed).max(1);
-    poll_expired_ipc_deadlines(rdtsc(), cpu_idx % online_for_dl, online_for_dl);
+    let dl_offset = if cpu_idx < online_for_dl {
+        cpu_idx
+    } else {
+        cpu_idx % online_for_dl
+    };
+    poll_expired_ipc_deadlines(rdtsc(), dl_offset, online_for_dl);
 
     if (frame.cs & 3) == 3 && cur_slot >= MAX_CPUS {
         let pid = tcb(cur_slot).process_id.load(Ordering::Acquire);
@@ -308,7 +318,8 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
     let rem = pcpu.quantum_rem.load(Ordering::Relaxed);
     if rem > 1 {
         pcpu.quantum_rem.store(rem - 1, Ordering::Relaxed);
-        crate::apic::arm_default_oneshot_tick();
+        pcpu.timer_needs_rearm.store(false, Ordering::Relaxed);
+        crate::apic::rearm_oneshot_tick_count_only();
         pcpu.irq_depth.fetch_sub(1, Ordering::Release);
         return;
     }
@@ -316,21 +327,24 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
 
     if cur_slot < MAX_CPUS || pcpu.preempt_count.load(Ordering::Acquire) > 0 {
         pcpu.need_resched.store(true, Ordering::Release);
-        crate::apic::arm_default_oneshot_tick();
+        pcpu.timer_needs_rearm.store(false, Ordering::Relaxed);
+        crate::apic::rearm_oneshot_tick_count_only();
         pcpu.irq_depth.fetch_sub(1, Ordering::Release);
         return;
     }
 
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
     let Some(raw_ticket) = pop_local_or_steal(cpu_idx, online) else {
-        crate::apic::arm_default_oneshot_tick();
+        pcpu.timer_needs_rearm.store(false, Ordering::Relaxed);
+        crate::apic::rearm_oneshot_tick_count_only();
         pcpu.irq_depth.fetch_sub(1, Ordering::Release);
         return;
     };
 
     let ticket = ThreadId::from_raw(raw_ticket);
     let next_slot = ticket.slot();
-    let target_cpu = (cpu_idx + 1) % online;
+    let next_cpu = cpu_idx + 1;
+    let target_cpu = if next_cpu >= online { 0 } else { next_cpu };
 
     pcpu.need_resched.store(false, Ordering::Release);
     pcpu.preemptions.fetch_add(1, Ordering::Relaxed);

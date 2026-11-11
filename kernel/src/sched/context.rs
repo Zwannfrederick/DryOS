@@ -131,9 +131,9 @@ extern "C" {
 }
 
 extern "C" fn finish_post_switch(prev_slot: usize, packed_action: u64) {
-    // Unconditional invariant across BOTH cooperative & preemptive modes: `finish_post_switch`
-    // MUST execute with local interrupts masked (`RFLAGS.IF == 0`) prior to `popfq`.
-    assert_eq!(read_rflags() & (1 << 9), 0, "IF=1 observed inside finish_post_switch");
+    // Unconditional invariant across BOTH cooperative & preemptive modes: `dry_switch_to` masks
+    // local interrupts (`cli`, `RFLAGS.IF == 0`) immediately prior to stack handoff.
+    debug_assert_eq!(read_rflags() & (1 << 9), 0, "IF=1 observed inside finish_post_switch");
     crate::sched::complete_post_switch_from_asm(prev_slot, PostSwitchKind::unpack(packed_action));
 }
 

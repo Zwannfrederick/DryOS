@@ -109,19 +109,14 @@ pub fn cspace_owner_label(cspace_id: CSpaceId) -> Result<SecLabel, CapError> {
     Ok(unpack_seclabel_u64(cnode.owner_label_raw.load(Ordering::Acquire)))
 }
 
-#[inline(always)]
-pub(crate) fn verify_live_object_generation(
-    kind: CapObjectKind,
-    obj_id: u32,
-    expected_gen: u32,
-) -> bool {
+#[cold]
+#[inline(never)]
+fn verify_live_object_cold(kind: CapObjectKind, obj_id: u32, expected_gen: u32) -> bool {
     match kind {
         CapObjectKind::None => false,
-        CapObjectKind::Untyped => inspect_untyped_live_gen(obj_id as u16) == expected_gen && expected_gen != 0,
-        CapObjectKind::Frame4K => matches!(
-            inspect_frame_live(obj_id),
-            Some((FrameState::AllocatedFrame | FrameState::UntypedRetypedObj, _, _, gen, _)) if gen == expected_gen
-        ),
+        CapObjectKind::Untyped => {
+            inspect_untyped_live_gen(obj_id as u16) == expected_gen && expected_gen != 0
+        }
         CapObjectKind::Frame2M => {
             (obj_id as usize) & (HUGE_2M_FRAMES - 1) == 0
                 && matches!(
@@ -129,6 +124,33 @@ pub(crate) fn verify_live_object_generation(
                     Some((FrameState::AllocatedFrame, _, _, gen, _)) if gen == expected_gen
                 )
         }
+        CapObjectKind::BootModule => {
+            expected_gen == 1 && crate::limine::get_boot_module_by_index(obj_id as usize).is_some()
+        }
+        CapObjectKind::Framebuffer => crate::display::is_framebuffer_cap_live(obj_id, expected_gen),
+        CapObjectKind::CNode => {
+            let idx = obj_id as usize;
+            idx < MAX_CSPACES
+                && CSPACE_TABLE[idx].allocated.load(Ordering::Acquire)
+                && CSPACE_TABLE[idx].generation.load(Ordering::Acquire) == expected_gen
+        }
+        _ => false,
+    }
+}
+
+#[inline(always)]
+pub(crate) fn verify_live_object_generation(
+    kind: CapObjectKind,
+    obj_id: u32,
+    expected_gen: u32,
+) -> bool {
+    match kind {
+        CapObjectKind::Endpoint => crate::ipc::endpoint::is_endpoint_live(obj_id, expected_gen),
+        CapObjectKind::Notification => crate::ipc::notif::is_notif_live(obj_id, expected_gen),
+        CapObjectKind::Frame4K => matches!(
+            inspect_frame_live(obj_id),
+            Some((FrameState::AllocatedFrame | FrameState::UntypedRetypedObj, _, _, gen, _)) if gen == expected_gen
+        ),
         CapObjectKind::VSpace => matches!(
             inspect_vspace_live(obj_id as u16),
             Some((gen, _, _)) if gen == expected_gen
@@ -137,47 +159,23 @@ pub(crate) fn verify_live_object_generation(
             inspect_tcb_live(obj_id as usize),
             Some((_, gen26, _)) if gen26 == expected_gen && expected_gen != 0
         ),
-        CapObjectKind::Notification => {
-            crate::ipc::notif::is_notif_live(obj_id, expected_gen)
-        }
-        CapObjectKind::Endpoint => {
-            crate::ipc::endpoint::is_endpoint_live(obj_id, expected_gen)
-        }
-        CapObjectKind::BootModule => {
-            expected_gen == 1 && crate::limine::get_boot_module_by_index(obj_id as usize).is_some()
-        }
-        CapObjectKind::Framebuffer => {
-            crate::display::is_framebuffer_cap_live(obj_id, expected_gen)
-        }
-        CapObjectKind::CNode => {
-            let idx = obj_id as usize;
-            idx < MAX_CSPACES
-                && CSPACE_TABLE[idx].allocated.load(Ordering::Acquire)
-                && CSPACE_TABLE[idx].generation.load(Ordering::Acquire) == expected_gen
-        }
+        _ => verify_live_object_cold(kind, obj_id, expected_gen),
     }
 }
 
-/// Lock-free $O(1)$ fast-path capability lookup + joint `ADR-007` security validation (`INV-CAP-02`).
-/// Zero locks, zero heap allocations, zero table scans, zero atomic RMWs.
-#[inline]
-pub fn cspace_lookup_fast(
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn lookup_slot_unchecked_bounds(
     cspace_id: CSpaceId,
+    cnode: &CNode,
+    slot_idx: usize,
+    slot: &CapSlot,
     subj_label: SecLabel,
     ptr: CapPtr,
     req_rights: CapRights,
     now_epoch: u32,
 ) -> Result<ResolvedCap, CapError> {
-    if (cspace_id as usize) >= MAX_CSPACES {
-        return Err(CapError::InvalidHandle);
-    }
-    let cnode = &CSPACE_TABLE[cspace_id as usize];
     if !cnode.allocated.load(Ordering::Acquire) {
-        return Err(CapError::InvalidHandle);
-    }
-
-    let slot_idx = ptr.slot_idx() as usize;
-    if slot_idx == 0 || slot_idx >= CNODE_SLOTS {
         return Err(CapError::InvalidHandle);
     }
     if ptr.guard() != cnode.guard.load(Ordering::Relaxed)
@@ -186,7 +184,6 @@ pub fn cspace_lookup_fast(
         return Err(CapError::InvalidHandle);
     }
 
-    let slot = &cnode.slots[slot_idx];
     // `SeqCst` pairs with `with_pinned_cap`'s `in_flight_ops.fetch_add(1, SeqCst)` and `revoke`'s
     // `state_gen.store(Revoking, SeqCst)` + `in_flight_ops.load(SeqCst)` Dekker barrier (0 extra
     // instructions on x86-64).
@@ -207,14 +204,15 @@ pub fn cspace_lookup_fast(
         }
     }
 
+    if req_rights.0 == 0 || !rights.contains(req_rights) {
+        return Err(CapError::InsufficientRights);
+    }
+
     let (obj_id, expected_obj_gen) = unpack_obj_meta(slot.obj_meta.load(Ordering::Acquire));
     let obj_label = unpack_seclabel_u64(slot.sec_label_raw.load(Ordering::Acquire));
     let lease_epoch = slot.lease_epoch.load(Ordering::Acquire);
     let badge = slot.badge.load(Ordering::Acquire);
 
-    if req_rights.0 == 0 || !rights.contains(req_rights) {
-        return Err(CapError::InsufficientRights);
-    }
     match authorize_cspace_fast(subj_label, obj_label, rights, req_rights, lease_epoch, now_epoch) {
         Ok(()) => {}
         Err(SecError::Revoked) => return Err(CapError::LeaseExpired),
@@ -244,6 +242,30 @@ pub fn cspace_lookup_fast(
     })
 }
 
+/// Lock-free $O(1)$ fast-path capability lookup + joint `ADR-007` security validation (`INV-CAP-02`).
+/// Zero locks, zero heap allocations, zero table scans, zero atomic RMWs.
+#[inline]
+pub fn cspace_lookup_fast(
+    cspace_id: CSpaceId,
+    subj_label: SecLabel,
+    ptr: CapPtr,
+    req_rights: CapRights,
+    now_epoch: u32,
+) -> Result<ResolvedCap, CapError> {
+    if (cspace_id as usize) >= MAX_CSPACES {
+        return Err(CapError::InvalidHandle);
+    }
+    let slot_idx = ptr.slot_idx() as usize;
+    if slot_idx == 0 || slot_idx >= CNODE_SLOTS {
+        return Err(CapError::InvalidHandle);
+    }
+    let cnode = &CSPACE_TABLE[cspace_id as usize];
+    let slot = &cnode.slots[slot_idx];
+    lookup_slot_unchecked_bounds(
+        cspace_id, cnode, slot_idx, slot, subj_label, ptr, req_rights, now_epoch,
+    )
+}
+
 /// Pin `slot.in_flight_ops` across a kernel object operation (`map`, `retype`, `tcb`) so `revoke`
 /// and slot reallocation cannot recycle the capability or underlying object while in use (`INV-CAP-08`).
 #[inline]
@@ -262,9 +284,12 @@ pub fn with_pinned_cap<R>(
     if slot_idx == 0 || slot_idx >= CNODE_SLOTS {
         return Err(CapError::InvalidHandle);
     }
-    let slot = &CSPACE_TABLE[cspace_id as usize].slots[slot_idx];
+    let cnode = &CSPACE_TABLE[cspace_id as usize];
+    let slot = &cnode.slots[slot_idx];
     slot.in_flight_ops.fetch_add(1, Ordering::SeqCst);
-    let res = match cspace_lookup_fast(cspace_id, subj_label, ptr, req_rights, now_epoch) {
+    let res = match lookup_slot_unchecked_bounds(
+        cspace_id, cnode, slot_idx, slot, subj_label, ptr, req_rights, now_epoch,
+    ) {
         Ok(resolved) => f(resolved),
         Err(e) => Err(e),
     };

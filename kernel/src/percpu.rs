@@ -46,7 +46,8 @@ pub struct PerCpuData {
     pub in_df_handler: AtomicBool,
     pub need_resched: AtomicBool,
     pub timer_armed: AtomicBool,
-    pub _pad1: [u8; 5],
+    pub timer_needs_rearm: AtomicBool,
+    pub _pad1: [u8; 4],
     /// Third 64-byte cache line (`128..192`): Local APIC timer IRQ, quantum & preemption state.
     pub timer_irqs: AtomicU64,
     pub preemptions: AtomicU64,
@@ -100,7 +101,8 @@ impl PerCpuData {
             in_df_handler: AtomicBool::new(false),
             need_resched: AtomicBool::new(false),
             timer_armed: AtomicBool::new(false),
-            _pad1: [0; 5],
+            timer_needs_rearm: AtomicBool::new(false),
+            _pad1: [0; 4],
             timer_irqs: AtomicU64::new(0),
             preemptions: AtomicU64::new(0),
             deferred_rescheds: AtomicU64::new(0),
@@ -172,6 +174,7 @@ pub fn init_cpu_percpu_and_gs(info: CpuRegionInfo) -> &'static PerCpuData {
         slot.in_df_handler.store(false, Ordering::Release);
         slot.need_resched.store(false, Ordering::Release);
         slot.timer_armed.store(false, Ordering::Release);
+        slot.timer_needs_rearm.store(false, Ordering::Release);
         slot.timer_irqs.store(0, Ordering::Release);
         slot.preemptions.store(0, Ordering::Release);
         slot.deferred_rescheds.store(0, Ordering::Release);

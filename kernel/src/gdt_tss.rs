@@ -271,6 +271,28 @@ pub fn set_cpu_tss_rsp0(cpu_idx: usize, rsp0: u64) {
         .store(rsp0, core::sync::atomic::Ordering::Relaxed);
 }
 
+#[cold]
+#[inline(never)]
+fn cpu_stack_canary_panic(cpu_idx: usize, kind: &'static str) -> ! {
+    panic!("CPU {} {} stack bottom canary corrupted", cpu_idx, kind);
+}
+
+/// Fast hot-path boot + `#DF` (`IST1`) stack bottom canary verification without `STR` VM-exit.
+#[inline]
+pub fn verify_cpu_stack_canaries_fast(cpu_idx: usize) {
+    let pcpu = crate::percpu::get_percpu_by_idx(cpu_idx);
+    let mask = cpu_idx as u64;
+    // SAFETY: `boot_stack_base` and `df_ist1_base` point to 8-byte bottom canaries in `.bss`.
+    unsafe {
+        if read_volatile(pcpu.boot_stack_base as *const u64) != (BOOT_CANARY_MAGIC ^ mask) {
+            cpu_stack_canary_panic(cpu_idx, "boot");
+        }
+        if read_volatile(pcpu.df_ist1_base as *const u64) != (DF_CANARY_MAGIC ^ mask) {
+            cpu_stack_canary_panic(cpu_idx, "DF IST1");
+        }
+    }
+}
+
 /// Lock-free `#DF` stack bottom canary check safe to invoke from inside `#DF` (`IST1`) handler.
 pub fn verify_df_canary_only(cpu_idx: usize) -> bool {
     if cpu_idx >= MAX_CPUS {

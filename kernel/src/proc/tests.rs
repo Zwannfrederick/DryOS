@@ -109,6 +109,8 @@ fn run_single_proc(
 }
 
 /// Deterministic kernel-panic negative fault tests invoked via `user_fault=...` cmdline.
+#[cold]
+#[inline(never)]
 pub fn run_user_cmdline_negative_test(fault: UserFaultCmdline, online_cpus: usize) -> ! {
     let u_lbl = SecLabel::new(SecDomain::Userspace, SecFlags::NONE, encode_compartment(1, 1), 1);
     match fault {

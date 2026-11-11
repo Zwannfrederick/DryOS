@@ -72,6 +72,15 @@ pub enum UserContextError {
     ForbiddenRflags,
 }
 
+// Hardware `SYSCALL` / `SYSRETQ` / `IRETQ` Entry Contract:
+// - `IA32_FMASK` (`FMASK_SYSCALL_CLEAR`) atomically clears `TF(8) | IF(9) | DF(10) | IOPL(12..13)
+//   | NT(14) | AC(18)` inside `SYSCALL` microcode (verified via readback in `init_syscall_msrs_on_current_cpu`),
+//   so `RFLAGS.IF == 0`, `RFLAGS.DF == 0` (no software `cld` needed), and `RFLAGS.AC == 0` (`SMAP` armed).
+// - `swapgs` runs with `IF = 0` and `#DF` bound exclusively to `IST1`; user `RSP` is staged in
+//   `gs:[200]` before loading `RSP = gs:[192]` (`kernel_rsp0`, 16-byte aligned).
+// - Pushing `18 * 8 = 144` bytes (`SyscallFrame`) preserves `(RSP0 - 144) % 16 == 0` prior to `call`.
+// - On `SYSRETQ` (`eax == 0`): `rbx, rbp, r12..r15` restored, `rdi, rsi, r8, r9, r10` scrubbed to `0`.
+// - On `IRETQ` (`eax != 0`): `rbx, rbp, r12..r15` restored, `rdi, rsi, rcx, r8, r9, r10, r11` scrubbed to `0`.
 global_asm!(
     ".global dry_syscall_entry",
     ".balign 16",
@@ -97,7 +106,6 @@ global_asm!(
     "    push r13",
     "    push r14",
     "    push r15",
-    "    cld",
     "    cmp byte ptr [rip + DRY_BENCH_STAMP_ENTRY], 0",
     "    je .Lsyscall_no_stamp",
     "    lfence",

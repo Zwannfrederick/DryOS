@@ -6,7 +6,7 @@
 //! without any global scheduler lock (`BKL`-free).
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::gdt_tss::MAX_CPUS;
 
@@ -55,7 +55,7 @@ impl StaticRunQueue {
     }
 
     pub fn push(&self, ticket: u32) -> bool {
-        assert_eq!(
+        debug_assert_eq!(
             crate::arch::read_rflags() & (1 << 9),
             0,
             "StaticRunQueue::push called with RFLAGS.IF=1 (IRQ-reentrancy hazard)"
@@ -92,7 +92,7 @@ impl StaticRunQueue {
     }
 
     pub fn pop(&self) -> Option<u32> {
-        assert_eq!(
+        debug_assert_eq!(
             crate::arch::read_rflags() & (1 << 9),
             0,
             "StaticRunQueue::pop called with RFLAGS.IF=1 (IRQ-reentrancy hazard)"
@@ -135,6 +135,7 @@ impl StaticRunQueue {
 
 #[repr(C, align(64))]
 pub struct PerCpuRunQueue {
+    active_mask: AtomicU8,
     rings: [StaticRunQueue; PRIO_LEVELS],
 }
 
@@ -143,11 +144,13 @@ impl PerCpuRunQueue {
         #[allow(clippy::declare_interior_mutable_const)]
         const EMPTY_RING: StaticRunQueue = StaticRunQueue::uninit();
         Self {
+            active_mask: AtomicU8::new(0),
             rings: [EMPTY_RING; PRIO_LEVELS],
         }
     }
 
     pub fn reset(&self) {
+        self.active_mask.store(0, Ordering::Release);
         for r in &self.rings {
             r.reset();
         }
@@ -155,28 +158,44 @@ impl PerCpuRunQueue {
 
     #[inline]
     pub fn push(&self, prio: usize, ticket: u32) -> bool {
-        self.rings[prio.min(PRIO_LEVELS - 1)].push(ticket)
+        let p = prio.min(PRIO_LEVELS - 1);
+        let ok = self.rings[p].push(ticket);
+        if ok {
+            self.active_mask.fetch_or(1u8 << p, Ordering::Release);
+        }
+        ok
+    }
+
+    #[inline]
+    fn pop_masked(&self, allowed: u8) -> Option<u32> {
+        let mut mask = self.active_mask.load(Ordering::Acquire) & allowed;
+        while mask != 0 {
+            let p = mask.trailing_zeros() as usize;
+            if let Some(t) = self.rings[p].pop() {
+                return Some(t);
+            }
+            let bit = 1u8 << p;
+            self.active_mask.fetch_and(!bit, Ordering::AcqRel);
+            if !self.rings[p].is_empty() {
+                self.active_mask.fetch_or(bit, Ordering::Release);
+                if let Some(t) = self.rings[p].pop() {
+                    return Some(t);
+                }
+            }
+            mask &= mask - 1;
+        }
+        None
     }
 
     #[inline]
     pub fn pop_highest(&self) -> Option<u32> {
-        for r in &self.rings {
-            if let Some(t) = r.pop() {
-                return Some(t);
-            }
-        }
-        None
+        self.pop_masked(0xff)
     }
 
     /// Steal highest-priority migratable ticket (`prio 1..PRIO_LEVELS`; `prio 0` is CPU-pinned).
     #[inline]
     pub fn steal_migratable(&self) -> Option<u32> {
-        for r in self.rings.iter().skip(1) {
-            if let Some(t) = r.pop() {
-                return Some(t);
-            }
-        }
-        None
+        self.pop_masked(0xfe)
     }
 
     pub fn is_all_empty(&self) -> bool {
@@ -197,11 +216,15 @@ pub fn pop_local_or_steal(local_cpu: usize, online_cpus: usize) -> Option<u32> {
     if let Some(ticket) = CPU_RUNQUEUES[local_cpu].pop_highest() {
         return Some(ticket);
     }
-    for offset in 1..online_cpus {
-        let victim = (local_cpu + offset) % online_cpus;
+    let mut victim = local_cpu + 1;
+    for _ in 1..online_cpus {
+        if victim >= online_cpus {
+            victim = 0;
+        }
         if let Some(ticket) = CPU_RUNQUEUES[victim].steal_migratable() {
             return Some(ticket);
         }
+        victim += 1;
     }
     None
 }

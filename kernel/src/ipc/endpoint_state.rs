@@ -38,6 +38,7 @@ pub(super) enum WaitPhase {
     Failed = 5,
 }
 
+#[repr(C, align(64))]
 pub(super) struct TcbIpcSlot {
     pub(super) wait_phase: WaitPhase,
     pub(super) is_call: bool,
@@ -325,7 +326,7 @@ pub(super) fn unlink_recv_q(
     slots[idx].next_waiter = NO_SLOT;
 }
 
-#[inline]
+#[inline(always)]
 pub fn is_endpoint_live(obj_id: u32, expected_gen: u32) -> bool {
     let idx = obj_id as usize;
     idx < MAX_ENDPOINTS
@@ -462,7 +463,9 @@ pub(super) fn wait_on_endpoint_slot(
                 .store(deadline, Ordering::Release);
         }
         let _ = ipc_park_current();
-        tcb(cur_slot).ipc_deadline_tsc.store(0, Ordering::Release);
+        if deadline != 0 {
+            tcb(cur_slot).ipc_deadline_tsc.store(0, Ordering::Release);
+        }
 
         let done = with_ep_lock(ep, |inner, slots| {
             try_resolve_ipc_wait(inner, slots, cur_slot, deadline)

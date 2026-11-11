@@ -29,8 +29,8 @@ use crate::sched::{
     note_current_thread_progress, notify_thread, preempt_count, preempt_disable, preempt_enable,
     prepare_park_current, set_ap_epoch_kind, set_nested_irq_fault_inject,
     set_preemptive_mode_active, start_cpu_timer_for_phase, stop_cpu_timer_for_phase, tcb,
-    try_spawn_kernel_thread_ex, wake_thread, yield_now, ApEpochKind, AP_PHASE_DONE_CPUS,
-    AP_PHASE_EPOCH, AP_SCHED_RELEASE, GLOBAL_CTX_SWITCHES, GLOBAL_DEFERRED_RESCHEDS,
+    total_ctx_switches, try_spawn_kernel_thread_ex, wake_thread, yield_now, ApEpochKind,
+    AP_PHASE_DONE_CPUS, AP_PHASE_EPOCH, AP_SCHED_RELEASE, GLOBAL_DEFERRED_RESCHEDS,
     GLOBAL_EXITED_THREADS, GLOBAL_MIGRATIONS, GLOBAL_PREEMPTIONS, GLOBAL_RECYCLED_SLOTS,
     GLOBAL_SPAWNED_THREADS, GLOBAL_TIMER_IRQS, PHASE_PENDING_THREADS,
 };
@@ -751,7 +751,7 @@ pub fn verify_preemptive_scheduler(
     let race_spawned = GLOBAL_SPAWNED_THREADS.load(Ordering::Acquire);
     let race_exited = GLOBAL_EXITED_THREADS.load(Ordering::Acquire);
     let race_recycled = GLOBAL_RECYCLED_SLOTS.load(Ordering::Acquire);
-    let race_switches = GLOBAL_CTX_SWITCHES.load(Ordering::Acquire);
+    let race_switches = total_ctx_switches();
     let race_migrations = GLOBAL_MIGRATIONS.load(Ordering::Acquire);
     let race_park_rounds = RACE_PARK_ROUNDS_DONE.load(Ordering::Acquire);
     let total_preemptions = spinner_preempts + GLOBAL_PREEMPTIONS.load(Ordering::Acquire) + deferred_after_g2;

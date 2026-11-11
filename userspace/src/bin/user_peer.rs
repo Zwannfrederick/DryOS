@@ -33,16 +33,20 @@ global_asm!(
     entry = sym user_peer_main,
 );
 
-/// Verify that `SYSCALL` return preserves all callee-saved GPRs and scrubs caller-saved GPRs to 0.
+/// Verify that `SYSCALL` return preserves all callee-saved GPRs (`rbx`, `rbp`, `r12..r15`), scrubs
+/// caller-saved GPRs to `0`, and clears hostile `RFLAGS.DF = 1` (`std`) via hardware `IA32_FMASK`.
 #[inline(never)]
 fn verify_syscall_register_hygiene() -> bool {
     let (r_rdi, r_rsi, r_r8, r_r9, r_r10): (u64, u64, u64, u64, u64);
-    let (c_rbx, c_r12, c_r13, c_r14, c_r15): (u64, u64, u64, u64, u64);
-    // SAFETY: Sets known sentinels across caller- and callee-saved GPRs across `SYS_ABI_PING`.
+    let (c_rbx, c_rbp, c_r12, c_r13, c_r14, c_r15): (u64, u64, u64, u64, u64, u64);
+    // SAFETY: Sets known sentinels across caller/callee-saved GPRs + `RFLAGS.DF=1` (`std`) across
+    // `SYS_ABI_PING`, then restores `rbx`, `rbp`, and `cld`.
     unsafe {
         asm!(
+            "push rbp",
             "push rbx",
             "mov rbx, 0x1111222233334444",
+            "mov rbp, 0x6666777788889999",
             "mov r12, 0x2222333344445555",
             "mov r13, 0x3333444455556666",
             "mov r14, 0x4444555566667777",
@@ -54,10 +58,15 @@ fn verify_syscall_register_hygiene() -> bool {
             "mov r10, 0xaaaa000000000004",
             "mov r8,  0xaaaa000000000005",
             "mov r9,  0xaaaa000000000006",
+            "std",
             "syscall",
+            "cld",
             "mov rax, rbx",
+            "mov rdx, rbp",
             "pop rbx",
+            "pop rbp",
             out("rax") c_rbx,
+            out("rdx") c_rbp,
             out("r12") c_r12,
             out("r13") c_r13,
             out("r14") c_r14,
@@ -67,12 +76,12 @@ fn verify_syscall_register_hygiene() -> bool {
             out("r8") r_r8,
             out("r9") r_r9,
             out("r10") r_r10,
-            out("rdx") _,
             out("rcx") _,
             out("r11") _,
         );
     }
     c_rbx == 0x1111_2222_3333_4444
+        && c_rbp == 0x6666_7777_8888_9999
         && c_r12 == 0x2222_3333_4444_5555
         && c_r13 == 0x3333_4444_5555_6666
         && c_r14 == 0x4444_5555_6666_7777
@@ -82,6 +91,35 @@ fn verify_syscall_register_hygiene() -> bool {
         && r_r8 == 0
         && r_r9 == 0
         && r_r10 == 0
+}
+
+/// Negative assembly transition test: invoke `SYS_CAP_QUERY` (`copy_to_user` `rep movsb`) with
+/// hostile `RFLAGS.DF = 1` (`std`) to prove `IA32_FMASK` clears `DF` before Ring 0 string copies.
+#[inline(never)]
+fn verify_syscall_hostile_df_uaccess(own_cap: u64) -> bool {
+    let mut info = UserCapInfo::default();
+    let out_ptr = (&raw mut info) as u64;
+    let rc: isize;
+    // SAFETY: `info` is valid writable 32-byte user stack memory; `cld` restored immediately after.
+    unsafe {
+        asm!(
+            "std",
+            "syscall",
+            "cld",
+            inlateout("rax") 5u64 => rc,
+            in("rdi") own_cap,
+            in("rsi") out_ptr,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("rcx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+        );
+    }
+    rc == 0 && info.obj_kind != 0 && info.rights_bits != 0
 }
 
 fn run_syscall_negative_suite(own_cap: u64, packed_addrs: u64) -> ! {
@@ -145,7 +183,7 @@ fn run_syscall_negative_suite(own_cap: u64, packed_addrs: u64) -> ! {
     if sys_cap_query(0x0008_dead_beef_00ff, &mut info) != EBADCAP {
         sys_exit(23);
     }
-    if own_cap != 0 && sys_cap_query(own_cap, &mut info) != 0 {
+    if own_cap != 0 && (sys_cap_query(own_cap, &mut info) != 0 || !verify_syscall_hostile_df_uaccess(own_cap)) {
         sys_exit(24);
     }
     sys_exit(0x5afe)

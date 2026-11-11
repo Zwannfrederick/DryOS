@@ -13,10 +13,9 @@ use crate::sched::state::{
 use crate::sched::{
     cancel_park_current, commit_park_current, current_cpu_idx, current_slot_on_cpu,
     current_thread_id, idle_dispatch_once, init_scheduler, notify_thread, prepare_park_current,
-    tcb, try_spawn_kernel_thread, verify_slot_canary, wake_thread, yield_now, AP_PHASE_DONE_CPUS,
-    AP_PHASE_EPOCH, AP_SCHED_RELEASE, GLOBAL_CTX_SWITCHES,
-    GLOBAL_EXITED_THREADS, GLOBAL_MIGRATIONS, GLOBAL_RECYCLED_SLOTS, GLOBAL_SPAWNED_THREADS,
-    PHASE_PENDING_THREADS, WORKER_POOL_CAP,
+    tcb, total_ctx_switches, try_spawn_kernel_thread, verify_slot_canary, wake_thread, yield_now,
+    AP_PHASE_DONE_CPUS, AP_PHASE_EPOCH, AP_SCHED_RELEASE, GLOBAL_EXITED_THREADS, GLOBAL_MIGRATIONS,
+    GLOBAL_RECYCLED_SLOTS, GLOBAL_SPAWNED_THREADS, PHASE_PENDING_THREADS, WORKER_POOL_CAP,
 };
 
 const YIELD_ITERS: u64 = 32;
@@ -393,7 +392,7 @@ pub fn verify_cooperative_scheduler(
     let spawned = GLOBAL_SPAWNED_THREADS.load(Ordering::Acquire);
     let exited = GLOBAL_EXITED_THREADS.load(Ordering::Acquire);
     let recycled_slots = GLOBAL_RECYCLED_SLOTS.load(Ordering::Acquire);
-    let ctx_switches = GLOBAL_CTX_SWITCHES.load(Ordering::Acquire);
+    let ctx_switches = total_ctx_switches();
     let migrations = GLOBAL_MIGRATIONS.load(Ordering::Acquire);
     let park_rounds = PARK_ROUNDS_DONE.load(Ordering::Acquire);
     let work_units = WORK_UNITS_DONE.load(Ordering::Acquire);
@@ -407,7 +406,7 @@ pub fn verify_cooperative_scheduler(
         assert!(sw > 0, "CPU {} performed 0 context switches during scheduler suite", cpu);
         percpu_sw_sum += sw;
     }
-    assert_eq!(percpu_sw_sum, ctx_switches, "Per-CPU ctx_switches sum != GLOBAL_CTX_SWITCHES");
+    assert_eq!(percpu_sw_sum, ctx_switches, "Per-CPU ctx_switches sum != total_ctx_switches()");
     if online_cpus >= 2 {
         assert!(migrations > 0, "Expected cross-CPU thread migrations on SMP");
     }

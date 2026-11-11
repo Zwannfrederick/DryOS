@@ -100,6 +100,9 @@ static FAULT_UNMAP_DONE: AtomicBool = AtomicBool::new(false);
 
 static STRESS_VS_HANDLES: BenchBuf<SMP_STRESS_VSPACES> =
     BenchBuf(UnsafeCell::new([0; SMP_STRESS_VSPACES]));
+static STRESS_ONLINE_CPUS: AtomicUsize = AtomicUsize::new(1);
+static STRESS_VS_RESIDENT: [AtomicUsize; SMP_STRESS_VSPACES] =
+    [const { AtomicUsize::new(0) }; SMP_STRESS_VSPACES];
 static STRESS_MAP_UNMAP_OPS: AtomicU64 = AtomicU64::new(0);
 static STRESS_PROTECT_OPS: AtomicU64 = AtomicU64::new(0);
 static STRESS_STALE_READS: AtomicU64 = AtomicU64::new(0);
@@ -599,12 +602,22 @@ fn smp_vspace_stress_worker(worker_idx: u64) {
     let vs = unpack_vs(unsafe { (*STRESS_VS_HANDLES.0.get())[vs_slot] });
     let lbl = SecLabel::new(SecDomain::Userspace, SecFlags::NONE, 500 + (vs_slot as u16), 1);
     let my_vaddr = 0x00c0_0000 + (worker_idx * PAGE_SIZE_4K);
+    let online = STRESS_ONLINE_CPUS.load(Ordering::Relaxed);
 
     for r in 0..SMP_STRESS_ROUNDS {
         assert_eq!(cpu_active_vspace(current_cpu_idx()), vs.id);
         let f = alloc_pages(PageOrder::Order4KiB, lbl, AllocFlags::ZERO).unwrap();
         let expected = 0x55aa_0000_0000_0000u64 ^ ((worker_idx + 1) << 32) ^ (r as u64 + 1);
         map_4k(vs, my_vaddr, f, VmProt::USER_RW).unwrap();
+        if online >= 2 {
+            STRESS_VS_RESIDENT[vs_slot].fetch_add(1, Ordering::AcqRel);
+            let t0 = rdtsc();
+            while STRESS_VS_RESIDENT[vs_slot].load(Ordering::Acquire) < 2
+                && rdtsc().wrapping_sub(t0) < 25_000
+            {
+                core::hint::spin_loop();
+            }
+        }
         // SAFETY: `my_vaddr` is private to `worker_idx` inside `vs` and mapped `USER_RW`.
         unsafe {
             write_volatile(my_vaddr as *mut u64, expected);
@@ -613,6 +626,9 @@ fn smp_vspace_stress_worker(worker_idx: u64) {
             if got != expected {
                 STRESS_STALE_READS.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        if online >= 2 {
+            STRESS_VS_RESIDENT[vs_slot].fetch_sub(1, Ordering::AcqRel);
         }
         yield_now();
         assert_eq!(cpu_active_vspace(current_cpu_idx()), vs.id);
@@ -643,6 +659,10 @@ fn run_smp_concurrent_vspace_stress(online_cpus: usize) {
         unsafe { (*STRESS_VS_HANDLES.0.get())[i] = pack_vs(*slot) };
     }
 
+    STRESS_ONLINE_CPUS.store(online_cpus, Ordering::Release);
+    for slot in &STRESS_VS_RESIDENT {
+        slot.store(0, Ordering::Release);
+    }
     STRESS_MAP_UNMAP_OPS.store(0, Ordering::Release);
     STRESS_PROTECT_OPS.store(0, Ordering::Release);
     STRESS_STALE_READS.store(0, Ordering::Release);
@@ -652,7 +672,6 @@ fn run_smp_concurrent_vspace_stress(online_cpus: usize) {
     let workers = (online_cpus * 2).clamp(8, 24);
     set_preemptive_mode_active(true);
     init_scheduler(online_cpus);
-    begin_preemptive_epoch(0xe0, workers);
     for w in 0..workers {
         let vs = handles[(w / 2) % SMP_STRESS_VSPACES];
         assert!(
@@ -660,6 +679,7 @@ fn run_smp_concurrent_vspace_stress(online_cpus: usize) {
                 .is_some()
         );
     }
+    begin_preemptive_epoch(0xe0, workers);
     drain_preemptive_epoch_and_audit(online_cpus);
     set_preemptive_mode_active(false);
 

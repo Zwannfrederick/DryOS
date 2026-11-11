@@ -390,6 +390,14 @@ pub fn arm_default_oneshot_tick() {
     arm_cpu_oneshot_tick(ACTIVE_TICK_INIT.load(Ordering::Relaxed));
 }
 
+/// Fast single-register One-Shot re-arm (`TIMER_INIT` only) when `TIMER_DIV` (`16`) and unmasked
+/// `LVT_TIMER` (`VEC_LAPIC_TIMER`) are already configured on the calling CPU (`Intel SDM Vol. 3A §10.5.4`).
+#[inline]
+pub fn rearm_oneshot_tick_count_only() {
+    let init_count = ACTIVE_TICK_INIT.load(Ordering::Relaxed).max(1);
+    apic_write(MSR_X2APIC_TIMER_INIT, MMIO_TIMER_INIT, init_count);
+}
+
 #[inline]
 pub fn set_active_tick_init_override(init_count: u32) {
     ACTIVE_TICK_INIT.store(init_count.max(1), Ordering::Release);

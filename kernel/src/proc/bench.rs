@@ -314,6 +314,7 @@ fn spawn_raw_bench_user_thread(
 }
 
 /// Execute all 11 `Stage G` benchmarks and emit `[DRY-USER-BENCH] PASS: ...`.
+#[inline(never)]
 pub fn run_stage_g_benchmarks(
     hello_elf: &[u8],
     peer_elf: &[u8],

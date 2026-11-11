@@ -88,7 +88,7 @@ fn with_notif_lock<R>(n: &NotifSlot, f: impl FnOnce() -> R) -> R {
     out
 }
 
-#[inline]
+#[inline(always)]
 pub fn is_notif_live(obj_id: u32, expected_gen: u32) -> bool {
     let idx = obj_id as usize;
     idx < MAX_NOTIFICATIONS

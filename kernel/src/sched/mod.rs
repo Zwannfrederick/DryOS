@@ -36,7 +36,7 @@ use crate::arch::{
     cli, irq_restore, irq_save_cli, read_rsp, sti, wrmsr, MSR_IA32_FS_BASE,
     MSR_IA32_KERNEL_GS_BASE,
 };
-use crate::gdt_tss::{set_cpu_tss_rsp0, verify_cpu_tss_and_canaries, MAX_CPUS};
+use crate::gdt_tss::{set_cpu_tss_rsp0, verify_cpu_stack_canaries_fast, MAX_CPUS};
 use crate::percpu::{current_percpu, get_percpu_by_idx, read_gs_u64_at_8};
 use crate::sched::context::{
     dry_switch_to, init_new_thread_stack, KernelThreadFn, PostSwitchKind,
@@ -150,12 +150,21 @@ pub(crate) static ONLINE_SCHED_CPUS: AtomicUsize = AtomicUsize::new(1);
 pub static GLOBAL_SPAWNED_THREADS: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_EXITED_THREADS: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_RECYCLED_SLOTS: AtomicU64 = AtomicU64::new(0);
-pub static GLOBAL_CTX_SWITCHES: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_MIGRATIONS: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_TIMER_IRQS: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_DEFERRED_RESCHEDS: AtomicU64 = AtomicU64::new(0);
 pub static PHASE_PENDING_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Sum CPU-local `ctx_switches` across all active CPUs (`0` global cacheline bouncing on switch).
+pub fn total_ctx_switches() -> u64 {
+    let online = ONLINE_SCHED_CPUS.load(Ordering::Acquire);
+    let mut sum = 0u64;
+    for cpu in 0..online {
+        sum = sum.wrapping_add(get_percpu_by_idx(cpu).ctx_switches.load(Ordering::Acquire));
+    }
+    sum
+}
 
 pub static AP_SCHED_RELEASE: AtomicBool = AtomicBool::new(false);
 static AP_SCHED_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -201,21 +210,28 @@ fn worker_canary_value(slot: usize, gen26: u32) -> u64 {
     WORKER_CANARY_MAGIC ^ ((slot as u64) << 32) ^ (gen26 as u64)
 }
 
+#[cold]
+#[inline(never)]
+fn worker_canary_panic(slot: usize, gen26: u32) -> ! {
+    sched_invariant_panic(format_args!(
+        "Worker stack canary corrupted on slot={} gen={}",
+        slot, gen26
+    ))
+}
+
+#[inline]
 pub fn verify_slot_canary(slot: usize) {
     if slot < MAX_CPUS {
-        verify_cpu_tss_and_canaries(slot);
+        verify_cpu_stack_canaries_fast(slot);
     } else {
-        let base = tcb(slot).stack_base.load(Ordering::Acquire);
-        let (_, _, gen26) = tcb(slot).sched.snapshot();
+        let w = tcb(slot);
+        let base = w.stack_base.load(Ordering::Acquire);
+        let (_, _, gen26) = w.sched.snapshot();
         // SAFETY: Bottom 8 bytes of `'static` worker stack hold the generation-tagged canary.
         let val = unsafe { read_volatile(base as *const u64) };
-        assert_eq!(
-            val,
-            worker_canary_value(slot, gen26),
-            "Worker stack canary corrupted on slot={} gen={}",
-            slot,
-            gen26
-        );
+        if val != worker_canary_value(slot, gen26) {
+            worker_canary_panic(slot, gen26);
+        }
     }
 }
 
@@ -225,7 +241,6 @@ pub fn init_scheduler(online_cpus: usize) {
     GLOBAL_SPAWNED_THREADS.store(0, Ordering::Release);
     GLOBAL_EXITED_THREADS.store(0, Ordering::Release);
     GLOBAL_RECYCLED_SLOTS.store(0, Ordering::Release);
-    GLOBAL_CTX_SWITCHES.store(0, Ordering::Release);
     GLOBAL_MIGRATIONS.store(0, Ordering::Release);
     GLOBAL_PREEMPTIONS.store(0, Ordering::Release);
     GLOBAL_DEFERRED_RESCHEDS.store(0, Ordering::Release);
@@ -241,6 +256,7 @@ pub fn init_scheduler(online_cpus: usize) {
         pcpu.preempt_count.store(0, Ordering::Release);
         pcpu.irq_depth.store(0, Ordering::Release);
         pcpu.need_resched.store(false, Ordering::Release);
+        pcpu.timer_needs_rearm.store(false, Ordering::Release);
 
         let idle = tcb(cpu);
         idle.stack_base.store(pcpu.boot_stack_base, Ordering::Release);
@@ -468,6 +484,22 @@ pub(crate) fn switch_to_slot(
     }
 }
 
+#[cold]
+#[inline(never)]
+fn post_switch_bounds_panic(
+    kind: &'static str,
+    rsp: u64,
+    slot: usize,
+    base: u64,
+    top: u64,
+    cpu_idx: usize,
+) -> ! {
+    sched_invariant_panic(format_args!(
+        "H1 Bug1 RSP {:#x} {} slot={} stack [{:#x}, {:#x}] on cpu={}",
+        rsp, kind, slot, base, top, cpu_idx
+    ))
+}
+
 /// Invoked from `dry_switch_to` assembly immediately AFTER `mov rsp, rsi` switched onto `next`'s
 /// stack while `RFLAGS.IF == 0` (`CLI`) is unconditionally held.
 pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwitchKind) {
@@ -476,32 +508,28 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
     let cur_slot = pcpu.current_slot.load(Ordering::Relaxed) as usize;
     let rsp = read_rsp();
 
-    let cur_base = tcb(cur_slot).stack_base.load(Ordering::Relaxed);
-    let cur_top = tcb(cur_slot).stack_top.load(Ordering::Relaxed);
+    let cur_tcb = tcb(cur_slot);
+    let cur_base = cur_tcb.stack_base.load(Ordering::Relaxed);
+    let cur_top = cur_tcb.stack_top.load(Ordering::Relaxed);
     if rsp <= cur_base || rsp > cur_top {
-        sched_invariant_panic(format_args!(
-            "H1 Bug1 RSP {:#x} outside active slot={} stack [{:#x}, {:#x}] on cpu={}",
-            rsp, cur_slot, cur_base, cur_top, cpu_idx
-        ));
+        post_switch_bounds_panic("outside active", rsp, cur_slot, cur_base, cur_top, cpu_idx);
     }
 
-    let prev_base = tcb(prev_slot).stack_base.load(Ordering::Relaxed);
-    let prev_top = tcb(prev_slot).stack_top.load(Ordering::Relaxed);
+    let prev = tcb(prev_slot);
+    let prev_base = prev.stack_base.load(Ordering::Relaxed);
+    let prev_top = prev.stack_top.load(Ordering::Relaxed);
     if rsp > prev_base && rsp <= prev_top {
-        sched_invariant_panic(format_args!(
-            "H1 Bug1 RSP {:#x} still inside outgoing slot={} stack [{:#x}, {:#x}]",
-            rsp, prev_slot, prev_base, prev_top
-        ));
+        post_switch_bounds_panic("still inside outgoing", rsp, prev_slot, prev_base, prev_top, cpu_idx);
     }
 
     verify_slot_canary(prev_slot);
-    pcpu.ctx_switches.fetch_add(1, Ordering::Relaxed);
-    GLOBAL_CTX_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    // CPU-local store under `CLI` (`0` `LOCK` prefix, `0` cross-CPU `GLOBAL_CTX_SWITCHES` bouncing).
+    let next_sw = pcpu.ctx_switches.load(Ordering::Relaxed).wrapping_add(1);
+    pcpu.ctx_switches.store(next_sw, Ordering::Release);
 
     // Switch hardware `CR3` (if `next`'s `vspace_id` differs from CPU's active `VSpace`) *before*
     // reaping `prev_slot` or decrementing `PHASE_PENDING_THREADS`, so exiting user-VSpace workers
     // always vacate `VSpace.active_cpus` prior to epoch completion.
-    let cur_tcb = tcb(cur_slot);
     let next_vs = cur_tcb.vspace_id.load(Ordering::Acquire);
     switch_cpu_vspace_if_needed(cpu_idx, next_vs);
 
@@ -520,7 +548,6 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
         pcpu.cur_user_gs_base.store(next_ugs, Ordering::Relaxed);
     }
 
-    let prev = tcb(prev_slot);
     match post_kind {
         PostSwitchKind::FromIdle => {
             prev.sched.release_stack(prev_slot, cpu_idx);
@@ -554,15 +581,19 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
         }
     }
 
-    // Zero-instruction IRQ livelock guard (`HANDOVER.md` Rule 3): reset quantum and re-arm the
-    // One-Shot Local APIC timer right before `popfq`/`iretq` grants `next` the CPU.
+    // Zero-instruction IRQ livelock guard (`HANDOVER.md` Rule 3): reset quantum/storm tracking on
+    // `next`, and issue a single `INIT_COUNT` `wrmsr` ONLY if the previous Local APIC One-Shot tick
+    // actually fired (`timer_needs_rearm == true`), avoiding 3 `wrmsr` VM-exits on voluntary/IPC switches.
     if pcpu.timer_armed.load(Ordering::Relaxed) {
         pcpu.quantum_rem.store(QUANTUM_TICKS, Ordering::Relaxed);
         pcpu.storm_slot.store(cur_slot as u64, Ordering::Relaxed);
         pcpu.last_progress_seq
-            .store(tcb(cur_slot).progress_seq.load(Ordering::Relaxed), Ordering::Relaxed);
+            .store(cur_tcb.progress_seq.load(Ordering::Relaxed), Ordering::Relaxed);
         pcpu.storm_streak.store(0, Ordering::Relaxed);
-        crate::apic::arm_default_oneshot_tick();
+        if pcpu.timer_needs_rearm.load(Ordering::Relaxed) {
+            pcpu.timer_needs_rearm.store(false, Ordering::Relaxed);
+            crate::apic::rearm_oneshot_tick_count_only();
+        }
     }
 }
 
@@ -620,7 +651,8 @@ pub fn yield_now() {
     assert!(cur_slot >= MAX_CPUS, "yield_now called from idle context");
     tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
-    let target_cpu = (cpu_idx + 1) % online;
+    let next_cpu = cpu_idx + 1;
+    let target_cpu = if next_cpu >= online { 0 } else { next_cpu };
 
     tcb(cur_slot).sched.begin_yield(cur_slot, cpu_idx);
     let next_slot = select_next_slot_for_worker(cpu_idx, online);
@@ -657,7 +689,8 @@ pub fn commit_park_current() -> CommitParkOutcome {
     let outcome = tcb(cur_slot).sched.commit_park(cur_slot, cpu_idx);
     if outcome == CommitParkOutcome::SwitchToPark {
         let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
-        let target_cpu = (cpu_idx + 1) % online;
+        let next_cpu = cpu_idx + 1;
+        let target_cpu = if next_cpu >= online { 0 } else { next_cpu };
         let next_slot = select_next_slot_for_worker(cpu_idx, online);
         switch_to_slot(cpu_idx, cur_slot, next_slot, PostSwitchKind::Park { target_cpu });
         let resumed_cpu = current_cpu_idx();
@@ -715,7 +748,11 @@ pub fn wake_thread(target: ThreadId, preferred_cpu: usize) -> WakeOutcome {
     let outcome = w.sched.wakeup(target.gen26());
     if outcome == WakeOutcome::WokeBlocked {
         let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
-        let dst_cpu = preferred_cpu % online;
+        let dst_cpu = if preferred_cpu < online {
+            preferred_cpu
+        } else {
+            preferred_cpu % online
+        };
         let prio = w.prio.load(Ordering::Relaxed);
         w.sched.finish_waking_and_push(slot, prio, cpu_rq(dst_cpu));
     }

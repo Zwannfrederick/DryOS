@@ -139,6 +139,7 @@ pub struct SpawnedProcessInfo {
     pub tcb_cap: CapPtr,
 }
 
+#[repr(C, align(64))]
 pub(crate) struct ProcessSlot {
     pub(crate) state: AtomicU8,
     trace_lifecycle: AtomicBool,
@@ -593,6 +594,22 @@ pub fn on_user_tcb_quiescent_dead(pid: u32) {
     }
 }
 
+/// Fast `CLI`-held liveness & kill gate for stateless register-only syscalls (`SYS_ABI_PING`,
+/// `SYS_GET_TID`) that touch zero `CSpace`/`VSpace`/`Endpoint` state (`0` `LOCK` RMWs).
+#[inline]
+pub fn check_process_alive_fast_under_cli(pid: u32) {
+    let Some(slot) = slot_ref(pid) else {
+        exit_current_thread();
+    };
+    if slot.kill_requested.load(Ordering::Acquire)
+        || slot.state.load(Ordering::Acquire) != (ProcessState::Running as u8)
+    {
+        exit_current_thread();
+    }
+    let next = slot.syscall_entries.load(Ordering::Relaxed).wrapping_add(1);
+    slot.syscall_entries.store(next, Ordering::Release);
+}
+
 /// Pin `in_flight_syscalls` upon entering `rust_syscall_dispatch` (`CLI` held); if `pid` was killed,
 /// drop the pin and exit immediately without executing the syscall.
 pub fn enter_process_syscall_or_terminate(pid: u32) -> bool {
@@ -606,7 +623,8 @@ pub fn enter_process_syscall_or_terminate(pid: u32) -> bool {
         slot.in_flight_syscalls.fetch_sub(1, Ordering::SeqCst);
         exit_current_thread();
     }
-    slot.syscall_entries.fetch_add(1, Ordering::Relaxed);
+    let next = slot.syscall_entries.load(Ordering::Relaxed).wrapping_add(1);
+    slot.syscall_entries.store(next, Ordering::Release);
     slot.trace_lifecycle.load(Ordering::Relaxed)
 }
 
