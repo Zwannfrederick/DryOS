@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (20:20 +03:00)
-- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi, Faz 1 `Milestone 1A` (`Adım A..G`, commit `fad423b`), `Milestone 1B-A` (`PMM` & `Untyped`, commit `78ac64b`), `Milestone 1B-B` (`VSpace`, `2 MiB` huge-page, `CR3` switching & SMP TLB shootdown, commit `6445641`), `Milestone 1B-C` (`CSpace`/`CNode`, geçişli CDT `revoke`, `ADR-007` zorlaması & `TLB` borç analizi, commit `b4ca6f8`) ve Faz 1 `Milestone 1B-D` (Gerçek `CPL=3` Ring 3 süreçleri, ayrı derlenen statik ELF64 kullanıcı programları, `DRY Native Syscall ABI v0.1`, donanım `CR4.SMAP` + `extable` `uaccess`, istisna izolasyonu, sıralı/idempotent geri kazanım ve `1/2/4/8/20`-vCPU performans ölçümleri, **`50/50` otomatik QEMU/KVM testi**) eksiksiz tamamlandı ve makine tarafından doğrulandı.** **`Milestone 1C` (Senkron `Endpoint` IPC, `Notification` kapı zili, Priority Donation ve ilk Ring 3 sistem servisi)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
+- **Son Güncelleme:** 11 Kasım 2026 (21:52 +03:00)
+- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1'in tüm kilometre taşları — `Milestone 1A` (`fad423b`), `Milestone 1B-A` (`78ac64b`), `Milestone 1B-B` (`6445641`), `Milestone 1B-C` (`b4ca6f8`), `Milestone 1B-D` (`29002d3`) ve `Milestone 1C` (Capability `Endpoint`/`Notification` IPC, 4-sıçramalı Öncelik Bağışı, `CPL=3` `dry-init` kök süpervizörü + izole `dry-echo` servisi + çökme/yeniden başlatma yaşam döngüsü, yetenek-kapılı Ring 3 UEFI GOP grafik ekranı `dry-display` ve **`56/56` otomatik QEMU/KVM testi**) — eksiksiz tamamlandı ve makine tarafından doğrulandı.**
 
 ---
 
@@ -125,5 +125,12 @@
   - Süreçler arası senkron `Endpoint` IPC mesaj/capability aktarımı, `Notification` kapı zili, `FaultEndpoint` userspace pager yönlendirmesi ve Öncelik Bağışı (*Priority Donation*) `Milestone 1C` kapsamındadır.
   - FPU/SIMD (`SSE`/`AVX` `XSAVE`/`XRSTOR`) bağlam izolasyonu, `PCID`/`INVPCID` ASID önbelleklemesi, dinamik ELF (`ET_DYN`/`PT_INTERP`), POSIX/Linux kişilik katmanı ve izole Ring 3 `DRY Vault` / `VFS` / sürücü süreçleri henüz uygulanmamıştır.
 
-### Sıradaki Adım (Kullanıcı Değerlendirmesi Sonrası)
-- **`Milestone 1C`:** Kontrol düzlemi senkron `Endpoint` IPC (`dry_ipc_call` / `dry_ipc_reply_recv` 4 mesaj yazmacı + atomik `CapPtr` devri + Öncelik Bağışı), `Notification` asenkron sinyal ilkeli ve Ring 3 süreçleri arası gerçek yetenek tabanlı mesajlaşma doğrulaması.
+### Tamamlanan `Milestone 1C` — Capability IPC, `CPL=3` Kök Servisler ve İlk Ring 3 Grafik Ekranı `[TAMAMLANDI — 11 Kasım 2026]`
+- **Üretilen / Güncellenen Dosyalar:** `kernel/src/{display.rs,limine.rs,main.rs,security.rs,uaccess.rs}`, `kernel/src/ipc/{mod.rs,endpoint_state.rs,endpoint.rs,notif.rs,tests.rs,bench.rs}`, `kernel/src/sched/{donate.rs,runqueue.rs,mod.rs,preempt.rs}`, `kernel/src/proc/{mod.rs,supervisor.rs}`, `kernel/src/cspace/{cap.rs,mod.rs,revoke.rs}`, `kernel/src/vspace/{pte.rs,mod.rs,huge.rs}`, `kernel/src/syscall/mod.rs`, `userspace/{Cargo.toml,src/lib.rs,src/bin/dry_init.rs,src/bin/dry_echo.rs,src/bin/dry_display.rs}`, `tools/{qemu_boot_test.py,qemu_ipc_validators.py}`.
+- **Doğrulanan Garantiler ve Ölçümler:**
+  - **Capability IPC & Öncelik Bağışı:** `Endpoint` (`send`, `recv`, `call`, `reply`, `reply_recv`) + `Notification` (`signal`, `wait`), `R12..R15` kopyasız 4 mesaj yazmacı + `<= 256 B` tampon + `SharedPayloadDesc`, tek-atımlık `ReplyToken`, geçişli `cspace_transfer` + CDT `revoke` (`-EREVOKED`), `-EIRQCTX` kesme bağlamı kalkanı ve 4-sıçramalı Öncelik Bağışı (`prio_donate p50 = 177..201 cyc`, döngü yakalama `-EDEADLK`).
+  - **Gerçek `CPL=3` Servis Mimarisi & Görsel Kanıt:** `dry-init.elf` (`RootSystem`) açık `BootModule` yetkileriyle izole `dry-echo.elf` (`Userspace`) servisini başlattı, `ping -> pong` turunu ve `#UD` çöküş sonrası yeniden başlatmayı doğruladı (`leaked_frames = 0`). `dry-display.elf` `CapObjectKind::Framebuffer` üzerinden `1280x800x32` UEFI GOP ekranına ilk DRY OS arayüzünü çizdi (canlı QMP `screendump`: `non_bg_px = 281.600`, `colors = 7`; `-vga none` başsız geri-düşüş doğrulandı).
+  - **`56/56` Otomatik QEMU/KVM Paketi:** Korunan `50` regresyon testi + `2` ekran/başsız senaryosu + `4` negatif `ipc_fault=*` senaryosu `0` Clippy uyarısı ve `leaked_frames = 0` ile geçti.
+
+### Sıradaki Adım
+- **Low-Level Optimization Pass v1 & Faz 2 Hazırlığı:** Mevcut `56/56` garantiyi koruyarak en yüksek değerli sıcak yolların `objdump` ve `1/2/4/8/20`-vCPU A/B ölçümleriyle sadeleştirilmesi; ardından Faz 2 (`IoRing` paylaşımlı bellek veri düzlemi, `FaultEndpoint` userspace pager, Ring 3 `VFS`/`DRY Vault` ve native `VirtIO` sürücüleri).

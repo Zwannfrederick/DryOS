@@ -35,11 +35,20 @@ static UACCESS_FIXUP_HITS: AtomicU64 = AtomicU64::new(0);
 pub enum SysError {
     Perm = -1,
     BadCap = -9,
+    NoChild = -10,
+    WouldBlock = -11,
+    NoMem = -12,
     Fault = -14,
     Busy = -16,
     Inval = -22,
+    Pipe = -32,
+    Deadlock = -35,
     NoSys = -38,
+    MsgSize = -90,
+    IrqForbidden = -95,
     Revoked = -110,
+    TimedOut = -116,
+    Canceled = -125,
 }
 
 impl SysError {

@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
 > **Durum Tarihi:** 11 Kasım 2026  
-> **Aşama:** Faz 1 Aktif Geliştirme (`Milestone 1A` & `Milestone 1B-A..1B-D` Tamamlandı; `50/50` QEMU/KVM Doğrulaması Yeşil; `ADR-001` .. `ADR-007` Yürürlükte)  
+> **Aşama:** Faz 1 Tamamlandı (`Milestone 1A`, `Milestone 1B-A..1B-D` & `Milestone 1C` Tamamlandı; `56/56` QEMU/KVM Doğrulaması + İlk Ring 3 Grafik Ekranı Yeşil; `ADR-001` .. `ADR-007` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya yerel sistem denetimiyle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak Faz 0 deneyleriyle yanlışlanmaya açık tasarım iddiası.  
@@ -100,7 +100,19 @@
   - Sıralı ve idempotent geri kazanım: `in_flight_syscalls == 0` (`SeqCst`) -> `TCB` `Dead && stack_owner == NO_CPU` (`release_dead_tcb_slot`) -> `VSpace.active_cpus == 0` -> `Frame4K` / `CapMapRecord` temizliği -> `destroy_cspace` -> `ProcessState::Reclaimed` (`leaked_frames = 0`).
 - **Uygulanan `DRY Native Syscall ABI v0.1` (`ABI_VERSION = 0x0001_0000`, `kernel/src/syscall/`):**
   - Giriş: `RAX = num`, `RDI, RSI, RDX, R10, R8, R9 = arg0..arg5`; Dönüş: `RAX` (birincil veya negatif `SysError`), `RDX` (ikincil); `RBX, RBP, R12..R15` korunur, `RDI, RSI, R8, R9, R10` çekirdek sızıntısını önlemek için `0`'lanır. Kanonik hızlı yol `SYSRETQ` (`p50 = 320 cyc`), kanonik olmayan/özel dönüş çerçevesi `IRETQ` yedek yolunu (`p50 = 617 cyc`) kullanır.
-  - Başlangıç v0.1 çağrı tablosu: `0 = SYS_ABI_PING`, `1 = SYS_WRITE_DEBUG` (yalnızca seri konsol tanılama, <= 256 B), `2 = SYS_YIELD`, `3 = SYS_EXIT`, `4 = SYS_GET_TID`, `5 = SYS_CAP_QUERY` (`CSpace` + `SecLabel` + `lease_epoch` doğrulamalı). Tam `Endpoint` IPC (`Milestone 1C`) ve FPU/SIMD `XSAVE` izolasyonu sonraki aşamadadır.
+  - Başlangıç v0.1 çağrı tablosu: `0 = SYS_ABI_PING`, `1 = SYS_WRITE_DEBUG` (yalnızca seri konsol tanılama, <= 256 B), `2 = SYS_YIELD`, `3 = SYS_EXIT`, `4 = SYS_GET_TID`, `5 = SYS_CAP_QUERY` (`CSpace` + `SecLabel` + `lease_epoch` doğrulamalı), ve `Milestone 1C` ile eklenen `6..19` IPC, süreç yönetimi ve GOP çerçeve tamponu çağrıları. FPU/SIMD `XSAVE` izolasyonu sonraki aşamadadır.
+
+### 2.4. `Milestone 1C` Yetenek Tabanlı IPC, Kök Servis Süpervizörü ve Ring 3 GOP Çerçeve Tamponu (`[DOĞRULANDI — 56/56 QEMU/KVM]`)
+
+- **Çift İlkelli İletişim (`kernel/src/ipc/`):**
+  - **Senkron `Endpoint` (`endpoint_state.rs`, `endpoint.rs`):** `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)` ve tek sistem çağrılı sunucu hızlı yolu `SYS_IPC_REPLY_RECV (11)`. `MsgTag` (`RAX/RSI`) + `R12..R15` (`mr0..mr3` = 32 B kopyasız yazmaç aktarımı), opsiyonel `<= 256 B` kullanıcı dilimi ve geleceğe uyumlu sıfır-kopya `SharedPayloadDesc` desteklenir.
+  - **Tek-Kazananlı (`Single-Winner`) Uyandırma ve Tek-Atımlık `ReplyToken`:** Her bekleyen iş parçacığı uç nokta kilidi altında `Waiting* -> Delivered | Failed(err)` geçişini en fazla bir kez yapar (`0` kayıp mesaj, `0` çift uyandırma). `Endpoint::call` çağrısı `(ep_idx, caller_slot, caller_gen26, call_seq)` bağlı tek kullanımlık `ReplyToken` üretir; çift yanıt, token tekrarı veya istemci zaman aşımı/çıkışı `-EBADCAP`/`-EPIPE` döner. `irq_depth > 0 || preempt_count > 0` iken bloklanan IPC `-EIRQCTX (-95)` ile reddedilir.
+  - **Asenkron `Notification` (`notif.rs`):** `SYS_NOTIF_CREATE (12)`, bloklanmayan `SYS_NOTIF_SIGNAL (13)` (`fetch_or` + `fence(SeqCst)`) ve `SYS_NOTIF_WAIT (14)`.
+  - **Sınırlı 4-Sıçramalı Öncelik Bağışı (`sched/donate.rs`):** Senkron `call` sırasında `caller.effective_prio < server.prio` ise en fazla `MAX_DONATION_DEPTH = 4` sıçrama boyunca öncelik yükseltilir; döngüsel çağrı zinciri (`A -> ... -> A`) `-EDEADLK (-35)` ile yakalanır ve `reply`/zaman aşımı/`revoke`/çıkış anında taban önceliğe geri dönülür.
+- **Kök Kullanıcı Alanı Süpervizörü ve İzole Servis Yaşam Döngüsü (`userspace/src/bin/{dry_init,dry_echo}.rs`, `proc/supervisor.rs`):**
+  - Çekirdek içinde gömülü servis yöneticisi yoktur. `dry-init.elf` (`SecDomain::RootSystem`), Limine modüllerine ait açık `CapObjectKind::BootModule` yetkileriyle başlatılır; `SYS_PROC_SPAWN (17)` ile ayrı `VSpace` + `CSpace` ve daraltılmış `SecDomain::Userspace` kompartmanında `dry-echo.elf` servisini başlatır, yalnızca türetilmiş `Endpoint` yetkisini devreder, `ping -> pong` RPC turunu doğrular, `ud2` (`#UD`) çöküşünü `SYS_PROC_WAIT (18)` ve `-EPIPE` ile algılayıp kaynakları geri kazanarak (`leaked_frames = 0`) servisi yeniden başlatır.
+- **Yetenek-Kapılı Ring 3 UEFI GOP Grafik Ekranı (`display.rs`, `dry_display.rs`):**
+  - Limine GOP doğrusal çerçeve tamponu (`1280x800x32`, `pitch=5120`, `FrameState::ReservedOrMmio` doğrulaması ve `pitch * height` taşma kontrolü) Ring 0 HHDM dışında tutulur; yalnızca `CapObjectKind::Framebuffer` yetkisi ve `SYS_FB_MAP (19)` üzerinden `PTE_USER | PTE_WRITABLE | PTE_PWT | PTE_PCD | PTE_NX | PTE_SW_MMIO` bayraklarıyla `dry-display.elf` kullanıcı adres alanına eşlenir, `revoke` veya çıkışta SMP TLB shootdown ile tamamen sökülür ve `-vga none` başsız (*headless*) kipte sistem hatasız devam eder.
 
 ---
 

@@ -206,6 +206,46 @@ pub struct LimineModuleRequest {
     pub internal_modules: *const *const u8,
 }
 
+pub const LIMINE_FRAMEBUFFER_RGB: u8 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineFramebuffer {
+    pub address: *mut u8,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
+    pub memory_model: u8,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+    pub unused: [u8; 7],
+    pub edid_size: u64,
+    pub edid: *const u8,
+    pub mode_count: u64,
+    pub modes: *const *const u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineFramebufferResponse {
+    pub revision: u64,
+    pub framebuffer_count: u64,
+    pub framebuffers: *const *const LimineFramebuffer,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineFramebufferRequest {
+    pub id: [u64; 4],
+    pub revision: u64,
+    pub response: *const LimineFramebufferResponse,
+}
+
 #[used]
 #[link_section = ".limine_requests_start"]
 pub static REQUESTS_START_MARKER: [u64; 4] = [
@@ -294,6 +334,21 @@ pub static MODULE_REQ: BootSlot<LimineModuleRequest> = BootSlot(UnsafeCell::new(
     internal_module_count: 0,
     internal_modules: core::ptr::null(),
 }));
+
+#[used]
+#[link_section = ".limine_requests"]
+pub static FRAMEBUFFER_REQ: BootSlot<LimineFramebufferRequest> = BootSlot(UnsafeCell::new(
+    LimineFramebufferRequest {
+        id: [
+            LIMINE_COMMON_MAGIC_0,
+            LIMINE_COMMON_MAGIC_1,
+            0x9d58_27dc_d881_dd75,
+            0xa314_8604_f6fa_b11b,
+        ],
+        revision: 0,
+        response: core::ptr::null(),
+    },
+));
 
 #[used]
 #[link_section = ".limine_requests_end"]
@@ -405,17 +460,101 @@ pub fn latch_boot_modules_to_static_bss() -> usize {
 
 /// Look up a Limine boot module payload by trailing path suffix (e.g., `"user-hello.elf"`).
 pub fn get_boot_module(path_suffix: &str) -> Option<&'static [u8]> {
+    let idx = find_boot_module_index(path_suffix)?;
+    get_boot_module_by_index(idx)
+}
+
+/// Find a latched Limine boot module index (`0..MAX_LATCHED_MODULES`) by trailing path suffix.
+pub fn find_boot_module_index(path_suffix: &str) -> Option<usize> {
     let needle = path_suffix.as_bytes();
     // SAFETY: `STATIC_MODULES` is immutable after `latch_boot_modules_to_static_bss`.
     unsafe {
         let count = *STATIC_MODULES.1.get();
         let arr = &*STATIC_MODULES.0.get();
-        for m in arr.iter().take(count) {
+        for (i, m) in arr.iter().take(count).enumerate() {
             let p = &m.path_buf[..m.path_len];
             if p.ends_with(needle) {
-                return Some(core::slice::from_raw_parts(m.addr, m.size));
+                return Some(i);
             }
         }
     }
     None
+}
+
+/// Retrieve a latched boot module byte slice by validated index (`CapObjectKind::BootModule`).
+pub fn get_boot_module_by_index(idx: usize) -> Option<&'static [u8]> {
+    // SAFETY: `STATIC_MODULES` is immutable after `latch_boot_modules_to_static_bss`.
+    unsafe {
+        let count = *STATIC_MODULES.1.get();
+        if idx >= count {
+            return None;
+        }
+        let m = &(*STATIC_MODULES.0.get())[idx];
+        if m.addr.is_null() || m.size == 0 {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(m.addr, m.size))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LatchedFramebuffer {
+    pub hhdm_virt: u64,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
+    pub memory_model: u8,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+}
+
+struct StaticFramebuffer(UnsafeCell<Option<LatchedFramebuffer>>);
+// SAFETY: Latched once on BSP (`CLI`) before SMP bring-up and `BootloaderReclaimable` reclaim.
+unsafe impl Sync for StaticFramebuffer {}
+
+static STATIC_FB: StaticFramebuffer = StaticFramebuffer(UnsafeCell::new(None));
+
+/// Latch primary Limine GOP framebuffer metadata into permanent `.bss` prior to bootloader reclaim.
+pub fn latch_framebuffer_to_static_bss() -> bool {
+    let resp = FRAMEBUFFER_REQ.read().response;
+    if resp.is_null() {
+        return false;
+    }
+    // SAFETY: Executed once on BSP (`CLI`) while `LimineFramebufferResponse` is mapped.
+    unsafe {
+        if (*resp).framebuffer_count == 0 || (*resp).framebuffers.is_null() {
+            return false;
+        }
+        let fb = *(*resp).framebuffers;
+        if fb.is_null() || (*fb).address.is_null() {
+            return false;
+        }
+        *STATIC_FB.0.get() = Some(LatchedFramebuffer {
+            hhdm_virt: (*fb).address as u64,
+            width: (*fb).width,
+            height: (*fb).height,
+            pitch: (*fb).pitch,
+            bpp: (*fb).bpp,
+            memory_model: (*fb).memory_model,
+            red_mask_size: (*fb).red_mask_size,
+            red_mask_shift: (*fb).red_mask_shift,
+            green_mask_size: (*fb).green_mask_size,
+            green_mask_shift: (*fb).green_mask_shift,
+            blue_mask_size: (*fb).blue_mask_size,
+            blue_mask_shift: (*fb).blue_mask_shift,
+        });
+        true
+    }
+}
+
+#[inline]
+pub fn get_latched_framebuffer() -> Option<LatchedFramebuffer> {
+    // SAFETY: Read-only after `latch_framebuffer_to_static_bss` on BSP.
+    unsafe { *STATIC_FB.0.get() }
 }

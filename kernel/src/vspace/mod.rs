@@ -31,7 +31,7 @@ use crate::security::{SecDomain, SecFlags, SecLabel};
 use crate::vspace::pte::{
     is_canonical_48, prot_to_pte_flags, pt_indices, validate_user_range, VSpaceError, VmProt,
     PAGE_SIZE_4K, PTE_HUGE_PAGE, PTE_NX, PTE_PHYS_MASK_2M, PTE_PHYS_MASK_4K, PTE_PRESENT,
-    PTE_USER, PTE_USER_TABLE_INTERMEDIATE, PTE_WRITABLE,
+    PTE_SW_MMIO, PTE_USER, PTE_USER_TABLE_INTERMEDIATE, PTE_WRITABLE,
 };
 
 pub type VSpaceId = u16;
@@ -343,8 +343,10 @@ pub fn destroy_vspace(handle: VSpaceHandle) -> Result<(), VSpaceError> {
                                 let e1 = read_volatile(pt_ptr.add(i1));
                                 if (e1 & PTE_PRESENT) != 0 {
                                     write_volatile(pt_ptr.add(i1), 0);
-                                    let dpfn = ((e1 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
-                                    let _ = map_ref_dec_data_pfn_after_shootdown(dpfn, PageOrder::Order4KiB);
+                                    if (e1 & PTE_SW_MMIO) == 0 {
+                                        let dpfn = ((e1 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+                                        let _ = map_ref_dec_data_pfn_after_shootdown(dpfn, PageOrder::Order4KiB);
+                                    }
                                     let _ = pt_frame_adjust_entries(pt_pfn, -1);
                                 }
                             }
@@ -446,9 +448,80 @@ pub fn map_4k(
     })
 }
 
+/// Map a validated device MMIO 4 KiB physical page (`FrameState::ReservedOrMmio`) at `vaddr`.
+/// Strictly rejects RAM/Kernel/PMM frames (`INV-SEC-01`) and `EXEC` (`W^X`).
+pub fn map_mmio_4k(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    phys_addr: u64,
+    prot: VmProt,
+) -> Result<(), VSpaceError> {
+    validate_user_range(vaddr, PAGE_SIZE_4K, PAGE_SIZE_4K)?;
+    if (phys_addr & (PAGE_SIZE_4K - 1)) != 0 {
+        return Err(VSpaceError::UnalignedAddress);
+    }
+    if prot.contains(VmProt::EXEC) {
+        return Err(VSpaceError::WxViolation);
+    }
+    if crate::pmm::query_frame_state(phys_addr) != crate::pmm::FrameState::ReservedOrMmio {
+        return Err(VSpaceError::PermissionViolation);
+    }
+    let leaf_flags = prot_to_pte_flags(prot, false)? | PTE_SW_MMIO;
+    let (i4, i3, i2, i1) = pt_indices(vaddr);
+
+    with_vspace_locked(handle, |slot, _| {
+        let pml4_pfn = slot.pml4_pfn.load(Ordering::Acquire);
+        // SAFETY: `slot.locked` grants exclusive mutation of `PML4[0..256]`.
+        unsafe {
+            let pml4 = pt_virt_ptr(pml4_pfn);
+            let mut e4 = read_volatile(pml4.add(i4));
+            if (e4 & PTE_PRESENT) == 0 {
+                let pdpt = alloc_pinned_pt_frame()?;
+                slot.pt_frames_owned.fetch_add(1, Ordering::Relaxed);
+                let _ = pt_frame_adjust_entries(pml4_pfn, 1);
+                e4 = pdpt.phys_addr() | PTE_USER_TABLE_INTERMEDIATE;
+                write_volatile(pml4.add(i4), e4);
+            }
+            let pdpt_pfn = ((e4 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+            let pdpt = pt_virt_ptr(pdpt_pfn);
+            let mut e3 = read_volatile(pdpt.add(i3));
+            if (e3 & PTE_PRESENT) == 0 {
+                let pd = alloc_pinned_pt_frame()?;
+                slot.pt_frames_owned.fetch_add(1, Ordering::Relaxed);
+                let _ = pt_frame_adjust_entries(pdpt_pfn, 1);
+                e3 = pd.phys_addr() | PTE_USER_TABLE_INTERMEDIATE;
+                write_volatile(pdpt.add(i3), e3);
+            }
+            let pd_pfn = ((e3 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+            let pd = pt_virt_ptr(pd_pfn);
+            let mut e2 = read_volatile(pd.add(i2));
+            if (e2 & (PTE_PRESENT | PTE_HUGE_PAGE)) == (PTE_PRESENT | PTE_HUGE_PAGE) {
+                return Err(VSpaceError::AlreadyMapped);
+            }
+            if (e2 & PTE_PRESENT) == 0 {
+                let pt = alloc_pinned_pt_frame()?;
+                slot.pt_frames_owned.fetch_add(1, Ordering::Relaxed);
+                let _ = pt_frame_adjust_entries(pd_pfn, 1);
+                e2 = pt.phys_addr() | PTE_USER_TABLE_INTERMEDIATE;
+                write_volatile(pd.add(i2), e2);
+            }
+            let pt_pfn = ((e2 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+            let pt = pt_virt_ptr(pt_pfn);
+            if (read_volatile(pt.add(i1)) & PTE_PRESENT) != 0 {
+                return Err(VSpaceError::AlreadyMapped);
+            }
+            let _ = pt_frame_adjust_entries(pt_pfn, 1);
+            write_volatile(pt.add(i1), (phys_addr & PTE_PHYS_MASK_4K) | leaf_flags);
+            slot.mapped_4k_equiv_pages.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    })
+}
+
 pub(crate) struct PendingReclaim {
     pub data_pfn: u32,
     pub order: PageOrder,
+    pub is_mmio: bool,
     pub pt_pfns: [u32; 3],
     pub pt_len: usize,
 }
@@ -460,7 +533,14 @@ impl PendingReclaim {
     }
 
     pub fn finalize_after_shootdown(self) -> FrameHandle {
-        let data_h = map_ref_dec_data_pfn_after_shootdown(self.data_pfn, self.order);
+        let data_h = if self.is_mmio {
+            FrameHandle {
+                pfn: self.data_pfn,
+                generation: 0,
+            }
+        } else {
+            map_ref_dec_data_pfn_after_shootdown(self.data_pfn, self.order)
+        };
         for i in 0..self.pt_len {
             let pt_h = pt_frame_unpin_for_reclaim(self.pt_pfns[i]);
             free_pages(pt_h, PageOrder::Order4KiB, KERNEL_PT_LABEL);
@@ -510,6 +590,7 @@ pub fn unmap_4k(handle: VSpaceHandle, vaddr: u64) -> Result<FrameHandle, VSpaceE
             let mut pending = PendingReclaim {
                 data_pfn: ((old_leaf & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32,
                 order: PageOrder::Order4KiB,
+                is_mmio: (old_leaf & PTE_SW_MMIO) != 0,
                 pt_pfns: [0; 3],
                 pt_len: 0,
             };
@@ -578,7 +659,10 @@ pub fn protect_4k(handle: VSpaceHandle, vaddr: u64, new_prot: VmProt) -> Result<
             if (old & PTE_PRESENT) == 0 {
                 return Err(VSpaceError::NotMapped);
             }
-            if new_prot.contains(VmProt::WRITE) {
+            if (old & PTE_SW_MMIO) != 0 && new_prot.contains(VmProt::EXEC) {
+                return Err(VSpaceError::WxViolation);
+            }
+            if new_prot.contains(VmProt::WRITE) && (old & PTE_SW_MMIO) == 0 {
                 let data_pfn = ((old & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
                 if matches!(
                     crate::pmm::inspect_frame_live(data_pfn),
@@ -587,7 +671,8 @@ pub fn protect_4k(handle: VSpaceHandle, vaddr: u64, new_prot: VmProt) -> Result<
                     return Err(VSpaceError::PermissionViolation);
                 }
             }
-            write_volatile(pt.add(i1), (old & PTE_PHYS_MASK_4K) | new_flags);
+            let sw_mmio = old & PTE_SW_MMIO;
+            write_volatile(pt.add(i1), (old & PTE_PHYS_MASK_4K) | new_flags | sw_mmio);
             fence(Ordering::SeqCst);
             let _ = tlb::shootdown_tlb(handle.id, &slot.active_cpus, vaddr, 1);
             Ok(())

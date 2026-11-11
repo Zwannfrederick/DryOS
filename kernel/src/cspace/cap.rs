@@ -75,6 +75,9 @@ pub enum CapObjectKind {
     Tcb = 5,
     CNode = 6,
     Notification = 7,
+    Endpoint = 8,
+    BootModule = 9,
+    Framebuffer = 10,
 }
 
 impl CapObjectKind {
@@ -88,6 +91,9 @@ impl CapObjectKind {
             5 => Self::Tcb,
             6 => Self::CNode,
             7 => Self::Notification,
+            8 => Self::Endpoint,
+            9 => Self::BootModule,
+            10 => Self::Framebuffer,
             _ => Self::None,
         }
     }
@@ -250,6 +256,7 @@ pub struct CapMapRecord {
     pub vspace_gen: u32,
     pub vaddr: u64,
     pub next_idx: u16,
+    pub num_pages: u16,
 }
 
 impl CapMapRecord {
@@ -261,6 +268,7 @@ impl CapMapRecord {
             vspace_gen: 0,
             vaddr: 0,
             next_idx: MAP_REC_NONE,
+            num_pages: 0,
         }
     }
 }

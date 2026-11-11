@@ -7,8 +7,10 @@
 mod apic;
 mod arch;
 mod cspace;
+mod display;
 mod gdt_tss;
 mod idt;
+mod ipc;
 mod limine;
 mod mem_verify;
 mod percpu;
@@ -32,8 +34,8 @@ use crate::gdt_tss::{init_cpu_gdt_tss, prepare_cpu_boot_stack};
 use crate::idt::{init_bsp_idt, verify_breakpoint_trap_recovery};
 use crate::limine::{
     base_revision_supported, cstr_to_str, latch_boot_modules_to_static_bss,
-    latch_cmdline_to_static_bss, BOOTLOADER_INFO_REQ, FIRMWARE_TYPE_REQ, LIMINE_FIRMWARE_EFI64,
-    MP_REQ,
+    latch_cmdline_to_static_bss, latch_framebuffer_to_static_bss, BOOTLOADER_INFO_REQ,
+    FIRMWARE_TYPE_REQ, LIMINE_FIRMWARE_EFI64, MP_REQ,
 };
 use crate::mem_verify::verify_memory_and_hhdm;
 use crate::percpu::{init_cpu_percpu_and_gs, CpuRegionInfo};
@@ -97,6 +99,7 @@ extern "C" fn bsp_kmain() -> ! {
 
     let cmdline = latch_cmdline_to_static_bss();
     let boot_mods = latch_boot_modules_to_static_bss();
+    let _fb_latched = latch_framebuffer_to_static_bss();
 
     let bsp_lapic_id = {
         let mp_resp = MP_REQ.read().response;
@@ -173,6 +176,7 @@ extern "C" fn bsp_kmain() -> ! {
         "[DRY-SEC] PASS: ADR-007 SecLabel (8B) + 3-Domain + Lease/Revoke invariants verified"
     );
     let _pmm_inv = pmm::init_pmm(&mem);
+    let _fb_valid = display::init_framebuffer(&mem, cmdline);
 
     let force_xapic = cmdline.contains("apic_mode=xapic");
     let apic_cal = apic::detect_and_init_bsp_apic(
@@ -231,6 +235,10 @@ extern "C" fn bsp_kmain() -> ! {
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        if cmdline.contains("ipc_fault=") {
+            syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+            ipc::tests::maybe_run_ipc_fault_test(cmdline, smp.cpu_count);
+        }
         if cmdline.contains("user_fault=") {
             syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
             proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
@@ -245,17 +253,22 @@ extern "C" fn bsp_kmain() -> ! {
             cmdline,
         );
         cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
-        assert!(boot_mods >= 2, "Expected >=2 Limine userspace ELF64 boot modules, got {}", boot_mods);
+        assert!(boot_mods >= 5, "Expected >=5 Limine userspace ELF64 boot modules, got {}", boot_mods);
         syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
         proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        ipc::tests::verify_ipc_services_and_display(cmdline, smp.cpu_count);
     }
     sched::shutdown_ap_scheduler_service();
 
     if !irq_only_stage {
         serial_println!(
-            "[DRY-BOOT-OK] Milestone 1B-D UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Userspace & Syscall ABI verified cleanly.",
+            "[DRY-BOOT-OK] Milestone 1C UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Services, IPC & GOP Display verified cleanly.",
             smp.cpu_count
         );
+        if cmdline.contains("screendump_hold=1") {
+            serial_println!("[DRY-FB-READY] Waiting for QMP screendump...");
+            halt_forever();
+        }
     }
     qemu_exit(QEMU_EXIT_SUCCESS);
 }

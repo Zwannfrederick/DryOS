@@ -133,10 +133,22 @@ pub(crate) fn verify_live_object_generation(
             inspect_vspace_live(obj_id as u16),
             Some((gen, _, _)) if gen == expected_gen
         ),
-        CapObjectKind::Tcb | CapObjectKind::Notification => matches!(
+        CapObjectKind::Tcb => matches!(
             inspect_tcb_live(obj_id as usize),
             Some((_, gen26, _)) if gen26 == expected_gen && expected_gen != 0
         ),
+        CapObjectKind::Notification => {
+            crate::ipc::notif::is_notif_live(obj_id, expected_gen)
+        }
+        CapObjectKind::Endpoint => {
+            crate::ipc::endpoint::is_endpoint_live(obj_id, expected_gen)
+        }
+        CapObjectKind::BootModule => {
+            expected_gen == 1 && crate::limine::get_boot_module_by_index(obj_id as usize).is_some()
+        }
+        CapObjectKind::Framebuffer => {
+            crate::display::is_framebuffer_cap_live(obj_id, expected_gen)
+        }
         CapObjectKind::CNode => {
             let idx = obj_id as usize;
             idx < MAX_CSPACES

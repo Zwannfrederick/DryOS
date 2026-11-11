@@ -22,8 +22,8 @@ use crate::sched::runqueue::pop_local_or_steal;
 use crate::sched::state::{preempt_invariant_panic, ExecState, ThreadId};
 use crate::sched::{
     current_cpu_idx, current_slot_on_cpu, record_worker_dispatch, switch_to_slot, tcb,
-    verify_slot_canary, yield_now, GLOBAL_DEFERRED_RESCHEDS, GLOBAL_PREEMPTIONS, GLOBAL_TIMER_IRQS,
-    ONLINE_SCHED_CPUS, PHASE_PENDING_THREADS, TOTAL_TCB_SLOTS,
+    verify_slot_canary, wake_thread, yield_now, GLOBAL_DEFERRED_RESCHEDS, GLOBAL_PREEMPTIONS,
+    GLOBAL_TIMER_IRQS, ONLINE_SCHED_CPUS, PHASE_PENDING_THREADS, TOTAL_TCB_SLOTS, WORKER_POOL_CAP,
 };
 
 const IRQ_STORM_MAX_STREAK: u32 = 256;
@@ -105,6 +105,30 @@ pub fn preempt_enable() {
             GLOBAL_DEFERRED_RESCHEDS.fetch_add(1, Ordering::Relaxed);
             yield_now();
         }
+    }
+}
+
+/// Lock-free ISR/idle scan waking worker threads whose bounded IPC TSC deadline has expired.
+#[inline]
+pub fn poll_expired_ipc_deadlines(now_tsc: u64, offset: usize, stride: usize) {
+    let step = stride.max(1);
+    let mut idx = offset;
+    while idx < WORKER_POOL_CAP {
+        let slot = MAX_CPUS + idx;
+        let w = tcb(slot);
+        let dl = w.ipc_deadline_tsc.load(Ordering::Relaxed);
+        if dl != 0
+            && now_tsc >= dl
+            && w.ipc_deadline_tsc
+                .compare_exchange(dl, 0, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            let (_, _, gen26) = w.sched.snapshot();
+            let last = w.last_cpu.load(Ordering::Relaxed);
+            let pref = if last < MAX_CPUS { last } else { 0 };
+            let _ = wake_thread(ThreadId::new(slot, gen26), pref);
+        }
+        idx += step;
     }
 }
 
@@ -210,6 +234,9 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
         pcpu.irq_depth.fetch_sub(1, Ordering::Release);
         return;
     }
+
+    let online_for_dl = ONLINE_SCHED_CPUS.load(Ordering::Relaxed).max(1);
+    poll_expired_ipc_deadlines(rdtsc(), cpu_idx % online_for_dl, online_for_dl);
 
     if (frame.cs & 3) == 3 && cur_slot >= MAX_CPUS {
         let pid = tcb(cur_slot).process_id.load(Ordering::Acquire);

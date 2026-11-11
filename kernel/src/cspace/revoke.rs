@@ -6,8 +6,9 @@ use core::sync::atomic::Ordering;
 
 use crate::arch::read_rflags;
 use crate::cspace::cap::{
-    next_slot_gen, pack_state_gen, unpack_state_gen, with_cdt_lock, CSpaceId, CapError,
-    CapMapRecord, CapObjectKind, CapPtr, SlotState, CDT_NONE, MAP_REC_NONE, MAX_CAP_MAPPINGS,
+    next_slot_gen, pack_state_gen, unpack_obj_meta, unpack_state_gen, with_cdt_lock, CSpaceId,
+    CapError, CapMapRecord, CapObjectKind, CapPtr, SlotState, CDT_NONE, MAP_REC_NONE,
+    MAX_CAP_MAPPINGS,
 };
 use crate::cspace::{
     cspace_invariant_panic, cspace_lookup_fast, global_slot_id, slot_by_global, split_global_slot,
@@ -32,6 +33,27 @@ pub(crate) fn attach_cap_mapping_record(
     vaddr: u64,
     is_huge_2m: bool,
 ) -> Result<(), CapError> {
+    attach_cap_mapping_range_record(
+        owner_global_slot,
+        expected_slot_gen,
+        vspace_id,
+        vspace_gen,
+        vaddr,
+        is_huge_2m,
+        1,
+    )
+}
+
+/// Attach a contiguous `num_pages` `VSpace` mapping record (e.g., MMIO framebuffer BAR) to `owner_global_slot`.
+pub(crate) fn attach_cap_mapping_range_record(
+    owner_global_slot: u32,
+    expected_slot_gen: u32,
+    vspace_id: u16,
+    vspace_gen: u32,
+    vaddr: u64,
+    is_huge_2m: bool,
+    num_pages: u16,
+) -> Result<(), CapError> {
     let slot = slot_by_global(owner_global_slot);
     with_cdt_lock(|maps| {
         let (st, _, _, sgen) = unpack_state_gen(slot.state_gen.load(Ordering::Acquire));
@@ -54,6 +76,7 @@ pub(crate) fn attach_cap_mapping_record(
             vspace_gen,
             vaddr,
             next_idx: old_head,
+            num_pages: num_pages.max(1),
         };
         slot.first_map_idx.store(idx, Ordering::Release);
         Ok(())
@@ -117,13 +140,17 @@ pub(crate) fn unmap_all_records_for_slot(global_slot: u32) -> usize {
             id: rec.vspace_id,
             generation: rec.vspace_gen,
         };
-        let res = if rec.is_huge_2m {
-            unmap_2m(vs, rec.vaddr)
+        if rec.is_huge_2m {
+            if unmap_2m(vs, rec.vaddr).is_ok() {
+                unmapped += 1;
+            }
         } else {
-            unmap_4k(vs, rec.vaddr)
-        };
-        if res.is_ok() {
-            unmapped += 1;
+            let pages = rec.num_pages.max(1) as u64;
+            for p in 0..pages {
+                if unmap_4k(vs, rec.vaddr + p * 4096).is_ok() {
+                    unmapped += 1;
+                }
+            }
         }
         guard += 1;
         assert!(guard <= MAX_CAP_MAPPINGS, "Corrupt CapMapRecord cycle");
@@ -250,12 +277,17 @@ pub(crate) fn revoke_subtree_by_global_slot(root_global_slot: u32) -> usize {
         return 0;
     }
 
-    // Phase 2 & 3 (outside `CDT_LOCK`): Wait for `in_flight_ops == 0`, then unmap + SMP TLB shootdown.
+    // Phase 2 & 3 (outside `CDT_LOCK`): Wait for `in_flight_ops == 0`, wake any blocked IPC
+    // threads using the revoked capability, then unmap + SMP TLB shootdown.
     let mut cur = q_head;
     while cur != CDT_NONE {
         wait_slot_in_flight_zero(cur);
+        let c_slot = slot_by_global(cur);
+        let (_, kind, _, _) = unpack_state_gen(c_slot.state_gen.load(Ordering::Acquire));
+        let (obj_id, obj_gen) = unpack_obj_meta(c_slot.obj_meta.load(Ordering::Acquire));
+        crate::ipc::on_cap_slot_revoked(kind, obj_id, obj_gen, cur);
         let _ = unmap_all_records_for_slot(cur);
-        cur = slot_by_global(cur).cdt_next_sib.load(Ordering::Relaxed);
+        cur = c_slot.cdt_next_sib.load(Ordering::Relaxed);
     }
 
     // Phase 4: Finalize all revoked slots to `SlotState::EmptyRevoked` (preserving bumped `slot_gen`).
@@ -314,6 +346,12 @@ pub fn cspace_delete_cap(
     })?;
 
     wait_slot_in_flight_zero(resolved.global_slot);
+    crate::ipc::on_cap_slot_revoked(
+        resolved.obj_kind,
+        resolved.obj_id,
+        resolved.expected_obj_gen,
+        resolved.global_slot,
+    );
     let _ = unmap_all_records_for_slot(resolved.global_slot);
     CSPACE_TABLE[cspace_id as usize]
         .live_slots
@@ -363,7 +401,7 @@ pub fn cspace_destroy_object(
                 return Err(CapError::BusyActiveObject);
             }
         }
-        CapObjectKind::Tcb | CapObjectKind::Notification => {
+        CapObjectKind::Tcb => {
             let Some((state, gen26, stack_active)) = inspect_tcb_live(resolved.obj_id as usize) else {
                 return Err(CapError::InvalidHandle);
             };
@@ -372,6 +410,28 @@ pub fn cspace_destroy_object(
             }
             if state != ExecState::Dead || stack_active {
                 return Err(CapError::BusyActiveObject);
+            }
+        }
+        CapObjectKind::Notification => {
+            if !crate::ipc::notif::is_notif_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
+        CapObjectKind::Endpoint => {
+            if !crate::ipc::endpoint::is_endpoint_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
+        CapObjectKind::BootModule => {
+            if resolved.expected_obj_gen != 1
+                || crate::limine::get_boot_module_by_index(resolved.obj_id as usize).is_none()
+            {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
+        CapObjectKind::Framebuffer => {
+            if !crate::display::is_framebuffer_cap_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
             }
         }
         CapObjectKind::Untyped => {
@@ -417,6 +477,12 @@ pub fn cspace_destroy_object(
     })?;
 
     wait_slot_in_flight_zero(resolved.global_slot);
+    crate::ipc::on_cap_slot_revoked(
+        resolved.obj_kind,
+        resolved.obj_id,
+        resolved.expected_obj_gen,
+        resolved.global_slot,
+    );
     let _ = unmap_all_records_for_slot(resolved.global_slot);
 
     // Reclaim the underlying physical / kernel resource now that all capability references are dead.
@@ -474,7 +540,13 @@ pub fn cspace_destroy_object(
                 return Err(CapError::BusyActiveObject);
             }
         }
-        CapObjectKind::Notification | CapObjectKind::None => {}
+        CapObjectKind::Endpoint => {
+            crate::ipc::endpoint::destroy_endpoint(resolved.obj_id, resolved.expected_obj_gen);
+        }
+        CapObjectKind::Notification => {
+            crate::ipc::notif::destroy_notif(resolved.obj_id, resolved.expected_obj_gen);
+        }
+        CapObjectKind::BootModule | CapObjectKind::Framebuffer | CapObjectKind::None => {}
     }
 
     CSPACE_TABLE[cspace_id as usize]
@@ -517,6 +589,8 @@ pub(crate) fn force_cleanup_slot_on_cspace_teardown(cspace_id: CSpaceId, slot_id
         return false;
     };
     wait_slot_in_flight_zero(gslot);
+    let (obj_id, obj_gen) = unpack_obj_meta(slot.obj_meta.load(Ordering::Acquire));
+    crate::ipc::on_cap_slot_revoked(kind, obj_id, obj_gen, gslot);
     let _ = unmap_all_records_for_slot(gslot);
     slot.state_gen.store(
         pack_state_gen(SlotState::Empty, CapObjectKind::None, CapRights::NONE, b),

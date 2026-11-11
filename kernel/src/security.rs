@@ -86,6 +86,12 @@ impl CapRights {
     pub const MAP: Self = Self(1 << 6);
     pub const MANAGE: Self = Self(1 << 7);
     pub const REVOKE: Self = Self(1 << 8);
+    pub const SEND: Self = Self(1 << 9);
+    pub const RECV: Self = Self(1 << 10);
+    pub const CALL: Self = Self(1 << 11);
+    pub const REPLY: Self = Self(1 << 12);
+    pub const WAIT: Self = Self(1 << 13);
+    pub const SPAWN: Self = Self(1 << 14);
 
     pub const FRAME_DATA_ROOT: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
@@ -105,6 +111,25 @@ impl CapRights {
     );
     pub const CNODE_ROOT: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const ENDPOINT_ROOT: Self = Self(
+        Self::READ.0
+            | Self::SEND.0
+            | Self::RECV.0
+            | Self::CALL.0
+            | Self::REPLY.0
+            | Self::GRANT.0
+            | Self::MANAGE.0
+            | Self::REVOKE.0,
+    );
+    pub const NOTIF_ROOT: Self = Self(
+        Self::READ.0 | Self::SIGNAL.0 | Self::WAIT.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const BOOTMOD_ROOT: Self = Self(
+        Self::READ.0 | Self::SPAWN.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const FB_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
     );
 
     #[inline(always)]

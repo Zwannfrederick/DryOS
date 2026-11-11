@@ -12,6 +12,18 @@ path = "src/bin/user_hello.rs"
 name = "user-peer"
 path = "src/bin/user_peer.rs"
 
+[[bin]]
+name = "dry-init"
+path = "src/bin/dry_init.rs"
+
+[[bin]]
+name = "dry-echo"
+path = "src/bin/dry_echo.rs"
+
+[[bin]]
+name = "dry-display"
+path = "src/bin/dry_display.rs"
+
 [profile.dev]
 panic = "abort"
 

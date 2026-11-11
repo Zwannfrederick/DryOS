@@ -33,6 +33,7 @@
 - **`Milestone 1B-D` Uygulama Kaydı (`kernel/src/{syscall/,uaccess.rs,proc/}` & `userspace/`):**
   - **MSR & Giriş/Çıkış Kapısı:** Her CPU üzerinde `IA32_EFER.SCE = 1`, `IA32_STAR = (0x0010 << 48) | (0x0008 << 32)`, `IA32_LSTAR = dry_syscall_entry` ve `IA32_FMASK` (`TF | IF | DF | IOPL | NT | AC` temizleme) programlandı. `dry_syscall_entry`, `swapgs` + `gs:[200]`/`gs:[192]` ile yığın değiştirir, 144 baytlık `SyscallFrame` kurar, dönüşte `validate_user_context` ile kanonik alt-yarı `RCX`/`RSP` ve `RFLAGS` doğrulaması yaparak `SYSRETQ` (`#GP` açığı kapalı) veya `IRETQ` yedek yolunu seçer ve `RDI, RSI, R8, R9, R10` yazmaçlarını sıfırlar.
   - **Sürümleme ve İlk 6 Çağrı (`ABI v0.1 = 0x0001_0000`):** `SYS_ABI_PING (0)`, `SYS_WRITE_DEBUG (1)`, `SYS_YIELD (2)`, `SYS_EXIT (3)`, `SYS_GET_TID (4)`, `SYS_CAP_QUERY (5)`; geçersiz çağrılar deterministik `-38` (`ENOSYS`), hatalı pointer'lar `-14` (`EFAULT`), geçersiz/yetkisiz capability `-9` (`EBADCAP`) döner.
+  - **`Milestone 1C` IPC, Süpervizör ve Çerçeve Tamponu Uzantısı (`6..19`):** `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)`, `SYS_IPC_REPLY_RECV (11)`, `SYS_NOTIF_CREATE (12)`, `SYS_NOTIF_SIGNAL (13)`, `SYS_NOTIF_WAIT (14)`, `SYS_CAP_DERIVE (15)`, `SYS_CAP_REVOKE_OR_DEL (16)`, `SYS_PROC_SPAWN (17)`, `SYS_PROC_WAIT (18)` ve `SYS_FB_MAP (19)` eklendi. `R12..R15` kopyasız satır-içi 4 mesaj yazmacı, tek-atımlık nesil-korumalı `ReplyToken`, `CSpace::cspace_transfer` yetki devri ve `-95` (`EIRQCTX`) / `-35` (`EDEADLK`) / `-32` (`EPIPE`) deterministik hata kodları yürürlüğe alındı.
   - **Donanım `SMAP` + İstisna Tablosu (`extable`):** `CPUID` ile `CR4.SMAP = 1` etkinleştirildi; `copy_from_user`/`copy_to_user` alt-yarı `U/S = 0` sayfaları reddeder ve daraltılmış `STAC..CLAC` bölgesi içindeki `#PF` tuzaklarını `-14` (`EFAULT`)'a çevirirken bölge dışındaki her Ring 0 `#PF` çekirdeği deterministik panikletir.
 
 ---
@@ -128,13 +129,14 @@
 7. **`INV-SEC-07 (DeterministicRevokeAndExpiry)`:** `Revoke` tamamlandığı veya `lease_epoch` süresi dolduğu andan itibaren türetilmiş tüm yetkiler `EREVOKED` (`-6`) döner; aktif eşlemeler TLB shootdown ile sökülür.
 8. **`INV-SEC-08 (NonBypassablePolicy)`:** Çekirdek ve `Policy Broker` içinde `SecLabel` veya capability doğrulamasını devre dışı bırakan hiçbir çalışma zamanı bayrağı (`permissive mode` vb.) bulunmaz.
 
-### `Milestone 1B-C` Çekirdek Uygulama Kaydı ve Açık Kalan Faz Sınırları (11 Kasım 2026)
+### `Milestone 1B-C` & `1C` Çekirdek Uygulama Kaydı ve Açık Kalan Faz Sınırları (11 Kasım 2026)
 
-- **Doğrulanan Çekirdek Zorlamaları (`kernel/src/{security.rs,cspace/,vspace/,pmm/}`):**
-  - Her `CSpace` ve nesne işleminde ortak `CapRights + SecDomain/SecLabel + lease_epoch` değerlendirmesi (`authorize_cspace_fast`, `p50 = 53..59 cyc`); `encode_compartment(user_ns, app_id)` ile kullanıcı/uygulama kompartman kodlaması; `Untyped::retype` ebeveyn etiket mirası.
-  - `USERSPACE` / `ROOT_SYSTEM` / `KERNEL` duvarları (`ROOT_SYSTEM` özneleri dahi `KERNEL` nesnelerine erişemez ve eşleyemez); `NO_DELEGATE` ve `CapRights::GRANT` çapraz-kompartman aktarım kapıları (`cspace_transfer`).
+- **Doğrulanan Çekirdek Zorlamaları (`kernel/src/{security.rs,cspace/,vspace/,pmm/,ipc/,display.rs,proc/}`):**
+  - Her `CSpace`, `Endpoint`, `Notification`, `BootModule` ve `Framebuffer` işleminde ortak `CapRights + SecDomain/SecLabel + lease_epoch` değerlendirmesi (`authorize_cspace_fast`, `p50 = 53..59 cyc`); `encode_compartment(user_ns, app_id)` ile kullanıcı/uygulama kompartman kodlaması; `Untyped::retype` ebeveyn etiket mirası.
+  - `USERSPACE` / `ROOT_SYSTEM` / `KERNEL` duvarları (`ROOT_SYSTEM` özneleri dahi `KERNEL` nesnelerine erişemez ve eşleyemez); `NO_DELEGATE` ve `CapRights::GRANT` çapraz-kompartman aktarım kapıları (`cspace_transfer`); IPC üzerinden devredilen yetkilerin ebeveyn `revoke` edildiğinde geçişli CDT ile anında iptali (`-EREVOKED`).
+  - `CapObjectKind::Framebuffer` yalnızca `RootSystem` kök süpervizörüne üretilir (`Userspace` talebi `Err(DomainViolation)` döner), `PTE_SW_MMIO` (`UC + NX`) ile kullanıcı adres alanına eşlenir ve `revoke`/çıkışta SMP TLB shootdown ile tamamen sökülür.
   - `DEV_WORKSPACE` süreli/kapsamlı `DRY Vault` kiralaması (`lease_epoch > 0 && !NO_DELEGATE` zorunlu; `now_epoch > lease_epoch` olduğunda anında `Err(LeaseExpired)`).
   - `SecFlags::READ_ONLY_EXPORT` için 3-katmanlı savunma (`CSpace` türetme/aktarım + `VSpace::protect_4k` yazma yükseltme engeli + `PMM` `map_ref_inc_data_frame` donanım sınırı: yalnızca `!writable && expected_owner.domain != Kernel` kabul edilir).
 - **Henüz Uygulanmayan Gelecek Faz Sınırları (Dürüst Kapsam Beyanı):**
-  - VFS dosya/dizin ad alanı kuralları (`INV-SEC-05`: `rename`, `symlink`, `hardlink`, `mount`, dosya tabanlı `mmap`) ve izole Ring 3 userspace `DRY Vault` / `Policy Broker` servis süreçleri Faz 2 kapsamındadır; `Milestone 1B-C` yalnızca çekirdek içi (`Ring 0`) `CSpace`, `SecLabel` ve `lease_epoch` mekanizmalarını uygular.
+  - VFS dosya/dizin ad alanı kuralları (`INV-SEC-05`: `rename`, `symlink`, `hardlink`, `mount`, dosya tabanlı `mmap`), FPU/SIMD `XSAVE`/`XRSTOR` bağlam izolasyonu ve izole Ring 3 userspace `DRY Vault` / `Policy Broker` / `VFS` servis süreçleri Faz 2 kapsamındadır.
 

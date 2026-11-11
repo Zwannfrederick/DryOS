@@ -20,6 +20,7 @@ from qemu_log_validators import (
     verify_sched_line,
     verify_vspace_lines,
 )
+from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_and_display_lines
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -68,6 +69,8 @@ def userspace_cargo_env() -> dict[str, str]:
             "-C",
             "relocation-model=static",
             "-C",
+            "target-feature=-sse,-sse2,-avx",
+            "-C",
             f"link-arg=-T{linker_script}",
             "-C",
             "link-arg=-zmax-page-size=0x1000",
@@ -82,7 +85,7 @@ def userspace_cargo_env() -> dict[str, str]:
     }
 
 
-def build_userspace() -> tuple[pathlib.Path, pathlib.Path]:
+def build_userspace() -> list[pathlib.Path]:
     env = userspace_cargo_env()
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
     subprocess.check_call(
@@ -102,7 +105,7 @@ def build_userspace() -> tuple[pathlib.Path, pathlib.Path]:
         ],
         env=env,
     )
-    print("[QEMU-TEST] Building release ELF64 user-hello & user-peer...")
+    print("[QEMU-TEST] Building release ELF64 userspace binaries (user-hello, user-peer, dry-init, dry-echo, dry-display)...")
     subprocess.check_call(
         [
             "cargo",
@@ -119,11 +122,11 @@ def build_userspace() -> tuple[pathlib.Path, pathlib.Path]:
         env=env,
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
-    u_hello = out_dir / "user-hello"
-    u_peer = out_dir / "user-peer"
-    if not u_hello.exists() or not u_peer.exists():
-        raise RuntimeError(f"Missing userspace ELFs in {out_dir}")
-    return u_hello, u_peer
+    bins = [out_dir / b for b in ("user-hello", "user-peer", "dry-init", "dry-echo", "dry-display")]
+    for b in bins:
+        if not b.exists():
+            raise RuntimeError(f"Missing userspace ELF {b}")
+    return bins
 
 
 def build_kernel() -> pathlib.Path:
@@ -197,10 +200,16 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         subprocess.check_call(["mmd", "-i", part_spec, d], env=mtools_env)
 
     u_out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
-    u_hello = u_out_dir / "user-hello"
-    u_peer = u_out_dir / "user-peer"
+    mods = [
+        ("user-hello", "user-hello.elf"),
+        ("user-peer", "user-peer.elf"),
+        ("dry-init", "dry-init.elf"),
+        ("dry-echo", "dry-echo.elf"),
+        ("dry-display", "dry-display.elf"),
+    ]
 
     conf_path = BUILD_DIR / "limine.conf"
+    mod_lines = "".join(f"    module_path: boot():/boot/{dst}\n" for _, dst in mods)
     conf_text = (
         "timeout: 0\n"
         "serial: yes\n"
@@ -209,19 +218,27 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         "    protocol: limine\n"
         "    path: boot():/boot/dry-kernel\n"
         f"    cmdline: {cmdline}\n"
-        "    module_path: boot():/boot/user-hello.elf\n"
-        "    module_path: boot():/boot/user-peer.elf\n"
+        f"{mod_lines}"
     )
     conf_path.write_text(conf_text, encoding="utf-8")
 
     subprocess.check_call(["mcopy", "-i", part_spec, str(LIMINE_EFI), "::/EFI/BOOT/BOOTX64.EFI"], env=mtools_env)
     subprocess.check_call(["mcopy", "-i", part_spec, str(conf_path), "::/boot/limine/limine.conf"], env=mtools_env)
     subprocess.check_call(["mcopy", "-i", part_spec, str(kernel_elf), "::/boot/dry-kernel"], env=mtools_env)
-    subprocess.check_call(["mcopy", "-i", part_spec, str(u_hello), "::/boot/user-hello.elf"], env=mtools_env)
-    subprocess.check_call(["mcopy", "-i", part_spec, str(u_peer), "::/boot/user-peer.elf"], env=mtools_env)
+    for src_name, dst_name in mods:
+        subprocess.check_call(
+            ["mcopy", "-i", part_spec, str(u_out_dir / src_name), f"::/boot/{dst_name}"],
+            env=mtools_env,
+        )
 
 
-def run_qemu(name: str, img_path: pathlib.Path, smp: int, timeout_sec: int = 25) -> tuple[int, str, float]:
+def run_qemu(
+    name: str,
+    img_path: pathlib.Path,
+    smp: int,
+    timeout_sec: int = 25,
+    extra_args: list[str] | None = None,
+) -> tuple[int, str, float]:
     vars_copy = BUILD_DIR / f"OVMF_VARS_{name}.4m.fd"
     shutil.copyfile(OVMF_VARS, vars_copy)
 
@@ -252,6 +269,8 @@ def run_qemu(name: str, img_path: pathlib.Path, smp: int, timeout_sec: int = 25)
         "none",
         "-no-reboot",
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     t0 = time.monotonic()
     try:
         proc = subprocess.run(
@@ -317,13 +336,21 @@ def assert_positive_smp_boot(
     cmdline: str = "console=com1",
     irq_only: bool = False,
     expected_apic_mode: str | None = None,
+    expect_fb: bool = True,
+    extra_qemu_args: list[str] | None = None,
 ) -> None:
     expected_mask = hex((1 << smp) - 1)
     expected_ops = smp * 4096
     spawned, park_rounds, work_units = expected_sched_metrics(smp)
     img_path = BUILD_DIR / f"esp_{name}.img"
     write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=60 if smp > 8 else 40)
+    rc, serial_out, elapsed = run_qemu(
+        name,
+        img_path,
+        smp=smp,
+        timeout_sec=75 if smp > 8 else 50,
+        extra_args=extra_qemu_args,
+    )
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
@@ -364,7 +391,10 @@ def assert_positive_smp_boot(
                 "Hello from DRY OS!",
                 f"[DRY-USER-SEC] PASS: cpus={smp}",
                 f"[DRY-USER-BENCH] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1B-D UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Userspace & Syscall ABI verified cleanly.",
+                f"[DRY-SERVICES] PASS: cpus={smp}",
+                f"[DRY-IPC-SEC] PASS: cpus={smp}",
+                f"[DRY-IPC-BENCH] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1C UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Services, IPC & GOP Display verified cleanly.",
             ]
         )
     must_not_contain = [
@@ -378,6 +408,7 @@ def assert_positive_smp_boot(
         "[DRY-TLB-FAIL]",
         "[DRY-CSPACE-FAIL]",
         "[DRY-USER-FAIL]",
+        "[DRY-IPC-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -401,8 +432,9 @@ def assert_positive_smp_boot(
         verify_vspace_lines(name, serial_out, smp)
         verify_cspace_and_tlb_debt_lines(name, serial_out, smp)
         verify_userspace_lines(name, serial_out, smp)
+        verify_ipc_and_display_lines(name, serial_out, smp, expect_fb=expect_fb)
     print(
-        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/userspace invariants verified in {elapsed:.3f}s)."
+        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/user/ipc/display invariants verified in {elapsed:.3f}s)."
     )
 
 
@@ -444,6 +476,27 @@ def main() -> None:
         smp=2,
         cmdline="console=com1 apic_mode=xapic",
         expected_apic_mode="xapic-mmio",
+    )
+
+    # Headless fallback verification (`Stage E.4`): boot without GOP (`-vga none`) and confirm graceful serial-only boot.
+    assert_positive_smp_boot(
+        "boot_2cpu_headless_nofb",
+        kernel_elf,
+        smp=2,
+        cmdline="console=com1",
+        expect_fb=False,
+        extra_qemu_args=["-vga", "none"],
+    )
+
+    # Ring 3 GOP visual proof (`Stage E.2 & E.3`): QMP screendump -> PNG + pixel-level contrast verification.
+    screendump_esp = BUILD_DIR / "esp_boot_display_screendump.img"
+    write_mbr_esp_image(screendump_esp, kernel_elf, "console=com1 screendump_hold=1")
+    capture_and_verify_gop_screendump(
+        img_path=screendump_esp,
+        ovmf_code=OVMF_CODE,
+        ovmf_vars=OVMF_VARS,
+        build_dir=BUILD_DIR,
+        png_out=BUILD_DIR / "dry_os_first_screen.png",
     )
 
     # Negative SMP & hardware fault isolation tests (must fail deterministically with exit=35).
@@ -799,7 +852,41 @@ def main() -> None:
             must_not_contain=["[DRY-BOOT-OK]"],
         )
 
-    print("\n[QEMU-TEST] ALL 50 MILESTONE 1B-D SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE, RING 3 USERSPACE & SYSCALL ABI CHECKS PASSED.")
+    # Milestone 1C Negative Capability IPC, Priority Donation & Framebuffer Isolation Tests (exit=35).
+    ipc_negative_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "ipc_irq_block_rejected",
+            "irq_block",
+            ["[DRY-IPC-FAIL] Blocking IPC in preempt-disabled/IRQ context rejected: err=IrqForbidden", "[DRY-PANIC]"],
+        ),
+        (
+            "ipc_unauth_fb_rejected",
+            "unauth_fb",
+            ["[DRY-IPC-FAIL] Unauthorized framebuffer mapping rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "ipc_forged_ep_rejected",
+            "forged_ep",
+            ["[DRY-IPC-FAIL] Forged endpoint capability rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "ipc_donation_cycle_rejected",
+            "donation_cycle",
+            ["[DRY-IPC-FAIL] Priority donation cycle rejected: err=Some(CycleDetected)", "[DRY-PANIC]"],
+        ),
+    ]
+    for case_name, fault_arg, expected_tokens in ipc_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 ipc_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=expected_tokens,
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
+
+    print("\n[QEMU-TEST] ALL 56 MILESTONE 1C SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE, RING 3 SERVICES, IPC & DISPLAY CHECKS PASSED.")
 
 
 if __name__ == "__main__":

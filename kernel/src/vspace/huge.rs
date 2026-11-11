@@ -115,6 +115,7 @@ pub fn unmap_2m(handle: VSpaceHandle, vaddr: u64) -> Result<FrameHandle, VSpaceE
             let mut pending = PendingReclaim {
                 data_pfn: ((old_pde & PTE_PHYS_MASK_2M) >> PAGE_SHIFT) as u32,
                 order: PageOrder::Order2MiB,
+                is_mmio: false,
                 pt_pfns: [0; 3],
                 pt_len: 0,
             };

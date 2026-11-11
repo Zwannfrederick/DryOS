@@ -14,6 +14,8 @@ pub const PTE_PWT: u64 = 1 << 3;
 pub const PTE_PCD: u64 = 1 << 4;
 pub const PTE_HUGE_PAGE: u64 = 1 << 7;
 pub const PTE_GLOBAL: u64 = 1 << 8;
+/// OS software AVL bit (`bit 9`, ignored by x86-64 MMU) marking capability-validated device MMIO leaf PTEs.
+pub const PTE_SW_MMIO: u64 = 1 << 9;
 pub const PTE_NX: u64 = 1 << 63;
 
 pub const PTE_PHYS_MASK_4K: u64 = 0x000f_ffff_ffff_f000;
@@ -57,6 +59,8 @@ impl VmProt {
     pub const USER_RO: Self = Self(Self::READ.0 | Self::USER.0);
     pub const USER_RW: Self = Self(Self::READ.0 | Self::WRITE.0 | Self::USER.0);
     pub const USER_RX: Self = Self(Self::READ.0 | Self::EXEC.0 | Self::USER.0);
+    pub const USER_MMIO_UC: Self =
+        Self(Self::READ.0 | Self::WRITE.0 | Self::USER.0 | Self::UNCACHED.0);
     pub const USER_WX_FORBIDDEN: Self =
         Self(Self::READ.0 | Self::WRITE.0 | Self::EXEC.0 | Self::USER.0);
 

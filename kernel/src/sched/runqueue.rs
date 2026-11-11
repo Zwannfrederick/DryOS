@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::gdt_tss::MAX_CPUS;
 
-pub const PRIO_LEVELS: usize = 4;
+pub const PRIO_LEVELS: usize = 8;
 pub const RQ_RING_CAP: usize = 128;
 const RQ_RING_MASK: usize = RQ_RING_CAP - 1;
 
@@ -184,9 +184,8 @@ impl PerCpuRunQueue {
     }
 }
 
-#[allow(clippy::declare_interior_mutable_const)]
-const UNINIT_CPU_RQ: PerCpuRunQueue = PerCpuRunQueue::uninit();
-static CPU_RUNQUEUES: [PerCpuRunQueue; MAX_CPUS] = [UNINIT_CPU_RQ; MAX_CPUS];
+static CPU_RUNQUEUES: [PerCpuRunQueue; MAX_CPUS] =
+    [const { PerCpuRunQueue::uninit() }; MAX_CPUS];
 
 #[inline]
 pub fn cpu_rq(cpu_idx: usize) -> &'static PerCpuRunQueue {

@@ -18,6 +18,7 @@
 
 pub mod bench;
 pub mod elf;
+pub mod supervisor;
 pub mod tests;
 
 use core::ptr::null_mut;
@@ -138,15 +139,15 @@ pub struct SpawnedProcessInfo {
     pub tcb_cap: CapPtr,
 }
 
-struct ProcessSlot {
-    state: AtomicU8,
+pub(crate) struct ProcessSlot {
+    pub(crate) state: AtomicU8,
     trace_lifecycle: AtomicBool,
     kill_requested: AtomicBool,
     launch_ready: AtomicBool,
-    tcb_quiescent: AtomicBool,
+    pub(crate) tcb_quiescent: AtomicBool,
     cspace_id: AtomicU16,
     vspace_id: AtomicU16,
-    generation: AtomicU32,
+    pub(crate) generation: AtomicU32,
     last_reclaimed_gen: AtomicU32,
     vspace_gen: AtomicU32,
     in_flight_syscalls: AtomicU32,
@@ -155,7 +156,9 @@ struct ProcessSlot {
     subj_label_raw: AtomicU64,
     vs_cap_raw: AtomicU64,
     tcb_cap_raw: AtomicU64,
-    tcb_tid_raw: AtomicU32,
+    pub(crate) tcb_tid_raw: AtomicU32,
+    pub(crate) parent_pid: AtomicU32,
+    pub(crate) waiter_tid_raw: AtomicU32,
     entry_rip: AtomicU64,
     initial_rsp: AtomicU64,
     initial_rflags: AtomicU64,
@@ -192,6 +195,8 @@ impl ProcessSlot {
             vs_cap_raw: AtomicU64::new(0),
             tcb_cap_raw: AtomicU64::new(0),
             tcb_tid_raw: AtomicU32::new(0),
+            parent_pid: AtomicU32::new(0),
+            waiter_tid_raw: AtomicU32::new(0),
             entry_rip: AtomicU64::new(0),
             initial_rsp: AtomicU64::new(0),
             initial_rflags: AtomicU64::new(USER_RFLAGS_FIXED_SET),
@@ -214,7 +219,7 @@ static PROCESS_TABLE: [ProcessSlot; MAX_PROCESSES + 1] =
     [const { ProcessSlot::new() }; MAX_PROCESSES + 1];
 
 #[inline]
-fn slot_ref(pid: u32) -> Option<&'static ProcessSlot> {
+pub(crate) fn slot_ref(pid: u32) -> Option<&'static ProcessSlot> {
     let idx = pid as usize;
     if idx == 0 || idx > MAX_PROCESSES {
         None
@@ -238,7 +243,11 @@ fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_
             && slot.cdt_parent.load(Ordering::Acquire) == CDT_NONE
             && matches!(
                 kind,
-                CapObjectKind::Frame4K | CapObjectKind::Frame2M | CapObjectKind::Untyped
+                CapObjectKind::Frame4K
+                    | CapObjectKind::Frame2M
+                    | CapObjectKind::Untyped
+                    | CapObjectKind::Endpoint
+                    | CapObjectKind::Notification
             )
         {
             let _ = unmap_all_records_for_slot(global_slot_id(cspace_id, idx as u16));
@@ -361,6 +370,8 @@ where
     slot.launch_ready.store(false, Ordering::Release);
     slot.kill_requested.store(false, Ordering::Release);
     slot.tcb_quiescent.store(false, Ordering::Release);
+    slot.parent_pid.store(0, Ordering::Release);
+    slot.waiter_tid_raw.store(0, Ordering::Release);
     slot.trace_lifecycle.store(opts.trace_lifecycle, Ordering::Release);
     slot.cspace_id.store(cspace_id, Ordering::Release);
     slot.vspace_id.store(vs_h.id, Ordering::Release);
@@ -508,6 +519,7 @@ pub fn kill_process(handle: ProcessHandle) -> Result<(), ProcError> {
     ) {
         Ok(_) => {
             slot.kill_requested.store(true, Ordering::SeqCst);
+            crate::ipc::on_process_terminating(handle.pid, slot.cspace_id.load(Ordering::Acquire));
             let tid = ThreadId::from_raw(slot.tcb_tid_raw.load(Ordering::Acquire));
             let _ = wake_thread(tid, 0);
             Ok(())
@@ -573,7 +585,11 @@ pub(crate) fn terminate_killed_from_cpl3_irq() -> ! {
 /// Invoked from `sched::complete_post_switch_from_asm` after `PostSwitchKind::Exit` reaps the TCB.
 pub fn on_user_tcb_quiescent_dead(pid: u32) {
     if let Some(slot) = slot_ref(pid) {
-        slot.tcb_quiescent.store(true, Ordering::Release);
+        slot.tcb_quiescent.store(true, Ordering::SeqCst);
+        let waiter = slot.waiter_tid_raw.swap(0, Ordering::AcqRel);
+        if waiter != 0 {
+            let _ = wake_thread(ThreadId::from_raw(waiter), 0);
+        }
     }
 }
 
@@ -619,6 +635,7 @@ pub fn terminate_current_user_thread_exit(pid: u32, exit_code: i32) -> ! {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        crate::ipc::on_process_terminating(pid, slot.cspace_id.load(Ordering::Acquire));
         let prev = slot.in_flight_syscalls.fetch_sub(1, Ordering::SeqCst);
         debug_assert!(prev >= 1, "in_flight_syscalls underflow on exit");
     }
@@ -648,6 +665,7 @@ pub fn terminate_current_user_thread_bad_context(
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        crate::ipc::on_process_terminating(pid, slot.cspace_id.load(Ordering::Acquire));
     }
     exit_current_thread()
 }
@@ -675,6 +693,7 @@ pub fn handle_user_exception(frame: &mut TrapFrame, cr2: u64) -> ! {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        crate::ipc::on_process_terminating(pid, slot.cspace_id.load(Ordering::Acquire));
     }
     exit_current_thread()
 }

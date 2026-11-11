@@ -11,6 +11,7 @@
 //! - Shared kernel `VSpace` (`CR3` / TLB switching and Ring 3 userspace belong to Milestone 1B).
 
 pub mod context;
+pub mod donate;
 pub mod preempt;
 pub mod preempt_tests;
 pub mod runqueue;
@@ -108,6 +109,7 @@ pub struct KernelTcb {
     pub subj_label_raw: AtomicU64,
     pub user_fs_base: AtomicU64,
     pub user_gs_base: AtomicU64,
+    pub ipc_deadline_tsc: AtomicU64,
     pub slot_free: AtomicBool,
     pub notif: Notification,
 }
@@ -133,6 +135,7 @@ impl KernelTcb {
             subj_label_raw: AtomicU64::new(KERNEL_THREAD_LABEL_RAW),
             user_fs_base: AtomicU64::new(0),
             user_gs_base: AtomicU64::new(0),
+            ipc_deadline_tsc: AtomicU64::new(0),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
         }
@@ -242,7 +245,7 @@ pub fn init_scheduler(online_cpus: usize) {
         let idle = tcb(cpu);
         idle.stack_base.store(pcpu.boot_stack_base, Ordering::Release);
         idle.stack_top.store(pcpu.boot_stack_top, Ordering::Release);
-        idle.prio.store(3, Ordering::Release);
+        donate::init_slot_priority(cpu, runqueue::PRIO_LEVELS - 1);
         idle.last_cpu.store(cpu, Ordering::Release);
         idle.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
         idle.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
@@ -251,6 +254,7 @@ pub fn init_scheduler(online_cpus: usize) {
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         idle.user_fs_base.store(0, Ordering::Release);
         idle.user_gs_base.store(0, Ordering::Release);
+        idle.ipc_deadline_tsc.store(0, Ordering::Release);
         idle.slot_free.store(false, Ordering::Release);
         idle.sched.init_idle_running(cpu);
     }
@@ -269,7 +273,7 @@ pub fn init_scheduler(online_cpus: usize) {
         };
         w.stack_base.store(base, Ordering::Release);
         w.stack_top.store(top, Ordering::Release);
-        w.prio.store(1, Ordering::Release);
+        donate::init_slot_priority(slot, 1);
         w.last_cpu.store(NO_CPU, Ordering::Release);
         w.alloc_count.store(0, Ordering::Release);
         w.progress_seq.store(0, Ordering::Release);
@@ -281,6 +285,7 @@ pub fn init_scheduler(online_cpus: usize) {
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         w.user_fs_base.store(0, Ordering::Release);
         w.user_gs_base.store(0, Ordering::Release);
+        w.ipc_deadline_tsc.store(0, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
     }
@@ -395,7 +400,7 @@ pub fn try_spawn_thread_bound(
 
         let base = w.stack_base.load(Ordering::Acquire);
         let top = w.stack_top.load(Ordering::Acquire);
-        w.prio.store(prio, Ordering::Release);
+        donate::init_slot_priority(slot, prio);
         w.last_cpu.store(NO_CPU, Ordering::Release);
         w.progress_seq.store(0, Ordering::Release);
         w.preempted_count.store(0, Ordering::Release);
@@ -406,6 +411,7 @@ pub fn try_spawn_thread_bound(
             .store(pack_seclabel_u64(subj_label), Ordering::Release);
         w.user_fs_base.store(0, Ordering::Release);
         w.user_gs_base.store(0, Ordering::Release);
+        w.ipc_deadline_tsc.store(0, Ordering::Release);
         w.notif.reset();
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
@@ -662,6 +668,26 @@ pub fn commit_park_current() -> CommitParkOutcome {
     outcome
 }
 
+/// Step 3 of `H1` sleep protocol preserving local CPU cache/TLB locality (`Stage B.2`).
+pub fn ipc_park_current() -> CommitParkOutcome {
+    assert_thread_context_schedulable("ipc_park");
+    let saved_if = irq_save_cli();
+    let cpu_idx = current_cpu_idx();
+    let cur_slot = current_slot_on_cpu(cpu_idx);
+    tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
+    let outcome = tcb(cur_slot).sched.commit_park(cur_slot, cpu_idx);
+    if outcome == CommitParkOutcome::SwitchToPark {
+        let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
+        let next_slot = select_next_slot_for_worker(cpu_idx, online);
+        switch_to_slot(cpu_idx, cur_slot, next_slot, PostSwitchKind::Park { target_cpu: cpu_idx });
+        let resumed_cpu = current_cpu_idx();
+        assert_eq!(current_slot_on_cpu(resumed_cpu), cur_slot);
+        assert_eq!(tcb(cur_slot).sched.stack_owner(), resumed_cpu);
+    }
+    irq_restore(saved_if);
+    outcome
+}
+
 /// Signal `bits` on `target`'s TCB-bound `Notification` and wake `target` (`H1` doorbell).
 pub fn notify_thread(target: ThreadId, bits: u64, preferred_cpu: usize) -> WakeOutcome {
     let slot = target.slot();
@@ -704,6 +730,9 @@ pub fn exit_current_thread() -> ! {
     let cpu_idx = current_cpu_idx();
     let cur_slot = current_slot_on_cpu(cpu_idx);
     assert!(cur_slot >= MAX_CPUS, "Idle thread cannot exit");
+    let cur_pid = tcb(cur_slot).process_id.load(Ordering::Acquire);
+    donate::cleanup_donations_on_thread_exit(cur_slot);
+    crate::ipc::on_thread_terminating(cur_slot, cur_pid);
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
 
     tcb(cur_slot).sched.begin_exit(cur_slot, cpu_idx);
@@ -714,6 +743,7 @@ pub fn exit_current_thread() -> ! {
 
 /// Execute one dispatch cycle from CPU `cpu_idx`'s Boot/Idle context if a runnable worker exists.
 pub fn idle_dispatch_once(cpu_idx: usize) -> bool {
+    preempt::poll_expired_ipc_deadlines(crate::arch::rdtsc(), 0, 1);
     let saved_if = irq_save_cli();
     tcb(cpu_idx).progress_seq.fetch_add(1, Ordering::Relaxed);
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
