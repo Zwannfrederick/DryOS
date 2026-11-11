@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::{qemu_exit, read_rsp, QEMU_EXIT_PANIC};
 use crate::gdt_tss::{verify_df_canary_only, DF_IST_INDEX, KERNEL_CS};
-use crate::percpu::{try_current_percpu, PerCpuData};
+use crate::percpu::{current_percpu, try_current_percpu, PerCpuData};
 use crate::serial;
 
 static IDT_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -171,8 +171,32 @@ global_asm!(
     "    push r14",
     "    push r15",
     "    cld",
+    "    cmp byte ptr [rip + DRY_SMAP_ACTIVE], 0",
+    "    je .Lisr_no_clac",
+    "    .byte 0x0f, 0x01, 0xca",
+    ".Lisr_no_clac:",
+    "    xor ebx, ebx",
+    "    test byte ptr [rsp + 144], 3",
+    "    jnz .Lisr_do_swapgs",
+    "    cmp qword ptr [rsp + 120], 2",
+    "    je .Lisr_check_gs_msr",
+    "    cmp qword ptr [rsp + 120], 8",
+    "    jne .Lisr_gs_ready",
+    ".Lisr_check_gs_msr:",
+    "    mov ecx, 0xc0000101",
+    "    rdmsr",
+    "    test edx, edx",
+    "    js .Lisr_gs_ready",
+    ".Lisr_do_swapgs:",
+    "    swapgs",
+    "    mov ebx, 1",
+    ".Lisr_gs_ready:",
     "    mov rdi, rsp",
     "    call {dispatch}",
+    "    test ebx, ebx",
+    "    jz .Lisr_exit_pop",
+    "    swapgs",
+    ".Lisr_exit_pop:",
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -324,9 +348,21 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
         return;
     }
 
+    if frame.vector == 2 {
+        let pcpu = current_percpu();
+        assert_eq!(
+            pcpu.self_ptr,
+            crate::percpu::read_gs_u64_at_0(),
+            "NMI GS_BASE invariant broken on cpu={}",
+            pcpu.cpu_idx
+        );
+        pcpu.nmi_count.fetch_add(1, Ordering::AcqRel);
+        return;
+    }
+
     let pcpu = try_current_percpu();
 
-    if frame.vector == 3 {
+    if frame.vector == 3 && (frame.cs & 3) == 0 {
         // `#BP` (`int3`) is a Trap: `frame.rip` points to the instruction immediately after `0xcc`.
         TOTAL_BP_TRAPS.fetch_add(1, Ordering::AcqRel);
         if let Some(cpu) = pcpu {
@@ -338,6 +374,15 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
 
     if frame.vector == 8 {
         handle_double_fault(frame, pcpu);
+    }
+
+    if frame.vector == 14 && (frame.cs & 3) == 0 && crate::uaccess::try_fixup_uaccess_pf(frame) {
+        return;
+    }
+
+    if (frame.cs & 3) == 3 {
+        let cr2 = if frame.vector == 14 { read_cr2() } else { 0 };
+        crate::proc::handle_user_exception(frame, cr2);
     }
 
     crate::enter_fatal_or_halt();

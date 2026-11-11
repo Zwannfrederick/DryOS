@@ -104,8 +104,6 @@ pub(crate) static CPU_ACTIVE_VSPACE: [AtomicU16; MAX_CPUS] = [INIT_CPU_VS; MAX_C
 const ZERO_CR3: AtomicU64 = AtomicU64::new(0);
 pub(crate) static CPU_ACTIVE_CR3: [AtomicU64; MAX_CPUS] = [ZERO_CR3; MAX_CPUS];
 
-static PERF_CR3_SWITCHES: AtomicU64 = AtomicU64::new(0);
-static PERF_CR3_NOOPS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static BOOT_FRAMES_RECLAIMED: AtomicU64 = AtomicU64::new(0);
 
 pub fn vspace_invariant_panic(args: core::fmt::Arguments<'_>) -> ! {
@@ -121,16 +119,23 @@ pub fn cpu_active_vspace(cpu_idx: usize) -> VSpaceId {
 
 #[inline]
 pub fn cr3_perf_counters() -> (u64, u64) {
-    (
-        PERF_CR3_SWITCHES.load(Ordering::Acquire),
-        PERF_CR3_NOOPS.load(Ordering::Acquire),
-    )
+    let mut switches = 0u64;
+    let mut noops = 0u64;
+    for cpu in 0..MAX_CPUS {
+        let pcpu = crate::percpu::get_percpu_by_idx(cpu);
+        switches = switches.wrapping_add(pcpu.cr3_switches_local.load(Ordering::Acquire));
+        noops = noops.wrapping_add(pcpu.cr3_noops_local.load(Ordering::Acquire));
+    }
+    (switches, noops)
 }
 
 #[inline]
 pub fn reset_cr3_perf_counters() {
-    PERF_CR3_SWITCHES.store(0, Ordering::Release);
-    PERF_CR3_NOOPS.store(0, Ordering::Release);
+    for cpu in 0..MAX_CPUS {
+        let pcpu = crate::percpu::get_percpu_by_idx(cpu);
+        pcpu.cr3_switches_local.store(0, Ordering::Release);
+        pcpu.cr3_noops_local.store(0, Ordering::Release);
+    }
 }
 
 #[inline]
@@ -211,8 +216,11 @@ pub(crate) fn pt_virt_ptr(pfn: u32) -> *mut u64 {
 #[inline]
 pub fn switch_cpu_vspace_if_needed(cpu_idx: usize, next_vs: VSpaceId) {
     let cur_vs = CPU_ACTIVE_VSPACE[cpu_idx].load(Ordering::Relaxed);
+    let pcpu = crate::percpu::get_percpu_by_idx(cpu_idx);
     if cur_vs == BOOT_CR3_VSPACE_SENTINEL || cur_vs == next_vs {
-        PERF_CR3_NOOPS.fetch_add(1, Ordering::Relaxed);
+        // CPU-local non-LOCKed increment (`CLI` held on `cpu_idx`): zero global atomic contention!
+        let prev = pcpu.cr3_noops_local.load(Ordering::Relaxed);
+        pcpu.cr3_noops_local.store(prev + 1, Ordering::Relaxed);
         return;
     }
 
@@ -234,7 +242,8 @@ pub fn switch_cpu_vspace_if_needed(cpu_idx: usize, next_vs: VSpaceId) {
     unsafe { write_cr3(next_cr3) };
     CPU_ACTIVE_CR3[cpu_idx].store(next_cr3, Ordering::Release);
     CPU_ACTIVE_VSPACE[cpu_idx].store(next_vs, Ordering::Release);
-    PERF_CR3_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    let prev_sw = pcpu.cr3_switches_local.load(Ordering::Relaxed);
+    pcpu.cr3_switches_local.store(prev_sw + 1, Ordering::Relaxed);
 
     if (cur_vs as usize) < MAX_VSPACES {
         VSPACE_TABLE[cur_vs as usize]

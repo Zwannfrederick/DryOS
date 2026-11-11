@@ -26,10 +26,15 @@ pub use preempt::{
 
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 
 use crate::apic::QUANTUM_TICKS;
-use crate::arch::{cli, irq_restore, irq_save_cli, read_rsp, sti};
+use crate::arch::{
+    cli, irq_restore, irq_save_cli, read_rsp, sti, wrmsr, MSR_IA32_FS_BASE,
+    MSR_IA32_KERNEL_GS_BASE,
+};
 use crate::gdt_tss::{set_cpu_tss_rsp0, verify_cpu_tss_and_canaries, MAX_CPUS};
 use crate::percpu::{current_percpu, get_percpu_by_idx, read_gs_u64_at_8};
 use crate::sched::context::{
@@ -59,6 +64,7 @@ pub enum ApEpochKind {
     IrqOnlyVerify = 1,
     PreemptiveSched = 2,
     KernelVSpaceSync = 3,
+    UserspaceSyscallInit = 4,
 }
 
 impl ApEpochKind {
@@ -68,6 +74,7 @@ impl ApEpochKind {
             1 => Self::IrqOnlyVerify,
             2 => Self::PreemptiveSched,
             3 => Self::KernelVSpaceSync,
+            4 => Self::UserspaceSyscallInit,
             _ => Self::Cooperative,
         }
     }
@@ -97,7 +104,10 @@ pub struct KernelTcb {
     pub preempted_count: AtomicU64,
     pub vspace_id: AtomicU16,
     pub cspace_id: AtomicU16,
+    pub process_id: AtomicU32,
     pub subj_label_raw: AtomicU64,
+    pub user_fs_base: AtomicU64,
+    pub user_gs_base: AtomicU64,
     pub slot_free: AtomicBool,
     pub notif: Notification,
 }
@@ -119,7 +129,10 @@ impl KernelTcb {
             preempted_count: AtomicU64::new(0),
             vspace_id: AtomicU16::new(KERNEL_VSPACE_ID),
             cspace_id: AtomicU16::new(KERNEL_NO_CSPACE),
+            process_id: AtomicU32::new(0),
             subj_label_raw: AtomicU64::new(KERNEL_THREAD_LABEL_RAW),
+            user_fs_base: AtomicU64::new(0),
+            user_gs_base: AtomicU64::new(0),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
         }
@@ -233,8 +246,11 @@ pub fn init_scheduler(online_cpus: usize) {
         idle.last_cpu.store(cpu, Ordering::Release);
         idle.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
         idle.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
+        idle.process_id.store(0, Ordering::Release);
         idle.subj_label_raw
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
+        idle.user_fs_base.store(0, Ordering::Release);
+        idle.user_gs_base.store(0, Ordering::Release);
         idle.slot_free.store(false, Ordering::Release);
         idle.sched.init_idle_running(cpu);
     }
@@ -260,11 +276,30 @@ pub fn init_scheduler(online_cpus: usize) {
         w.preempted_count.store(0, Ordering::Release);
         w.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
         w.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
+        w.process_id.store(0, Ordering::Release);
         w.subj_label_raw
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
+        w.user_fs_base.store(0, Ordering::Release);
+        w.user_gs_base.store(0, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
     }
+}
+
+/// Return a quiescent `ExecState::Dead` `CSpace`-owned worker `TCB` slot back to the worker pool
+/// once `cspace_destroy_object` has destroyed its root `TCB` capability (`INV-CAP-08`).
+pub fn release_dead_tcb_slot(slot: usize, expected_gen: u32) -> bool {
+    if !(MAX_CPUS..TOTAL_TCB_SLOTS).contains(&slot) {
+        return false;
+    }
+    let w = tcb(slot);
+    let (state, _, gen26) = w.sched.snapshot();
+    if state != ExecState::Dead || gen26 != expected_gen || w.sched.stack_owner() != NO_CPU {
+        return false;
+    }
+    w.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
+    w.slot_free.store(true, Ordering::Release);
+    true
 }
 
 /// Inspect `(ExecState, gen26, stack_owner_active)` for `CSpace` `TCB` lifecycle & active-reclaim gates.
@@ -366,8 +401,11 @@ pub fn try_spawn_thread_bound(
         w.preempted_count.store(0, Ordering::Release);
         w.vspace_id.store(vspace_id, Ordering::Release);
         w.cspace_id.store(cspace_id, Ordering::Release);
+        w.process_id.store(0, Ordering::Release);
         w.subj_label_raw
             .store(pack_seclabel_u64(subj_label), Ordering::Release);
+        w.user_fs_base.store(0, Ordering::Release);
+        w.user_gs_base.store(0, Ordering::Release);
         w.notif.reset();
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
@@ -457,8 +495,24 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
     // Switch hardware `CR3` (if `next`'s `vspace_id` differs from CPU's active `VSpace`) *before*
     // reaping `prev_slot` or decrementing `PHASE_PENDING_THREADS`, so exiting user-VSpace workers
     // always vacate `VSpace.active_cpus` prior to epoch completion.
-    let next_vs = tcb(cur_slot).vspace_id.load(Ordering::Acquire);
+    let cur_tcb = tcb(cur_slot);
+    let next_vs = cur_tcb.vspace_id.load(Ordering::Acquire);
     switch_cpu_vspace_if_needed(cpu_idx, next_vs);
+
+    // Lazy `FS_BASE` / user `GS_BASE` (`IA32_KERNEL_GS_BASE` in Ring 0) switch: zero `wrmsr` on
+    // Kernel->Kernel switches or when TLS bases match (`Stage A.8 & A.9`).
+    let next_fs = cur_tcb.user_fs_base.load(Ordering::Relaxed);
+    if pcpu.cur_fs_base.load(Ordering::Relaxed) != next_fs {
+        // SAFETY: Validated canonical lower-half `user_fs_base` written onto `IA32_FS_BASE` (`CLI`).
+        unsafe { wrmsr(MSR_IA32_FS_BASE, next_fs) };
+        pcpu.cur_fs_base.store(next_fs, Ordering::Relaxed);
+    }
+    let next_ugs = cur_tcb.user_gs_base.load(Ordering::Relaxed);
+    if pcpu.cur_user_gs_base.load(Ordering::Relaxed) != next_ugs {
+        // SAFETY: Validated canonical lower-half `user_gs_base` staged in `IA32_KERNEL_GS_BASE` (`CLI`).
+        unsafe { wrmsr(MSR_IA32_KERNEL_GS_BASE, next_ugs) };
+        pcpu.cur_user_gs_base.store(next_ugs, Ordering::Relaxed);
+    }
 
     let prev = tcb(prev_slot);
     match post_kind {
@@ -476,10 +530,21 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
                 .post_switch_park(prev_slot, cpu_idx, prio, cpu_rq(target_cpu));
         }
         PostSwitchKind::Exit => {
+            let prev_pid = prev.process_id.swap(0, Ordering::AcqRel);
+            let prev_cs = prev.cspace_id.load(Ordering::Relaxed);
             let _ = prev.sched.post_switch_exit_and_reap(prev_slot, cpu_idx);
-            prev.slot_free.store(true, Ordering::Release);
+            if prev_cs == KERNEL_NO_CSPACE {
+                prev.slot_free.store(true, Ordering::Release);
+            }
             GLOBAL_EXITED_THREADS.fetch_add(1, Ordering::AcqRel);
-            PHASE_PENDING_THREADS.fetch_sub(1, Ordering::AcqRel);
+            let _ = PHASE_PENDING_THREADS.try_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |v| (v > 0).then_some(v - 1),
+            );
+            if prev_pid != 0 {
+                crate::proc::on_user_tcb_quiescent_dead(prev_pid);
+            }
         }
     }
 
@@ -717,6 +782,9 @@ pub fn ap_scheduler_service_loop(cpu_idx: usize) {
                 }
                 ApEpochKind::KernelVSpaceSync => {
                     crate::vspace::activate_kernel_vspace_on_ap(cpu_idx);
+                }
+                ApEpochKind::UserspaceSyscallInit => {
+                    crate::syscall::init_cpu_syscall_and_smap(cpu_idx);
                 }
             }
             seen_epoch = cur_epoch;

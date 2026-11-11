@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
 > **Durum Tarihi:** 11 Kasım 2026  
-> **Aşama:** Faz 1 Aktif Geliştirme (`H1` ve `H2` Faz 0 Kapıları Geçildi; `ADR-001` .. `ADR-007` Yürürlükte)  
+> **Aşama:** Faz 1 Aktif Geliştirme (`Milestone 1A` & `Milestone 1B-A..1B-D` Tamamlandı; `50/50` QEMU/KVM Doğrulaması Yeşil; `ADR-001` .. `ADR-007` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya yerel sistem denetimiyle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak Faz 0 deneyleriyle yanlışlanmaya açık tasarım iddiası.  
@@ -85,6 +85,22 @@
 | 10 | `dry_thread_ctrl` | `TCB` başlatma/durdurma, `FaultEndpoint` ve `Notification` bağlama, öncelik/CPU yakınlığı ve yazmaç okuma/yazma. | Yalnızca `EXEC_BLOCKED` / askıdaki veya hata durumundaki görevin yazmaçları dışarıdan değiştirilebilir. |
 | 11 | `dry_irq_ctrl` | Donanım MSI-X/IOAPIC vektörünü `Notification` nesnesine bağlar; `IRQF_ONESHOT` maskesini kaldırır (`Ack`). | Vektör başına tek aktif sahip; sürücü çökerse vektör otomatik maskelenir. |
 | 12 | `dry_sys_ctl` | Yalnızca kök platform yetkisine açık CPU hotplug, güç geçişi ve donanım topoloji sorgusu. | Kullanıcı süreçlerine asla devredilemez. |
+
+### 2.3. `Milestone 1B-D` Ring 3 (`CPL=3`) Mimarisi ve `Native Syscall ABI v0.1` (`[DOĞRULANDI — 50/50 QEMU/KVM]`)
+
+- **Ayrıcalık ve Adres Alanı Sınırı:**
+  - Çekirdek yüksek yarıda (`0xffff_8000_0000_0000..`, `PML4[256..512]`, `U/S = 0`) çalışır; her kullanıcı süreci (`ProcessSlot`, `PID = 1..24`) kendine ait özel `VSpace` (`PML4[0..256]`) ve özel `CSpace` (`CSpaceId = 1..31`, `CSPACE_TABLE[0]` çekirdek rezervi) bağlamına sahiptir.
+  - CPU başına `GDT` (`KERNEL_CS=0x08`, `KERNEL_DS=0x10`, `USER_DS=0x1b`, `USER_CS=0x23`, `TSS=0x28`), `TSS.RSP0` ve `PerCpuData.kernel_rsp0` (`gs:[192]`) her bağlam değişiminde hedef iş parçacığının 16 KiB çekirdek yığını tepesine senkronize edilir.
+  - **`GS_BASE` ve `NMI/#DF` Güvenliği:** Ring 0'da `IA32_GS_BASE = &PerCpuData`, `IA32_KERNEL_GS_BASE = user_gs_base`; Ring 3'te tersidir. `SYSCALL` giriş/çıkışı `swapgs` kullanır; `IDT` ortak girişinde `CPL == 3` ise doğrudan `swapgs`, `vec == 2 (NMI)` veya `vec == 8 (#DF)` ise `IA32_GS_BASE` yüksek-yarı kontrolü yapılarak (`swapgs` penceresi koruması, `ebx` kalıcı bayrağı) çift-`swapgs` hatası önlenir `[DOĞRULANDI: F15 int 2 testi]`.
+- **Donanım `SMAP` ve `extable` Tabanlı `uaccess` (`kernel/src/uaccess.rs`):**
+  - Çalışma zamanı `CPUID.(EAX=7,ECX=0):EBX[20]` algılamasıyla tüm çekirdeklerde `CR4.SMAP = 1` ve `RFLAGS.AC = 0` etkinleştirilir; `IA32_FMASK` ve `dry_isr_common` kesme/çağrı girişinde `AC` bitini temizler.
+  - `copy_from_user` / `copy_to_user`: Kanonik alt-yarı sınır doğrulaması (`[0x1000 .. 0x0000_8000_0000_0000)`), alt-yarı `U/S = 0` supervisor sayfası reddi (*confused-deputy* engeli) ve yalnızca `[__dry_uaccess_fault_start, __dry_uaccess_fault_end)` aralığında `STAC -> rep movsq/movsb -> CLAC` yürütür. Kullanıcı kaynaklı `#PF` hataları `try_fixup_uaccess_pf` istisna tablosu ile `-14` (`EFAULT`) döndürür; bu aralık dışındaki her Ring 0 `#PF` deterministik çekirdek paniğidir `[DOĞRULANDI: user_kernel_pf_not_masked & user_smap_ring0_bypass]`.
+- **Statik `ET_EXEC` ELF64 Yükleyici ve Süreç Yaşam Döngüsü (`kernel/src/proc/`):**
+  - Yalnızca statik `ET_EXEC` `x86-64` ELF64 ikilileri (`PT_INTERP` ve dinamik relokasyon reddedilir) sıkı `W^X` kuralıyla (`PF_W && PF_X -> Err(WxViolation)`) yüklenir; `p_memsz > p_filesz` `.bss` kuyruğu sıfırlanır ve kullanıcı yığını taban/tavan eşlenmemiş koruma sayfaları (*guard pages*) arasına yerleştirilir (`userspace/` crate: `user-hello.elf`, `user-peer.elf`).
+  - Sıralı ve idempotent geri kazanım: `in_flight_syscalls == 0` (`SeqCst`) -> `TCB` `Dead && stack_owner == NO_CPU` (`release_dead_tcb_slot`) -> `VSpace.active_cpus == 0` -> `Frame4K` / `CapMapRecord` temizliği -> `destroy_cspace` -> `ProcessState::Reclaimed` (`leaked_frames = 0`).
+- **Uygulanan `DRY Native Syscall ABI v0.1` (`ABI_VERSION = 0x0001_0000`, `kernel/src/syscall/`):**
+  - Giriş: `RAX = num`, `RDI, RSI, RDX, R10, R8, R9 = arg0..arg5`; Dönüş: `RAX` (birincil veya negatif `SysError`), `RDX` (ikincil); `RBX, RBP, R12..R15` korunur, `RDI, RSI, R8, R9, R10` çekirdek sızıntısını önlemek için `0`'lanır. Kanonik hızlı yol `SYSRETQ` (`p50 = 320 cyc`), kanonik olmayan/özel dönüş çerçevesi `IRETQ` yedek yolunu (`p50 = 617 cyc`) kullanır.
+  - Başlangıç v0.1 çağrı tablosu: `0 = SYS_ABI_PING`, `1 = SYS_WRITE_DEBUG` (yalnızca seri konsol tanılama, <= 256 B), `2 = SYS_YIELD`, `3 = SYS_EXIT`, `4 = SYS_GET_TID`, `5 = SYS_CAP_QUERY` (`CSpace` + `SecLabel` + `lease_epoch` doğrulamalı). Tam `Endpoint` IPC (`Milestone 1C`) ve FPU/SIMD `XSAVE` izolasyonu sonraki aşamadadır.
 
 ---
 

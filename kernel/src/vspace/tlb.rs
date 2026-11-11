@@ -115,7 +115,7 @@ pub fn tlb_invariant_panic(args: core::fmt::Arguments<'_>) -> ! {
 }
 
 pub fn init_tlb_shootdown_timeout(tsc_mhz: u64) {
-    let cycles = (tsc_mhz.max(500)) * 350_000;
+    let cycles = (tsc_mhz.max(500)) * 1_500_000;
     SHOOTDOWN_TIMEOUT_TSC.store(cycles, Ordering::Release);
 }
 

@@ -169,6 +169,43 @@ pub struct LimineMpRequest {
     pub flags: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineFile {
+    pub revision: u64,
+    pub address: *const u8,
+    pub size: u64,
+    pub path: *const c_char,
+    pub string: *const c_char,
+    pub media_type: u32,
+    pub unused: u32,
+    pub tftp_ipv4: [u8; 4],
+    pub tftp_port: u32,
+    pub partition_index: u32,
+    pub mbr_disk_id: u32,
+    pub gpt_disk_uuid: [u8; 16],
+    pub gpt_part_uuid: [u8; 16],
+    pub part_uuid: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineModuleResponse {
+    pub revision: u64,
+    pub module_count: u64,
+    pub modules: *const *const LimineFile,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineModuleRequest {
+    pub id: [u64; 4],
+    pub revision: u64,
+    pub response: *const LimineModuleResponse,
+    pub internal_module_count: u64,
+    pub internal_modules: *const *const u8,
+}
+
 #[used]
 #[link_section = ".limine_requests_start"]
 pub static REQUESTS_START_MARKER: [u64; 4] = [
@@ -249,6 +286,16 @@ pub static MP_REQ: BootSlot<LimineMpRequest> = BootSlot(UnsafeCell::new(LimineMp
 }));
 
 #[used]
+#[link_section = ".limine_requests"]
+pub static MODULE_REQ: BootSlot<LimineModuleRequest> = BootSlot(UnsafeCell::new(LimineModuleRequest {
+    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1, 0x3e7e_2797_02be_32af, 0xca1c_4f3b_d128_0cee],
+    revision: 0,
+    response: core::ptr::null(),
+    internal_module_count: 0,
+    internal_modules: core::ptr::null(),
+}));
+
+#[used]
 #[link_section = ".limine_requests_end"]
 pub static REQUESTS_END_MARKER: [u64; 2] = [0xadc0_e053_1bb1_0d03, 0x9572_709f_3176_4c62];
 
@@ -294,4 +341,81 @@ pub fn latch_cmdline_to_static_bss() -> &'static str {
         *STATIC_CMDLINE.1.get() = copy_len;
         core::str::from_utf8(&dst[..copy_len]).unwrap_or("")
     }
+}
+
+pub const MAX_LATCHED_MODULES: usize = 8;
+
+#[derive(Clone, Copy)]
+struct LatchedModule {
+    addr: *const u8,
+    size: usize,
+    path_buf: [u8; 64],
+    path_len: usize,
+}
+
+impl LatchedModule {
+    const fn empty() -> Self {
+        Self {
+            addr: core::ptr::null(),
+            size: 0,
+            path_buf: [0; 64],
+            path_len: 0,
+        }
+    }
+}
+
+struct LatchedModules(UnsafeCell<[LatchedModule; MAX_LATCHED_MODULES]>, UnsafeCell<usize>);
+// SAFETY: Populated once on BSP (`CLI`) prior to SMP release and `BootloaderReclaimable` reclaim;
+// module payload frames themselves reside in `LIMINE_MEMMAP_EXECUTABLE_AND_MODULES` (never reclaimed).
+unsafe impl Sync for LatchedModules {}
+
+static STATIC_MODULES: LatchedModules =
+    LatchedModules(UnsafeCell::new([LatchedModule::empty(); MAX_LATCHED_MODULES]), UnsafeCell::new(0));
+
+/// Latch Limine `MODULE_REQ` descriptors into permanent `.bss` before `BootloaderReclaimable` reclaim.
+pub fn latch_boot_modules_to_static_bss() -> usize {
+    let resp = MODULE_REQ.read().response;
+    if resp.is_null() {
+        return 0;
+    }
+    // SAFETY: Executed once on BSP (`CLI`) while `LimineModuleResponse` is mapped.
+    unsafe {
+        let count = ((*resp).module_count as usize).min(MAX_LATCHED_MODULES);
+        let mods_ptr = (*resp).modules;
+        let dst = &mut *STATIC_MODULES.0.get();
+        let mut stored = 0usize;
+        for i in 0..count {
+            let f_ptr = *mods_ptr.add(i);
+            if f_ptr.is_null() || (*f_ptr).address.is_null() || (*f_ptr).size == 0 {
+                continue;
+            }
+            let p_str = cstr_to_str((*f_ptr).path).as_bytes();
+            let plen = p_str.len().min(64);
+            let tail = &p_str[p_str.len() - plen..];
+            dst[stored].addr = (*f_ptr).address;
+            dst[stored].size = (*f_ptr).size as usize;
+            dst[stored].path_buf[..plen].copy_from_slice(tail);
+            dst[stored].path_len = plen;
+            stored += 1;
+        }
+        *STATIC_MODULES.1.get() = stored;
+        stored
+    }
+}
+
+/// Look up a Limine boot module payload by trailing path suffix (e.g., `"user-hello.elf"`).
+pub fn get_boot_module(path_suffix: &str) -> Option<&'static [u8]> {
+    let needle = path_suffix.as_bytes();
+    // SAFETY: `STATIC_MODULES` is immutable after `latch_boot_modules_to_static_bss`.
+    unsafe {
+        let count = *STATIC_MODULES.1.get();
+        let arr = &*STATIC_MODULES.0.get();
+        for m in arr.iter().take(count) {
+            let p = &m.path_buf[..m.path_len];
+            if p.ends_with(needle) {
+                return Some(core::slice::from_raw_parts(m.addr, m.size));
+            }
+        }
+    }
+    None
 }

@@ -13,10 +13,13 @@ mod limine;
 mod mem_verify;
 mod percpu;
 mod pmm;
+mod proc;
 mod sched;
 mod security;
 mod serial;
 mod smp;
+mod syscall;
+mod uaccess;
 mod vspace;
 
 use core::arch::{asm, global_asm};
@@ -28,8 +31,9 @@ use crate::arch::{cli, halt_forever, qemu_exit, read_cr3, read_rsp, QEMU_EXIT_PA
 use crate::gdt_tss::{init_cpu_gdt_tss, prepare_cpu_boot_stack};
 use crate::idt::{init_bsp_idt, verify_breakpoint_trap_recovery};
 use crate::limine::{
-    base_revision_supported, cstr_to_str, latch_cmdline_to_static_bss, BOOTLOADER_INFO_REQ,
-    FIRMWARE_TYPE_REQ, LIMINE_FIRMWARE_EFI64, MP_REQ,
+    base_revision_supported, cstr_to_str, latch_boot_modules_to_static_bss,
+    latch_cmdline_to_static_bss, BOOTLOADER_INFO_REQ, FIRMWARE_TYPE_REQ, LIMINE_FIRMWARE_EFI64,
+    MP_REQ,
 };
 use crate::mem_verify::verify_memory_and_hhdm;
 use crate::percpu::{init_cpu_percpu_and_gs, CpuRegionInfo};
@@ -92,6 +96,7 @@ extern "C" fn bsp_kmain() -> ! {
     );
 
     let cmdline = latch_cmdline_to_static_bss();
+    let boot_mods = latch_boot_modules_to_static_bss();
 
     let bsp_lapic_id = {
         let mp_resp = MP_REQ.read().response;
@@ -226,6 +231,10 @@ extern "C" fn bsp_kmain() -> ! {
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        if cmdline.contains("user_fault=") {
+            syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+            proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        }
         if cmdline.contains("cspace_fault=") {
             cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
         }
@@ -236,12 +245,15 @@ extern "C" fn bsp_kmain() -> ! {
             cmdline,
         );
         cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        assert!(boot_mods >= 2, "Expected >=2 Limine userspace ELF64 boot modules, got {}", boot_mods);
+        syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+        proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
     }
     sched::shutdown_ap_scheduler_service();
 
     if !irq_only_stage {
         serial_println!(
-            "[DRY-BOOT-OK] Milestone 1B-C UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace & ADR-007 verified cleanly.",
+            "[DRY-BOOT-OK] Milestone 1B-D UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Userspace & Syscall ABI verified cleanly.",
             smp.cpu_count
         );
     }

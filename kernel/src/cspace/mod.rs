@@ -10,8 +10,8 @@ pub mod revoke;
 pub mod tests;
 
 pub use cap::{
-    CSpaceId, CapError, CapObjectKind, CapPtr, IpcCapTransferReceipt, ResolvedCap, CNODE_RADIX_BITS,
-    CNODE_SLOTS, MAX_CSPACES,
+    CSpaceId, CapError, CapObjectKind, CapPtr, IpcCapTransferReceipt, ResolvedCap,
+    CNODE_RADIX_BITS, CNODE_SLOTS, KERNEL_RESERVED_CSPACE_ID, MAX_CSPACES,
 };
 
 use core::mem::size_of;
@@ -175,7 +175,10 @@ pub fn cspace_lookup_fast(
     }
 
     let slot = &cnode.slots[slot_idx];
-    let w1 = slot.state_gen.load(Ordering::Acquire);
+    // `SeqCst` pairs with `with_pinned_cap`'s `in_flight_ops.fetch_add(1, SeqCst)` and `revoke`'s
+    // `state_gen.store(Revoking, SeqCst)` + `in_flight_ops.load(SeqCst)` Dekker barrier (0 extra
+    // instructions on x86-64).
+    let w1 = slot.state_gen.load(Ordering::SeqCst);
     let (state, kind, rights, sgen) = unpack_state_gen(w1);
     match state {
         SlotState::Revoking | SlotState::EmptyRevoked => return Err(CapError::Revoked),
@@ -294,16 +297,17 @@ fn abort_building_slot(cnode: &CNode, slot_idx: u16, sgen: u32) {
     );
 }
 
-/// Allocate a bounded guarded `CNode` (`256` slots) and install a self `CNode` root cap in slot `1`.
+/// Allocate a bounded guarded `CNode` (`256` slots; slot `0` of `CSPACE_TABLE` reserved as kernel
+/// sentinel so valid user `CSpaceId`s are `1..MAX_CSPACES`) and install a self `CNode` root cap.
 pub fn create_cspace(owner_label: SecLabel, guard_hint: u8) -> Result<(CSpaceId, CapPtr), CapError> {
-    for (idx, cnode) in CSPACE_TABLE.iter().enumerate() {
+    for (idx, cnode) in CSPACE_TABLE.iter().enumerate().skip(1) {
         if cnode
             .allocated
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             let guard = if guard_hint == 0 {
-                0x50 | ((idx as u8) + 1)
+                0x50 | (idx as u8)
             } else {
                 guard_hint
             };
@@ -334,7 +338,7 @@ pub fn create_cspace(owner_label: SecLabel, guard_hint: u8) -> Result<(CSpaceId,
 
 /// Destroy a `CSpace`, revoking/unmapping any residual capabilities and bumping `CNode` generation.
 pub fn destroy_cspace(cspace_id: CSpaceId) -> Result<(), CapError> {
-    if (cspace_id as usize) >= MAX_CSPACES {
+    if cspace_id == KERNEL_RESERVED_CSPACE_ID || (cspace_id as usize) >= MAX_CSPACES {
         return Err(CapError::InvalidHandle);
     }
     let cnode = &CSPACE_TABLE[cspace_id as usize];

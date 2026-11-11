@@ -158,7 +158,12 @@ pub fn audit_quiescent_h1_invariants(online_cpus: usize) {
             state
         );
         assert_eq!(w.sched.stack_owner(), NO_CPU, "Dead slot {} still has stack_owner", slot);
-        assert!(w.slot_free.load(Ordering::Acquire), "Dead slot {} not marked slot_free", slot);
+        assert!(
+            w.slot_free.load(Ordering::Acquire)
+                || w.cspace_id.load(Ordering::Acquire) != super::KERNEL_NO_CSPACE,
+            "Dead slot {} not marked slot_free",
+            slot
+        );
         verify_slot_canary(slot);
     }
 }

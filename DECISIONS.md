@@ -30,6 +30,10 @@
      - `RAX < 0`: Deterministik negatif hata kodu (`-1 = EPERM_CAP`, `-2 = ENOENT_CAP`, `-3 = EBUSY_PINNED`, `-4 = EWOULDBLOCK`, `-5 = ETIMEDOUT`, `-6 = EREVOKED`, `-7 = EINVAL`).
   3. **Yetki (Capability) Aktarımı:** Yalnızca `dry_ipc_call` içinde, göndericinin `MsgTag` bayrağı açıkça yetki devri istediğinde ve alıcının `Endpoint`/IPC Buffer kabul penceresi açık olduğunda tek bir capability atomik olarak türetilir/taşınır (*ambient authority* yoktur).
   4. **API Evrimi:** `ARCHITECTURE.md` içindeki 12 çağrı nihai/donmuş kabul edilmez; `FaultEndpoint`, `TCB`-bağlı `Notification` ve `iommu_pin_count` kuralları zorunludur, alt-operasyonlar Faz 1 prototipinde sadeleştirilebilir.
+- **`Milestone 1B-D` Uygulama Kaydı (`kernel/src/{syscall/,uaccess.rs,proc/}` & `userspace/`):**
+  - **MSR & Giriş/Çıkış Kapısı:** Her CPU üzerinde `IA32_EFER.SCE = 1`, `IA32_STAR = (0x0010 << 48) | (0x0008 << 32)`, `IA32_LSTAR = dry_syscall_entry` ve `IA32_FMASK` (`TF | IF | DF | IOPL | NT | AC` temizleme) programlandı. `dry_syscall_entry`, `swapgs` + `gs:[200]`/`gs:[192]` ile yığın değiştirir, 144 baytlık `SyscallFrame` kurar, dönüşte `validate_user_context` ile kanonik alt-yarı `RCX`/`RSP` ve `RFLAGS` doğrulaması yaparak `SYSRETQ` (`#GP` açığı kapalı) veya `IRETQ` yedek yolunu seçer ve `RDI, RSI, R8, R9, R10` yazmaçlarını sıfırlar.
+  - **Sürümleme ve İlk 6 Çağrı (`ABI v0.1 = 0x0001_0000`):** `SYS_ABI_PING (0)`, `SYS_WRITE_DEBUG (1)`, `SYS_YIELD (2)`, `SYS_EXIT (3)`, `SYS_GET_TID (4)`, `SYS_CAP_QUERY (5)`; geçersiz çağrılar deterministik `-38` (`ENOSYS`), hatalı pointer'lar `-14` (`EFAULT`), geçersiz/yetkisiz capability `-9` (`EBADCAP`) döner.
+  - **Donanım `SMAP` + İstisna Tablosu (`extable`):** `CPUID` ile `CR4.SMAP = 1` etkinleştirildi; `copy_from_user`/`copy_to_user` alt-yarı `U/S = 0` sayfaları reddeder ve daraltılmış `STAC..CLAC` bölgesi içindeki `#PF` tuzaklarını `-14` (`EFAULT`)'a çevirirken bölge dışındaki her Ring 0 `#PF` çekirdeği deterministik panikletir.
 
 ---
 
@@ -40,9 +44,9 @@
 - **Karar:**
   - **Faz 1–2 (Başlangıç):** Süreç başına sabit boyutlu tek seviyeli korumalı dizi (*Flat Guarded CNode*, ör. 4 KiB veya 16 KiB sabit çerçeve içinde 128–512 adet slot) + nesne başına atomik `generation: AtomicU32` ve `iommu_pin_count: AtomicU32`.
   - **Faz 3+:** `CapPtr` 64-bit formatı şimdiden radiks genişlemesine uyumlu tanımlanır (`[63:56] guard_bits | [55:48] radix_bits | [47:16] slot_gen | [15:0] slot_idx`), böylece kullanıcı ABI'sini kırmadan 2 seviyeli radiks ağacına ve alt-ağaç epoch `Revoke` yapısına geçilir.
-- **`Milestone 1B-C` Uygulama Kaydı (`kernel/src/cspace/`):**
-  - `MAX_CSPACES = 16`, `CNODE_SLOTS = 256` (`CNODE_RADIX_BITS = 8`), önbellek satırı hizalı `64 B` `CapSlot` (`CNode` başına `16 KiB`, toplam `257 KiB` `CapSlot + CapMapRecord` havuzu; slot `0 = CAP_NULL`).
-  - Kilitsiz (`lock-free`) seqlock `cspace_lookup_fast` (`slot_gen` + canlı nesne `generation` çift ABA kalkanı, `1 vCPU p50 = 99 cyc`, `20 vCPU p50 = 113 cyc`), `slot.in_flight_ops` aktif işlem pini ve `CSpace`'ler arası intrüzif $O(k)$ ebeveyn-çocuk CDT bağlantısı.
+- **`Milestone 1B-C` & `1B-D` Uygulama Kaydı (`kernel/src/cspace/`):**
+  - `MAX_CSPACES = 32` (`CSPACE_TABLE[0]` çekirdek rezervi, `1..31` kullanıcı `CSpace` yuvası), `CNODE_SLOTS = 256` (`CNODE_RADIX_BITS = 8`), önbellek satırı hizalı `64 B` `CapSlot` (`CNode` başına `16 KiB`, toplam `514 KiB` `CapSlot + 512 CapMapRecord` havuzu; slot `0 = CAP_NULL`).
+  - Kilitsiz (`lock-free`) seqlock `cspace_lookup_fast` (`SeqCst` `slot_gen` + canlı nesne `generation` çift ABA kalkanı), `slot.in_flight_ops` aktif işlem pini, `CSpace`-sahibi `TCB` yuvalarının `cspace_destroy_object` (`release_dead_tcb_slot`) tamamlanana dek yeniden tahsis edilmemesi ve `CSpace`'ler arası intrüzif $O(k)$ ebeveyn-çocuk CDT bağlantısı.
   - Deterministik `revoke` sıralaması: **`Live -> Revoking` (`slot_gen + 1`) -> `in_flight_ops == 0` süzme -> `CapMapRecord` otomatik `VSpace` `unmap_4k` + senkron SMP TLB shootdown -> `EmptyRevoked` / geri kazanım**. `map_ref_count > 0`, `iommu_pin_count > 0`, `VSpace.active_cpus != 0` veya `TCB` `ExecState != Dead || stack_owner != NO_CPU` iken erken nesne yıkımı `Err(BusyActiveObject)` ile reddedilir.
 
 ---

@@ -12,6 +12,10 @@ pub const QEMU_EXIT_SUCCESS: u32 = 0x10;
 pub const QEMU_EXIT_PANIC: u32 = 0x11;
 
 pub const MSR_IA32_EFER: u32 = 0xc000_0080;
+pub const MSR_IA32_STAR: u32 = 0xc000_0081;
+pub const MSR_IA32_LSTAR: u32 = 0xc000_0082;
+pub const MSR_IA32_FMASK: u32 = 0xc000_0084;
+pub const MSR_IA32_FS_BASE: u32 = 0xc000_0100;
 pub const MSR_IA32_GS_BASE: u32 = 0xc000_0101;
 pub const MSR_IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
 

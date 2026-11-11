@@ -219,10 +219,10 @@ pub fn measure_cspace_benchmarks(online_cpus: usize, tsc_mhz: u64) {
     cspace_destroy_object(cs, lbl, root_fr, 1).unwrap();
     destroy_cspace(cs).unwrap();
 
-    // Per-CPU contention benchmark across `min(online_cpus, MAX_CSPACES)` CPUs:
-    let bench_workers = online_cpus.min(crate::cspace::MAX_CSPACES);
-    let mut cspaces = [0u16; 16];
-    let mut frames = [CapPtr::NULL; 16];
+    // Per-CPU contention benchmark across `min(online_cpus, MAX_CSPACES - 1)` CPUs:
+    let bench_workers = online_cpus.min(crate::cspace::MAX_CSPACES - 1);
+    let mut cspaces = [0u16; crate::cspace::MAX_CSPACES];
+    let mut frames = [CapPtr::NULL; crate::cspace::MAX_CSPACES];
     for w in 0..bench_workers {
         let w_lbl = SecLabel::new(
             SecDomain::Userspace,

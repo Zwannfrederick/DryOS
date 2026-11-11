@@ -25,6 +25,8 @@ use core::ptr::{read_volatile, write_volatile};
 
 pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
+pub const USER_DS: u16 = 0x18 | 3; // 0x1b (`GDT[3]` User Data, `RPL = 3`)
+pub const USER_CS: u16 = 0x20 | 3; // 0x23 (`GDT[4]` User 64-bit Code, `RPL = 3`)
 pub const TSS_SEL: u16 = 0x28;
 pub const DF_IST_INDEX: u8 = 1;
 
@@ -254,7 +256,8 @@ pub fn verify_cpu_tss_and_canaries(cpu_idx: usize) {
     }
 }
 
-/// Update `TSS.RSP0` for `cpu_idx` when switching to a kernel thread with stack top `rsp0`.
+/// Update `TSS.RSP0` and `PerCpuData.kernel_rsp0` (`gs:[192]`) for `cpu_idx` when switching to a
+/// thread with kernel stack top `rsp0`.
 #[inline]
 pub fn set_cpu_tss_rsp0(cpu_idx: usize, rsp0: u64) {
     debug_assert!(cpu_idx < MAX_CPUS && (rsp0 & 0xf) == 0);
@@ -263,6 +266,9 @@ pub fn set_cpu_tss_rsp0(cpu_idx: usize, rsp0: u64) {
         let block = &mut (*CPU_DESCS.0.get())[cpu_idx];
         write_volatile(&raw mut block.tss.rsp[0], rsp0);
     }
+    crate::percpu::get_percpu_by_idx(cpu_idx)
+        .kernel_rsp0
+        .store(rsp0, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Lock-free `#DF` stack bottom canary check safe to invoke from inside `#DF` (`IST1`) handler.

@@ -204,9 +204,15 @@ pub fn verify_hugepage_2m_substage(online_cpus: usize) {
         Err(VSpaceError::WxViolation)
     );
 
-    let t_map0 = rdtsc();
-    map_2m(vs, huge_vaddr, block, VmProt::USER_RW).expect("map_2m failed");
-    let map_2m_cyc = rdtsc().wrapping_sub(t_map0).max(1);
+    let mut map_2m_cyc = u64::MAX;
+    for trial in 0..3 {
+        let t_map0 = rdtsc();
+        map_2m(vs, huge_vaddr, block, VmProt::USER_RW).expect("map_2m failed");
+        map_2m_cyc = map_2m_cyc.min(rdtsc().wrapping_sub(t_map0).max(1));
+        if trial < 2 {
+            let _ = unmap_2m(vs, huge_vaddr).expect("warmup unmap_2m failed");
+        }
+    }
 
     let pt_frames_2m = vspace_owned_pt_frames(vs).unwrap();
     assert_eq!(pt_frames_2m, 2, "Expected exactly PDPT + PD (2 frames) for 2MiB leaf");

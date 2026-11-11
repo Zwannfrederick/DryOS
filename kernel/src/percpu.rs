@@ -10,10 +10,13 @@ use core::cell::UnsafeCell;
 use core::mem::{offset_of, size_of};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::{rdmsr, wrmsr, MSR_IA32_GS_BASE, MSR_IA32_KERNEL_GS_BASE};
+use crate::arch::{rdmsr, wrmsr, MSR_IA32_FS_BASE, MSR_IA32_GS_BASE, MSR_IA32_KERNEL_GS_BASE};
 use crate::gdt_tss::MAX_CPUS;
 
 const PERCPU_MAGIC: u64 = 0x4452_595f_5043_5055; // "DRY_PCPU"
+
+pub const PCPU_OFF_KERNEL_RSP0: usize = 192;
+pub const PCPU_OFF_USER_RSP_SCRATCH: usize = 200;
 
 #[repr(C, align(64))]
 pub struct PerCpuData {
@@ -54,7 +57,16 @@ pub struct PerCpuData {
     pub quantum_rem: AtomicU32,
     pub storm_streak: AtomicU32,
     pub storm_slot: AtomicU64,
-    pub _pad2: u64,
+    pub nmi_count: AtomicU64,
+    /// Fourth 64-byte cache line (`192..256`): Ring 3 `SYSCALL` stack scratch, `FS`/`GS` & local counters.
+    pub kernel_rsp0: AtomicU64,
+    pub user_rsp_scratch: AtomicU64,
+    pub cur_fs_base: AtomicU64,
+    pub cur_user_gs_base: AtomicU64,
+    pub cr3_noops_local: AtomicU64,
+    pub cr3_switches_local: AtomicU64,
+    pub syscall_count: AtomicU64,
+    pub user_fault_count: AtomicU64,
 }
 
 const _: () = assert!(offset_of!(PerCpuData, self_ptr) == 0);
@@ -62,7 +74,9 @@ const _: () = assert!(offset_of!(PerCpuData, cpu_idx) == 8);
 const _: () = assert!(offset_of!(PerCpuData, lapic_id) == 16);
 const _: () = assert!(offset_of!(PerCpuData, magic) == 24);
 const _: () = assert!(offset_of!(PerCpuData, timer_irqs) == 128);
-const _: () = assert!(size_of::<PerCpuData>() == 192);
+const _: () = assert!(offset_of!(PerCpuData, kernel_rsp0) == PCPU_OFF_KERNEL_RSP0);
+const _: () = assert!(offset_of!(PerCpuData, user_rsp_scratch) == PCPU_OFF_USER_RSP_SCRATCH);
+const _: () = assert!(size_of::<PerCpuData>() == 256);
 
 impl PerCpuData {
     const fn uninit() -> Self {
@@ -96,7 +110,15 @@ impl PerCpuData {
             quantum_rem: AtomicU32::new(0),
             storm_streak: AtomicU32::new(0),
             storm_slot: AtomicU64::new(u64::MAX),
-            _pad2: 0,
+            nmi_count: AtomicU64::new(0),
+            kernel_rsp0: AtomicU64::new(0),
+            user_rsp_scratch: AtomicU64::new(0),
+            cur_fs_base: AtomicU64::new(0),
+            cur_user_gs_base: AtomicU64::new(0),
+            cr3_noops_local: AtomicU64::new(0),
+            cr3_switches_local: AtomicU64::new(0),
+            syscall_count: AtomicU64::new(0),
+            user_fault_count: AtomicU64::new(0),
         }
     }
 }
@@ -159,12 +181,24 @@ pub fn init_cpu_percpu_and_gs(info: CpuRegionInfo) -> &'static PerCpuData {
         slot.quantum_rem.store(0, Ordering::Release);
         slot.storm_streak.store(0, Ordering::Release);
         slot.storm_slot.store(u64::MAX, Ordering::Release);
+        slot.nmi_count.store(0, Ordering::Release);
+        slot.kernel_rsp0.store(info.boot_stack_top, Ordering::Release);
+        slot.user_rsp_scratch.store(0, Ordering::Release);
+        slot.cur_fs_base.store(0, Ordering::Release);
+        slot.cur_user_gs_base.store(0, Ordering::Release);
+        slot.cr3_noops_local.store(0, Ordering::Release);
+        slot.cr3_switches_local.store(0, Ordering::Release);
+        slot.syscall_count.store(0, Ordering::Release);
+        slot.user_fault_count.store(0, Ordering::Release);
         slot.magic = PERCPU_MAGIC;
 
+        // Ring 0 GS invariant: `IA32_GS_BASE` points to `&PerCpuData`; `IA32_KERNEL_GS_BASE`
+        // holds the active thread's user `GS` shadow (`0` initially), swapped on CPL=0 <-> CPL=3.
+        wrmsr(MSR_IA32_FS_BASE, 0);
         wrmsr(MSR_IA32_GS_BASE, ptr_val);
-        wrmsr(MSR_IA32_KERNEL_GS_BASE, ptr_val);
+        wrmsr(MSR_IA32_KERNEL_GS_BASE, 0);
         assert_eq!(rdmsr(MSR_IA32_GS_BASE), ptr_val, "IA32_GS_BASE readback mismatch");
-        assert_eq!(rdmsr(MSR_IA32_KERNEL_GS_BASE), ptr_val, "IA32_KERNEL_GS_BASE readback mismatch");
+        assert_eq!(rdmsr(MSR_IA32_KERNEL_GS_BASE), 0, "IA32_KERNEL_GS_BASE readback mismatch");
         &*(slot as *const PerCpuData)
     };
 

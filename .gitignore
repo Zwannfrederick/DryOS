@@ -4,5 +4,6 @@
 /vendor/linux-drivers/v*/
 **/build/
 **/states/
+**/__pycache__/
 *.class
 

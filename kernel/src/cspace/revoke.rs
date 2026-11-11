@@ -109,7 +109,7 @@ fn pop_one_mapping_from_slot(global_slot: u32) -> Option<CapMapRecord> {
     })
 }
 
-fn unmap_all_records_for_slot(global_slot: u32) -> usize {
+pub(crate) fn unmap_all_records_for_slot(global_slot: u32) -> usize {
     let mut unmapped = 0usize;
     let mut guard = 0usize;
     while let Some(rec) = pop_one_mapping_from_slot(global_slot) {
@@ -136,7 +136,7 @@ fn wait_slot_in_flight_zero(global_slot: u32) {
     let slot = slot_by_global(global_slot);
     let if_masked = (read_rflags() & (1 << 9)) == 0;
     let cpu_idx = read_gs_u64_at_8() as usize;
-    while slot.in_flight_ops.load(Ordering::Acquire) != 0 {
+    while slot.in_flight_ops.load(Ordering::SeqCst) != 0 {
         if if_masked {
             poll_and_ack_pending_shootdown(cpu_idx);
         }
@@ -466,7 +466,15 @@ pub fn cspace_destroy_object(
                 let _ = crate::cspace::destroy_cspace(resolved.obj_id as u16);
             }
         }
-        CapObjectKind::Tcb | CapObjectKind::Notification | CapObjectKind::None => {}
+        CapObjectKind::Tcb => {
+            if !crate::sched::release_dead_tcb_slot(
+                resolved.obj_id as usize,
+                resolved.expected_obj_gen,
+            ) {
+                return Err(CapError::BusyActiveObject);
+            }
+        }
+        CapObjectKind::Notification | CapObjectKind::None => {}
     }
 
     CSPACE_TABLE[cspace_id as usize]

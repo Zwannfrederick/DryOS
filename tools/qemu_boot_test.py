@@ -20,9 +20,11 @@ from qemu_log_validators import (
     verify_sched_line,
     verify_vspace_lines,
 )
+from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
+USERSPACE_DIR = ROOT / "userspace"
 BUILD_DIR = KERNEL_DIR / "build"
 TC_DIR = ROOT / ".toolchains"
 SYSROOT = TC_DIR / "sysroot"
@@ -58,8 +60,75 @@ def kernel_cargo_env() -> dict[str, str]:
     }
 
 
+def userspace_cargo_env() -> dict[str, str]:
+    linker_script = USERSPACE_DIR / "linker_user.ld"
+    rustflags = " ".join(
+        [
+            f"--sysroot={SYSROOT}",
+            "-C",
+            "relocation-model=static",
+            "-C",
+            f"link-arg=-T{linker_script}",
+            "-C",
+            "link-arg=-zmax-page-size=0x1000",
+        ]
+    )
+    return {
+        **os.environ,
+        "RUSTC_BOOTSTRAP": "1",
+        "CARGO_HOME": str(CARGO_HOME),
+        "__CARGO_TESTS_ONLY_SRC_ROOT": str(SYSROOT / "lib" / "rustlib" / "src" / "rust" / "library"),
+        "RUSTFLAGS": rustflags,
+    }
+
+
+def build_userspace() -> tuple[pathlib.Path, pathlib.Path]:
+    env = userspace_cargo_env()
+    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "clippy",
+            "--offline",
+            "--manifest-path",
+            str(USERSPACE_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        env=env,
+    )
+    print("[QEMU-TEST] Building release ELF64 user-hello & user-peer...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "build",
+            "--offline",
+            "--manifest-path",
+            str(USERSPACE_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--release",
+        ],
+        env=env,
+    )
+    out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
+    u_hello = out_dir / "user-hello"
+    u_peer = out_dir / "user-peer"
+    if not u_hello.exists() or not u_peer.exists():
+        raise RuntimeError(f"Missing userspace ELFs in {out_dir}")
+    return u_hello, u_peer
+
+
 def build_kernel() -> pathlib.Path:
     subprocess.check_call([sys.executable, str(ROOT / "tools" / "bootstrap_phase1.py"), "--verify"])
+    build_userspace()
     env = kernel_cargo_env()
 
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-kernel...")
@@ -127,6 +196,10 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
     for d in ["::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"]:
         subprocess.check_call(["mmd", "-i", part_spec, d], env=mtools_env)
 
+    u_out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
+    u_hello = u_out_dir / "user-hello"
+    u_peer = u_out_dir / "user-peer"
+
     conf_path = BUILD_DIR / "limine.conf"
     conf_text = (
         "timeout: 0\n"
@@ -136,12 +209,16 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         "    protocol: limine\n"
         "    path: boot():/boot/dry-kernel\n"
         f"    cmdline: {cmdline}\n"
+        "    module_path: boot():/boot/user-hello.elf\n"
+        "    module_path: boot():/boot/user-peer.elf\n"
     )
     conf_path.write_text(conf_text, encoding="utf-8")
 
     subprocess.check_call(["mcopy", "-i", part_spec, str(LIMINE_EFI), "::/EFI/BOOT/BOOTX64.EFI"], env=mtools_env)
     subprocess.check_call(["mcopy", "-i", part_spec, str(conf_path), "::/boot/limine/limine.conf"], env=mtools_env)
     subprocess.check_call(["mcopy", "-i", part_spec, str(kernel_elf), "::/boot/dry-kernel"], env=mtools_env)
+    subprocess.check_call(["mcopy", "-i", part_spec, str(u_hello), "::/boot/user-hello.elf"], env=mtools_env)
+    subprocess.check_call(["mcopy", "-i", part_spec, str(u_peer), "::/boot/user-peer.elf"], env=mtools_env)
 
 
 def run_qemu(name: str, img_path: pathlib.Path, smp: int, timeout_sec: int = 25) -> tuple[int, str, float]:
@@ -216,7 +293,7 @@ def assert_boot_case(
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {expected_rc}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
-        if "[DRY-" in line or "Limine" in line or "PANIC" in line:
+        if "[DRY-" in line or "Hello from DRY OS!" in line or "Limine" in line or "PANIC" in line:
             print(f"  {line}")
 
     if rc != expected_rc:
@@ -250,7 +327,7 @@ def assert_positive_smp_boot(
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
-        if "[DRY-" in line or "Limine" in line or "PANIC" in line:
+        if "[DRY-" in line or "Hello from DRY OS!" in line or "Limine" in line or "PANIC" in line:
             print(f"  {line}")
 
     must_contain = [
@@ -284,7 +361,10 @@ def assert_positive_smp_boot(
                 f"[DRY-CSPACE] PASS: cpus={smp}",
                 f"[DRY-CSPACE-BENCH] PASS: cpus={smp}",
                 f"[DRY-CSPACE-SMP] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1B-C UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace & ADR-007 verified cleanly.",
+                "Hello from DRY OS!",
+                f"[DRY-USER-SEC] PASS: cpus={smp}",
+                f"[DRY-USER-BENCH] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1B-D UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Userspace & Syscall ABI verified cleanly.",
             ]
         )
     must_not_contain = [
@@ -297,6 +377,7 @@ def assert_positive_smp_boot(
         "[DRY-VSPACE-FAIL]",
         "[DRY-TLB-FAIL]",
         "[DRY-CSPACE-FAIL]",
+        "[DRY-USER-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -319,8 +400,9 @@ def assert_positive_smp_boot(
         verify_pmm_and_untyped_lines(name, serial_out, smp)
         verify_vspace_lines(name, serial_out, smp)
         verify_cspace_and_tlb_debt_lines(name, serial_out, smp)
+        verify_userspace_lines(name, serial_out, smp)
     print(
-        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace invariants verified in {elapsed:.3f}s)."
+        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/userspace invariants verified in {elapsed:.3f}s)."
     )
 
 
@@ -665,7 +747,59 @@ def main() -> None:
             must_not_contain=["[DRY-BOOT-OK]"],
         )
 
-    print("\n[QEMU-TEST] ALL 46 MILESTONE 1B-C SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE & ADR-007 CHECKS PASSED.")
+    # Milestone 1B-D Negative Ring 3 / SMAP / ELF64 W^X / Active Process Reclaim Fault Tests (exit=35).
+    user_negative_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "user_kernel_pf_not_masked",
+            "kernel_pf_not_masked",
+            [
+                "[DRY-USER-INFO] Triggering unmapped Ring 0 #PF outside uaccess extable",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cs=0x8",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "user_smap_ring0_bypass",
+            "smap_ring0_bypass",
+            [
+                "[DRY-USER-INFO] Attempting raw Ring 0 read of USER_RW 0x600000 with CR4.SMAP=1 (AC=0)",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cr2=0x600000",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "user_wx_elf_segment",
+            "wx_elf_segment",
+            [
+                "[DRY-USER-FAIL] W^X ELF64 segment rejected at load time: err=Some(Elf(WxViolation))",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "user_active_proc_reclaim",
+            "active_proc_reclaim",
+            [
+                "[DRY-USER-FAIL] Premature reclamation of active process rejected",
+                "[DRY-PANIC]",
+            ],
+        ),
+    ]
+    for case_name, fault_arg, expected_tokens in user_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 user_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=expected_tokens,
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
+
+    print("\n[QEMU-TEST] ALL 50 MILESTONE 1B-D SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE, RING 3 USERSPACE & SYSCALL ABI CHECKS PASSED.")
 
 
 if __name__ == "__main__":

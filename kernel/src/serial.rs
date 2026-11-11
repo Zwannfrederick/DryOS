@@ -74,6 +74,41 @@ pub fn _print(args: fmt::Arguments<'_>) {
     }
 }
 
+/// Atomically write bounded user debug text under `SERIAL_LOCK`, sanitizing non-printable bytes.
+pub fn write_sanitized_user_bytes(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if !SERIAL_READY.load(Ordering::Acquire) {
+        init();
+    }
+    let saved_if = (read_rflags() & (1 << 9)) != 0;
+    cli();
+    while SERIAL_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    for &b in bytes {
+        match b {
+            b'\n' => {
+                write_byte_raw(b'\r');
+                write_byte_raw(b'\n');
+            }
+            b'\t' | 0x20..=0x7e => write_byte_raw(b),
+            _ => write_byte_raw(b'?'),
+        }
+    }
+    SERIAL_LOCK.store(false, Ordering::Release);
+    if saved_if {
+        // SAFETY: Restores previous IF=1 state only if interrupts were enabled on entry.
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
 /// Lock-free emergency print used exclusively from `#[panic_handler]` / `#DF` when a CPU may
 /// already hold `SERIAL_LOCK` at the time of fault.
 pub fn emergency_print(args: fmt::Arguments<'_>) {

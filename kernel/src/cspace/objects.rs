@@ -170,6 +170,9 @@ pub fn cspace_vspace_create(
 }
 
 fn required_frame_rights_for_prot(prot: VmProt) -> Result<CapRights, CapError> {
+    if !prot.contains(VmProt::USER) {
+        return Err(CapError::RightsAmplification);
+    }
     let writable = (prot.0 & VmProt::WRITE.0) != 0;
     let executable = (prot.0 & VmProt::EXEC.0) != 0;
     if writable && executable {

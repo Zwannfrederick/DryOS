@@ -211,6 +211,15 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
         return;
     }
 
+    if (frame.cs & 3) == 3 && cur_slot >= MAX_CPUS {
+        let pid = tcb(cur_slot).process_id.load(Ordering::Acquire);
+        if pid != 0 && crate::proc::is_process_kill_requested(pid) {
+            pcpu.irq_depth.store(0, Ordering::Release);
+            crate::proc::terminate_killed_from_cpl3_irq();
+        }
+        tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
+    }
+
     if cpu_idx == 0 {
         let ep_start = EPOCH_START_TSC.load(Ordering::Relaxed);
         let wd_limit = if ONLINE_SCHED_CPUS.load(Ordering::Relaxed) > 8 {
