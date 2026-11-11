@@ -4,6 +4,7 @@
 #![no_std]
 #![no_main]
 
+mod apic;
 mod arch;
 mod gdt_tss;
 mod idt;
@@ -172,6 +173,30 @@ extern "C" fn bsp_kmain() -> ! {
         "[DRY-SEC] PASS: ADR-007 SecLabel (8B) + 3-Domain + Lease/Revoke invariants verified"
     );
 
+    let force_xapic = cmdline.contains("apic_mode=xapic");
+    let apic_cal = apic::detect_and_init_bsp_apic(
+        mem.hhdm_offset,
+        mem.kernel_phys_base,
+        mem.kernel_virt_base,
+        force_xapic,
+    );
+    serial_println!(
+        "[DRY-APIC] PASS: mode={} div=16 samples_ticks_ms=[{},{},{}] ticks_per_ms={} quantum_ticks={} quantum_us={} tsc_mhz={} cpuid_crystal_hz={} cpuid_base_mhz={} arat={} inv_tsc={} tsc_dl={}",
+        apic_cal.mode.as_str(),
+        apic_cal.samples_ticks_ms[0],
+        apic_cal.samples_ticks_ms[1],
+        apic_cal.samples_ticks_ms[2],
+        apic_cal.ticks_per_ms,
+        apic_cal.quantum_ticks,
+        apic_cal.quantum_us,
+        apic_cal.tsc_mhz,
+        apic_cal.cpuid_crystal_hz,
+        apic_cal.cpuid_base_mhz,
+        apic_cal.has_arat as u8,
+        apic_cal.has_inv_tsc as u8,
+        apic_cal.has_tsc_deadline as u8,
+    );
+
     let smp_fault = SmpFaultTest::from_cmdline(cmdline);
     let smp = init_and_verify_smp(bsp_pcpu, smp_fault);
     serial_println!(
@@ -197,10 +222,17 @@ extern "C" fn bsp_kmain() -> ! {
         sched_summary.stale_wakes_rejected,
     );
 
-    serial_println!(
-        "[DRY-BOOT-OK] Milestone 1A-F UEFI boot + {}-vCPU SMP + cooperative H1 scheduler verified cleanly.",
-        smp.cpu_count
-    );
+    let irq_only_stage = cmdline.contains("preempt_stage=irq_only");
+    let preempt_fault = sched::preempt_tests::PreemptFaultTest::from_cmdline(cmdline);
+    sched::preempt_tests::verify_preemptive_scheduler(smp.cpu_count, irq_only_stage, preempt_fault);
+    sched::shutdown_ap_scheduler_service();
+
+    if !irq_only_stage {
+        serial_println!(
+            "[DRY-BOOT-OK] Milestone 1A-G UEFI boot + {}-vCPU SMP + cooperative & preemptive H1 scheduler verified cleanly.",
+            smp.cpu_count
+        );
+    }
     qemu_exit(QEMU_EXIT_SUCCESS);
 }
 

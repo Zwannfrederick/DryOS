@@ -1,34 +1,44 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Cooperative `H1` Kernel-Thread Scheduler (`ADR-004`, Milestone 1A-F Stage 1).
+//! `H1` Kernel-Thread Scheduler (`ADR-004`, Milestone 1A-F Cooperative & 1A-G Preemptive).
 //!
 //! Provides `BKL`-free per-CPU runqueues, independent 16 KiB kernel thread stacks with generation-
 //! stamped bottom canaries, x86-64 assembly `dry_switch_to` / `dry_thread_entry_trampoline`,
-//! strict `post_switch_*` stack-ownership handoff, `Notification` park/wake, and `Dead` slot
-//! reclamation.
+//! strict `post_switch_*` stack-ownership handoff, `Notification` park/wake, `Dead` slot
+//! reclamation, `preempt_count` nesting with `need_resched`, and calibrated Local APIC One-Shot
+//! timer preemption (`IST = 0`, `EOI` prior to switch).
 //!
-//! **Explicit Stage 1 Scope Boundaries:**
-//! - Cooperative scheduling only (`RFLAGS.IF == 0`; no Local APIC timer or IRQ preemption).
-//! - Shared kernel `VSpace` (`CR3` / TLB switching is deferred to Milestone 1B).
+//! **Explicit Milestone 1A-G Scope Boundary:**
+//! - Shared kernel `VSpace` (`CR3` / TLB switching and Ring 3 userspace belong to Milestone 1B).
 
 pub mod context;
+pub mod preempt;
+pub mod preempt_tests;
 pub mod runqueue;
 pub mod state;
 pub mod tests;
 
+pub use preempt::{
+    arm_epoch_watchdog, disarm_epoch_watchdog, is_preemptive_mode_active,
+    note_current_thread_progress, on_lapic_timer_irq, preempt_count, preempt_disable,
+    preempt_enable, set_nested_irq_fault_inject, set_preemptive_mode_active,
+    start_cpu_timer_for_phase, stop_cpu_timer_for_phase,
+};
+
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-use crate::arch::read_rsp;
+use crate::apic::QUANTUM_TICKS;
+use crate::arch::{cli, irq_restore, irq_save_cli, read_rsp, sti};
 use crate::gdt_tss::{set_cpu_tss_rsp0, verify_cpu_tss_and_canaries, MAX_CPUS};
-use crate::percpu::{get_percpu_by_idx, read_gs_u64_at_8};
+use crate::percpu::{current_percpu, get_percpu_by_idx, read_gs_u64_at_8};
 use crate::sched::context::{
     dry_switch_to, init_new_thread_stack, KernelThreadFn, PostSwitchKind,
 };
 use crate::sched::runqueue::{cpu_rq, pop_local_or_steal};
 use crate::sched::state::{
-    sched_invariant_panic, CommitParkOutcome, ExecState, Notification, TaskSchedState, ThreadId,
-    WakeOutcome, GEN_MAX, NO_CPU,
+    preempt_invariant_panic, sched_invariant_panic, CommitParkOutcome, ExecState, Notification,
+    TaskSchedState, ThreadId, WakeOutcome, GEN_MAX, NO_CPU,
 };
 
 pub const THREAD_STACK_BYTES: usize = 16 * 1024;
@@ -36,6 +46,25 @@ pub const WORKER_POOL_CAP: usize = 36;
 pub const TOTAL_TCB_SLOTS: usize = MAX_CPUS + WORKER_POOL_CAP;
 
 const WORKER_CANARY_MAGIC: u64 = 0x4452_595f_5448_5354; // "DRY_THST"
+
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ApEpochKind {
+    Cooperative = 0,
+    IrqOnlyVerify = 1,
+    PreemptiveSched = 2,
+}
+
+impl ApEpochKind {
+    #[inline]
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::IrqOnlyVerify,
+            2 => Self::PreemptiveSched,
+            _ => Self::Cooperative,
+        }
+    }
+}
 
 #[repr(C, align(64))]
 struct WorkerStack([u8; THREAD_STACK_BYTES]);
@@ -57,6 +86,8 @@ pub struct KernelTcb {
     pub prio: AtomicUsize,
     pub last_cpu: AtomicUsize,
     pub alloc_count: AtomicU64,
+    pub progress_seq: AtomicU64,
+    pub preempted_count: AtomicU64,
     pub slot_free: AtomicBool,
     pub notif: Notification,
 }
@@ -74,6 +105,8 @@ impl KernelTcb {
             prio: AtomicUsize::new(0),
             last_cpu: AtomicUsize::new(NO_CPU),
             alloc_count: AtomicU64::new(0),
+            progress_seq: AtomicU64::new(0),
+            preempted_count: AtomicU64::new(0),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
         }
@@ -84,18 +117,22 @@ impl KernelTcb {
 const UNINIT_TCB: KernelTcb = KernelTcb::uninit();
 static TCB_TABLE: [KernelTcb; TOTAL_TCB_SLOTS] = [UNINIT_TCB; TOTAL_TCB_SLOTS];
 
-static ONLINE_SCHED_CPUS: AtomicUsize = AtomicUsize::new(1);
-static GLOBAL_SPAWNED_THREADS: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_EXITED_THREADS: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_RECYCLED_SLOTS: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_CTX_SWITCHES: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_MIGRATIONS: AtomicU64 = AtomicU64::new(0);
-static PHASE_PENDING_THREADS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ONLINE_SCHED_CPUS: AtomicUsize = AtomicUsize::new(1);
+pub static GLOBAL_SPAWNED_THREADS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_EXITED_THREADS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_RECYCLED_SLOTS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_CTX_SWITCHES: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_MIGRATIONS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_TIMER_IRQS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_DEFERRED_RESCHEDS: AtomicU64 = AtomicU64::new(0);
+pub static PHASE_PENDING_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-static AP_SCHED_RELEASE: AtomicBool = AtomicBool::new(false);
+pub static AP_SCHED_RELEASE: AtomicBool = AtomicBool::new(false);
 static AP_SCHED_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-static AP_PHASE_EPOCH: AtomicUsize = AtomicUsize::new(0);
-static AP_PHASE_DONE_CPUS: AtomicUsize = AtomicUsize::new(0);
+static AP_EPOCH_KIND: AtomicU8 = AtomicU8::new(ApEpochKind::Cooperative as u8);
+pub static AP_PHASE_EPOCH: AtomicUsize = AtomicUsize::new(0);
+pub static AP_PHASE_DONE_CPUS: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 pub fn tcb(slot: usize) -> &'static KernelTcb {
@@ -118,6 +155,16 @@ pub fn current_thread_id() -> ThreadId {
     let slot = current_slot_on_cpu(cpu);
     let (_, _, gen26) = tcb(slot).sched.snapshot();
     ThreadId::new(slot, gen26)
+}
+
+#[inline]
+pub fn set_ap_epoch_kind(kind: ApEpochKind) {
+    AP_EPOCH_KIND.store(kind as u8, Ordering::Release);
+}
+
+#[inline]
+pub fn shutdown_ap_scheduler_service() {
+    AP_SCHED_SHUTDOWN.store(true, Ordering::Release);
 }
 
 #[inline]
@@ -151,6 +198,8 @@ pub fn init_scheduler(online_cpus: usize) {
     GLOBAL_RECYCLED_SLOTS.store(0, Ordering::Release);
     GLOBAL_CTX_SWITCHES.store(0, Ordering::Release);
     GLOBAL_MIGRATIONS.store(0, Ordering::Release);
+    GLOBAL_PREEMPTIONS.store(0, Ordering::Release);
+    GLOBAL_DEFERRED_RESCHEDS.store(0, Ordering::Release);
     PHASE_PENDING_THREADS.store(0, Ordering::Release);
 
     for cpu in 0..online_cpus {
@@ -158,6 +207,11 @@ pub fn init_scheduler(online_cpus: usize) {
         let pcpu = get_percpu_by_idx(cpu);
         pcpu.current_slot.store(cpu as u64, Ordering::Release);
         pcpu.ctx_switches.store(0, Ordering::Release);
+        pcpu.preemptions.store(0, Ordering::Release);
+        pcpu.deferred_rescheds.store(0, Ordering::Release);
+        pcpu.preempt_count.store(0, Ordering::Release);
+        pcpu.irq_depth.store(0, Ordering::Release);
+        pcpu.need_resched.store(false, Ordering::Release);
 
         let idle = tcb(cpu);
         idle.stack_base.store(pcpu.boot_stack_base, Ordering::Release);
@@ -170,35 +224,50 @@ pub fn init_scheduler(online_cpus: usize) {
 
     for idx in 0..WORKER_POOL_CAP {
         let slot = MAX_CPUS + idx;
-        // SAFETY: Single-threaded BSP initialization before `AP_SCHED_RELEASE`.
+        let w = tcb(slot);
+        let (_, _, cur_gen) = w.sched.snapshot();
+        // SAFETY: Single-threaded BSP initialization at quiescent phase boundary (`CLI`).
         let (base, top) = unsafe {
             let stk_ptr = (*WORKER_STACKS.0.get())[idx].0.as_mut_ptr();
             let b = stk_ptr as u64;
             let t = b + (THREAD_STACK_BYTES as u64);
-            write_volatile(b as *mut u64, worker_canary_value(slot, 1));
+            write_volatile(b as *mut u64, worker_canary_value(slot, cur_gen));
             (b, t)
         };
-        let w = tcb(slot);
         w.stack_base.store(base, Ordering::Release);
         w.stack_top.store(top, Ordering::Release);
         w.prio.store(1, Ordering::Release);
         w.last_cpu.store(NO_CPU, Ordering::Release);
         w.alloc_count.store(0, Ordering::Release);
+        w.progress_seq.store(0, Ordering::Release);
+        w.preempted_count.store(0, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
     }
 }
 
-/// Allocate a `Dead` worker TCB + 16 KiB stack, advance its `gen26`, initialize its `SwitchFrame`,
-/// and publish it as `ExecState::Ready` onto `target_cpu`'s `PerCpuRunQueue`.
 pub fn try_spawn_kernel_thread(
     prio: usize,
     target_cpu: usize,
     entry: KernelThreadFn,
     arg: u64,
 ) -> Option<ThreadId> {
+    try_spawn_kernel_thread_ex(prio, target_cpu, entry, arg, false)
+}
+
+/// Allocate a `Dead` worker TCB + 16 KiB stack, advance its `gen26`, initialize its `SwitchFrame`,
+/// and publish it as `ExecState::Ready` onto `target_cpu`'s `PerCpuRunQueue`.
+pub fn try_spawn_kernel_thread_ex(
+    prio: usize,
+    target_cpu: usize,
+    entry: KernelThreadFn,
+    arg: u64,
+    preemptible: bool,
+) -> Option<ThreadId> {
+    let saved_if = irq_save_cli();
     let online = ONLINE_SCHED_CPUS.load(Ordering::Acquire);
     let dst_cpu = target_cpu % online;
+    let mut spawned_tid = None;
 
     for idx in 0..WORKER_POOL_CAP {
         let slot = MAX_CPUS + idx;
@@ -223,12 +292,14 @@ pub fn try_spawn_kernel_thread(
         let top = w.stack_top.load(Ordering::Acquire);
         w.prio.store(prio, Ordering::Release);
         w.last_cpu.store(NO_CPU, Ordering::Release);
+        w.progress_seq.store(0, Ordering::Release);
+        w.preempted_count.store(0, Ordering::Release);
         w.notif.reset();
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
         unsafe {
             write_volatile(base as *mut u64, worker_canary_value(slot, next_gen));
-            let init_rsp = init_new_thread_stack(top, slot, entry, arg);
+            let init_rsp = init_new_thread_stack(top, slot, entry, arg, preemptible);
             *w.saved_rsp.get() = init_rsp;
         }
 
@@ -238,21 +309,28 @@ pub fn try_spawn_kernel_thread(
             cpu_rq(dst_cpu).push(prio, tid.raw()),
             "PerCpuRunQueue push failed on spawn"
         );
-        return Some(tid);
+        spawned_tid = Some(tid);
+        break;
     }
-    None
+
+    irq_restore(saved_if);
+    spawned_tid
 }
 
 #[inline]
-fn record_worker_dispatch(slot: usize, cpu_idx: usize) {
+pub(crate) fn record_worker_dispatch(slot: usize, cpu_idx: usize) {
     let prev_cpu = tcb(slot).last_cpu.swap(cpu_idx, Ordering::AcqRel);
     if prev_cpu != NO_CPU && prev_cpu != cpu_idx {
         GLOBAL_MIGRATIONS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Perform low-level context switch `prev_slot -> next_slot` on `cpu_idx`.
-fn switch_to_slot(cpu_idx: usize, prev_slot: usize, next_slot: usize, post_kind: PostSwitchKind) {
+pub(crate) fn switch_to_slot(
+    cpu_idx: usize,
+    prev_slot: usize,
+    next_slot: usize,
+    post_kind: PostSwitchKind,
+) {
     debug_assert_ne!(prev_slot, next_slot, "Attempted self-switch on slot {}", prev_slot);
     let prev_tcb = tcb(prev_slot);
     let next_tcb = tcb(next_slot);
@@ -272,7 +350,8 @@ fn switch_to_slot(cpu_idx: usize, prev_slot: usize, next_slot: usize, post_kind:
     }
 }
 
-/// Invoked from `dry_switch_to` assembly immediately AFTER `mov rsp, rsi` switched onto `next`'s stack.
+/// Invoked from `dry_switch_to` assembly immediately AFTER `mov rsp, rsi` switched onto `next`'s
+/// stack while `RFLAGS.IF == 0` (`CLI`) is unconditionally held.
 pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwitchKind) {
     let cpu_idx = current_cpu_idx();
     let pcpu = get_percpu_by_idx(cpu_idx);
@@ -323,6 +402,17 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
             PHASE_PENDING_THREADS.fetch_sub(1, Ordering::AcqRel);
         }
     }
+
+    // Zero-instruction IRQ livelock guard (`HANDOVER.md` Rule 3): reset quantum and re-arm the
+    // One-Shot Local APIC timer right before `popfq`/`iretq` grants `next` the CPU.
+    if pcpu.timer_armed.load(Ordering::Relaxed) {
+        pcpu.quantum_rem.store(QUANTUM_TICKS, Ordering::Relaxed);
+        pcpu.storm_slot.store(cur_slot as u64, Ordering::Relaxed);
+        pcpu.last_progress_seq
+            .store(tcb(cur_slot).progress_seq.load(Ordering::Relaxed), Ordering::Relaxed);
+        pcpu.storm_streak.store(0, Ordering::Relaxed);
+        crate::apic::arm_default_oneshot_tick();
+    }
 }
 
 pub(crate) fn verify_current_thread_entry_bounds(expected_slot: usize) {
@@ -351,11 +441,33 @@ fn select_next_slot_for_worker(cpu_idx: usize, online_cpus: usize) -> usize {
     }
 }
 
-/// Cooperative `yield_now()` from an active worker thread (`slot >= MAX_CPUS`).
+#[inline]
+fn assert_thread_context_schedulable(op: &'static str) {
+    let pcpu = current_percpu();
+    if pcpu.irq_depth.load(Ordering::Relaxed) != 0 {
+        preempt_invariant_panic(format_args!(
+            "Illegal {} inside IRQ context on cpu={}",
+            op, pcpu.cpu_idx
+        ));
+    }
+    if pcpu.preempt_count.load(Ordering::Relaxed) != 0 {
+        preempt_invariant_panic(format_args!(
+            "Double scheduling / illegal {} while preempt_count={} on cpu={}",
+            op,
+            pcpu.preempt_count.load(Ordering::Relaxed),
+            pcpu.cpu_idx
+        ));
+    }
+}
+
+/// Voluntary `yield_now()` from an active worker thread (`slot >= MAX_CPUS`).
 pub fn yield_now() {
+    assert_thread_context_schedulable("yield_now");
+    let saved_if = irq_save_cli();
     let cpu_idx = current_cpu_idx();
     let cur_slot = current_slot_on_cpu(cpu_idx);
     assert!(cur_slot >= MAX_CPUS, "yield_now called from idle context");
+    tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
     let target_cpu = (cpu_idx + 1) % online;
 
@@ -363,16 +475,18 @@ pub fn yield_now() {
     let next_slot = select_next_slot_for_worker(cpu_idx, online);
     switch_to_slot(cpu_idx, cur_slot, next_slot, PostSwitchKind::Yield { target_cpu });
 
-    // Resumed on potentially a migrated CPU! Verify live stack ownership & hardware RSP.
     let resumed_cpu = current_cpu_idx();
     assert_eq!(current_slot_on_cpu(resumed_cpu), cur_slot);
     assert_eq!(tcb(cur_slot).sched.stack_owner(), resumed_cpu);
+    irq_restore(saved_if);
 }
 
 /// Step 1 of `H1` sleep protocol on current worker thread.
 pub fn prepare_park_current() {
+    assert_thread_context_schedulable("prepare_park");
     let cpu_idx = current_cpu_idx();
     let cur_slot = current_slot_on_cpu(cpu_idx);
+    tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
     tcb(cur_slot).sched.prepare_park();
 }
 
@@ -384,15 +498,22 @@ pub fn cancel_park_current() {
 
 /// Step 3 of `H1` sleep protocol: either consumes `Notified` token in-place or switches off stack.
 pub fn commit_park_current() -> CommitParkOutcome {
+    assert_thread_context_schedulable("commit_park");
+    let saved_if = irq_save_cli();
     let cpu_idx = current_cpu_idx();
     let cur_slot = current_slot_on_cpu(cpu_idx);
+    tcb(cur_slot).progress_seq.fetch_add(1, Ordering::Relaxed);
     let outcome = tcb(cur_slot).sched.commit_park(cur_slot, cpu_idx);
     if outcome == CommitParkOutcome::SwitchToPark {
         let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
         let target_cpu = (cpu_idx + 1) % online;
         let next_slot = select_next_slot_for_worker(cpu_idx, online);
         switch_to_slot(cpu_idx, cur_slot, next_slot, PostSwitchKind::Park { target_cpu });
+        let resumed_cpu = current_cpu_idx();
+        assert_eq!(current_slot_on_cpu(resumed_cpu), cur_slot);
+        assert_eq!(tcb(cur_slot).sched.stack_owner(), resumed_cpu);
     }
+    irq_restore(saved_if);
     outcome
 }
 
@@ -409,11 +530,16 @@ pub fn notify_thread(target: ThreadId, bits: u64, preferred_cpu: usize) -> WakeO
 }
 
 /// Wake `target` (`Blocked -> Waking -> Ready + rq.push`, or deposit `ParkToken::Notified`).
+///
+/// Masks local interrupts (`irq_save_cli`) so an IRQ preemption on `preferred_cpu`'s peer can
+/// never suspend a producer between `StaticRunQueue::enqueue_pos` CAS and `cell.seq` commit
+/// and enqueue the preempted producer behind its own uncommitted ring slot.
 pub fn wake_thread(target: ThreadId, preferred_cpu: usize) -> WakeOutcome {
     let slot = target.slot();
     if !(MAX_CPUS..TOTAL_TCB_SLOTS).contains(&slot) {
         return WakeOutcome::Terminated;
     }
+    let saved_if = irq_save_cli();
     let w = tcb(slot);
     let outcome = w.sched.wakeup(target.gen26());
     if outcome == WakeOutcome::WokeBlocked {
@@ -422,11 +548,14 @@ pub fn wake_thread(target: ThreadId, preferred_cpu: usize) -> WakeOutcome {
         let prio = w.prio.load(Ordering::Relaxed);
         w.sched.finish_waking_and_push(slot, prio, cpu_rq(dst_cpu));
     }
+    irq_restore(saved_if);
     outcome
 }
 
 /// Terminate the currently executing worker thread (`Running -> Exiting -> post_switch_exit -> Dead`).
 pub fn exit_current_thread() -> ! {
+    assert_thread_context_schedulable("exit_current_thread");
+    cli();
     let cpu_idx = current_cpu_idx();
     let cur_slot = current_slot_on_cpu(cpu_idx);
     assert!(cur_slot >= MAX_CPUS, "Idle thread cannot exit");
@@ -440,8 +569,10 @@ pub fn exit_current_thread() -> ! {
 
 /// Execute one dispatch cycle from CPU `cpu_idx`'s Boot/Idle context if a runnable worker exists.
 pub fn idle_dispatch_once(cpu_idx: usize) -> bool {
+    let saved_if = irq_save_cli();
+    tcb(cpu_idx).progress_seq.fetch_add(1, Ordering::Relaxed);
     let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
-    if let Some(raw_ticket) = pop_local_or_steal(cpu_idx, online) {
+    let dispatched = if let Some(raw_ticket) = pop_local_or_steal(cpu_idx, online) {
         let ticket = ThreadId::from_raw(raw_ticket);
         let next_slot = ticket.slot();
         tcb(next_slot).sched.dispatch_popped_ticket(ticket, cpu_idx);
@@ -452,10 +583,12 @@ pub fn idle_dispatch_once(cpu_idx: usize) -> bool {
         true
     } else {
         false
-    }
+    };
+    irq_restore(saved_if);
+    dispatched
 }
 
-/// Secondary CPU (`AP`) cooperative scheduler service loop invoked after Milestone 1A-E SMP bring-up.
+/// Secondary CPU (`AP`) scheduler service loop supporting Cooperative, IRQ-Only & Preemptive epochs.
 pub fn ap_scheduler_service_loop(cpu_idx: usize) {
     while !AP_SCHED_RELEASE.load(Ordering::Acquire) {
         if crate::is_panicking() {
@@ -474,12 +607,33 @@ pub fn ap_scheduler_service_loop(cpu_idx: usize) {
         }
         let cur_epoch = AP_PHASE_EPOCH.load(Ordering::Acquire);
         if cur_epoch > seen_epoch {
-            while PHASE_PENDING_THREADS.load(Ordering::Acquire) > 0 {
-                if crate::is_panicking() {
-                    crate::arch::halt_forever();
+            match ApEpochKind::from_u8(AP_EPOCH_KIND.load(Ordering::Acquire)) {
+                ApEpochKind::Cooperative => {
+                    while PHASE_PENDING_THREADS.load(Ordering::Acquire) > 0 {
+                        if crate::is_panicking() {
+                            crate::arch::halt_forever();
+                        }
+                        if !idle_dispatch_once(cpu_idx) {
+                            core::hint::spin_loop();
+                        }
+                    }
                 }
-                if !idle_dispatch_once(cpu_idx) {
-                    core::hint::spin_loop();
+                ApEpochKind::IrqOnlyVerify => {
+                    preempt_tests::run_ap_irq_only_stage(cpu_idx);
+                }
+                ApEpochKind::PreemptiveSched => {
+                    let pcpu = get_percpu_by_idx(cpu_idx);
+                    start_cpu_timer_for_phase(pcpu);
+                    sti();
+                    while PHASE_PENDING_THREADS.load(Ordering::Acquire) > 0 {
+                        if crate::is_panicking() {
+                            crate::arch::halt_forever();
+                        }
+                        if !idle_dispatch_once(cpu_idx) {
+                            core::hint::spin_loop();
+                        }
+                    }
+                    stop_cpu_timer_for_phase(pcpu);
                 }
             }
             seen_epoch = cur_epoch;

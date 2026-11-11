@@ -377,3 +377,57 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 - **Gizlenmeyen Derleme / Düzenleme Kayıtları (`0` QEMU Başarısızlığı):**
   1. `smp.rs` düzenlemesinde tek satırlık `halt_forever()` hedefi dosyada 4 yerde eşleştiği için 3 istenmeyen eşleşme anında geri alındı.
   2. İlk `cargo clippy -D warnings` kontrolünde yakalanan 7 uyarı (`unused_imports` x2, `current_thread_id` kullanılmaması -> `yield_worker` kimlik doğrulamasına bağlandı, `needless_range_loop` x2, `manual_range_contains` x2) düzeltildi; tüm `15/15` QEMU senaryosu ilk koşuda geçti.
+
+
+---
+
+## Bölüm E — Faz 1 `Milestone 1A-G`: Preemptive `H1` Zamanlayıcı ve `Local APIC`/`x2APIC` Kalibrasyonu
+
+- **Tarih:** 11 Kasım 2026
+- **Kapsam:** `b6ad2e9` (`Milestone 1A-F` işbirlikçi `H1` zamanlayıcı ve `15` regresyon testi) korunarak; `CPUID` + `IA32_APIC_BASE` (`0x1B`) donanım yetenek tespiti ve 3-kademeli geri-düşüş (*fallback*) politikası, dinamik i8254 PIT Kanal 2 zamanlayıcı kalibrasyonu, kesme/iş-parçacığı yığın sahipliği protokolü (`IST = 0`, `EOI`-önce-switch, `CLI` `finish_post_switch`, One-Shot yeniden kurma), `preempt_count` yuvalanması + `need_resched`, CPU'yu bırakmayan (*non-yielding*) iş parçacıklarının zorlayıcı (*involuntary*) kesilmesi, `IRQ` vs `yield`/`park`/`wake`/`exit` yarışları (`1 -> 2 -> 4 -> 20 vCPU`) ve 5 negatif preemptive arıza testi.
+- **Tekrarlanabilir Komutlar:**
+  - Yalnızca Aşama A (`IRQ` teslimi + `EOI` + `TrapFrame` bütünlüğü): `python3 tools/qemu_boot_test.py --smp-only {1|2|4|20} --irq-only`
+  - Tam paket (`21/21` senaryo): `python3 tools/qemu_boot_test.py`
+
+### E.1. Donanım Yetenek Tespiti, Geri-Düşüş Politikası ve Kesme/Yığın Sözleşmesi (`apic.rs`, `idt.rs`, `sched/{context.rs,preempt.rs}`)
+
+1. **3-Kademeli Donanım Geri-Düşüş Politikası ve Eski `8259 PIC` Maskelemesi:**
+   - `STI` öncesinde eski çift `8259A PIC` (`0x20/0x21`, `0xA0/0xA1`) `0x20..0x2F` vektörlerine yeniden eşlenip tüm hatları `0xFF` ile maskelenir; olası sahte donanım `IRQ7`/`IRQ15` ve APIC `0xFF` vektörleri zararsız sayaçlarla karşılanır (`spurious_irqs=0`).
+   - **Kademe 1 (Birincil — `x2APIC` MSR):** `CPUID.01H:EDX[9] == 1` ve `ECX[21] == 1` ise her çekirdekte `IA32_APIC_BASE[11:10] = 0b11` (`EN | EXTD`) etkinleştirilir; seri serileştirme veya MMIO sayfa tablosu gerektirmeden `0x800..0x83F` MSR yüzeyi kullanılır.
+   - **Kademe 2 (Yedek — `xAPIC` Uncached MMIO):** `x2APIC` yoksa veya `apic_mode=xapic` verilmişse `IA32_APIC_BASE & 0xFFFF_F000` (`0xFEE0_0000`) adresi HHDM içinde önbelleksiz (`PCD | PWT | RW | NX | P`) 4 KiB PTE ile eşlenir ve `boot_2cpu_xapic_fallback` senaryosuyla uçtan uca doğrulanır (`mode=xapic-mmio`).
+   - **Kademe 3 (Deterministik Red):** `CPUID.01H:EDX[9] == 0` ise sahte zamanlayıcı uydurulmaz; `[DRY-APIC-FAIL]` ile deterministik panik (`exit=35`) üretilir.
+2. **Dinamik Zamanlayıcı Ölçümü ve Sanallaştırma Sınırı (Sabit Frekans İddiası Yok):**
+   - QEMU/KVM (`-cpu host`) altında `CPUID.15H` ve `CPUID.16H` yapraklarının `0` döndüğü deneysel olarak doğrulandı (`cpuid_crystal_hz=0 cpuid_base_mhz=0`).
+   - BSP, `LVT_TIMER` maskeli ve bölücü `div=16` iken donanım **i8254 PIT Kanal 2** (`1.193182 MHz`, Kip 0, `5.966` darbe = `5,0008 ms`) referansına karşı 3 bağımsız pencere ölçer. PIT `OUT2` erken (`< 5 ms`) yükselemediği ve konak vCPU kesilmeleri yalnızca terminal sayım sonrası okuma gecikmesi eklediği için 3 örneğin minimumu seçilir (`ticks_per_ms ≈ 62.500..62.543` -> `~1,000 GHz` KVM APIC veri yolu saati; `tsc_mhz ≈ 3.110..3.112 MHz`; `QUANTUM_TICKS = 2` -> `~2.000 µs`).
+   - **Açık Ölçüm Sınırı:** Ölçülen frekans sanallaştırılmış KVM zamanlayıcısına aittir; konak zamanlayıcı *jitter*'ına tabidir ve 4C/8T konakta `-smp 20` koşusu çıplak metal mikrosaniye-altı zamanlama doğruluğunu veya fiziksel 20 çekirdek performansını **kanıtlamaz**.
+3. **Kesme Bağlamı ile Thread Bağlamı Arasındaki Yığın Sahipliği ve Bloklamasız ISR Kuralları:**
+   - `VEC_LAPIC_TIMER` (`0xEF`) `Interrupt Gate` (`RFLAGS.IF = 0` girişte otomatik temizlenir) ve **`IST = 0`** kullanır (`IST1` yalnızca `#DF` vektör `8` için münhasırdır). Donanım `TrapFrame` (`176 B`) + `dry_switch_to` `SwitchFrame` (`56 B`), o anda `stack_owner == cpu_idx` olan iş parçacığının özel 16 KiB çekirdek yığınına itilir; ISR içinde yığın sınırları ve taban kanaryası doğrulanır.
+   - `lapic_eoi()` çağrısı bağlam değişiminden **kesinlikle önce** yapılır (`ISR[0xEF] == 0` her faz sonunda donanımdan geri okunur); aksi hâlde kesilen thread uykudayken yeni thread o çekirdekte bir daha zamanlayıcı kesmesi alamaz.
+   - `dry_switch_to`, `pushfq; cli` ile bayrakları kaydeder, `mov rsp, rsi` sonrası `finish_post_switch` çağrısını **`RFLAGS.IF == 0` iken** (`popfq` öncesinde) yürütür ve hedef göreve dönmeden hemen önce One-Shot APIC sayacını yeniden kurarak sıfır-buyruk kesme kilitlenmesini (*zero-instruction IRQ livelock*) önler.
+   - `on_lapic_timer_irq` içinde **0 bloklayıcı kilit, 0 bellek tahsisi ve 0 uyuyabilen işlem** bulunur (`irq_depth > 0` iken `yield_now`/`prepare_park`/`commit_park`/`exit` çağrıları çalışma zamanında reddedilir). Aynı CPU üzerinde Vyukov MPMC halkasının kesme tekrar-girişinden (*IRQ reentrancy*) etkilenmemesi için tüm `StaticRunQueue::{push,pop}` çağrıları `RFLAGS.IF == 0` şartını çalışma zamanında zorlar.
+
+### E.2. Kademeli Doğrulama Sonuçları (`1 -> 2 -> 4 -> 20 vCPU`, `xAPIC` Yedek ve 5 Negatif Test — `21/21` Geçti)
+
+| Senaryo | `-smp` | APIC Kipi & Kalibrasyon (`ticks/ms`) | `IRQ-Only` (`total / min_cpu`) | Preemptive `timer_irqs / preempts / deferred` | Zorla Kesilen Spinner (`threads / preempts`) | Karma Yarış (`spawn=exit / recycle / sw / mig / park`) | Çıkış / Süre |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `boot_1cpu_ok` | `1` | `x2apic-msr` (`62.522`) | `10 / 10` | `172 / 80 / 1` | `4 / 4` | `60 / 24 / 452 / 0 / 72` | **`33`** / `1.580 s` |
+| `boot_2cpu_ok` | `2` | `x2apic-msr` (`62.539`) | `20 / 10` | `172 / 75 / 1` | `4 / 4` | `60 / 24 / 447 / 243 / 72` | **`33`** / `1.580 s` |
+| `boot_4cpu_ok` | `4` | `x2apic-msr` (`62.543`) | `40 / 10` | `99 / 28 / 1` | `8 / 8` | `64 / 28 / 446 / 100 / 96` | **`33`** / `1.598 s` |
+| `boot_20cpu_ok` | `20` | `x2apic-msr` (`62.501`) | `200 / 10` | `482 / 66 / 1` | `32 / 65` | `68 / 32 / 547 / 143 / 120` | **`33`** / `1.976 s` |
+| `boot_2cpu_xapic_fallback` | `2` | `xapic-mmio` (`62.340`) | `20 / 10` | `172 / 75 / 1` | `4 / 4` | `60 / 24 / 447 / 247 / 72` | **`33`** / `1.411 s` |
+
+- **5 Negatif Preemptive Arıza Testi (`-smp 2`, tamamı `exit=35` ile deterministik yakalandı):**
+  1. `preempt_irq_storm` (`preempt_fault=irq_storm`): 1-tick (`~16 ns`) zamanlayıcı fırtınasında `[DRY-PREEMPT-FAIL] Timer interrupt storm / zero-progress livelock detected on cpu=0 slot=0 streak=256` (`1.298 s`).
+  2. `preempt_nested_irq` (`preempt_fault=nested_irq`): ISR içinde erken `STI + int 0xef` enjeksiyonunda `[DRY-PREEMPT-FAIL] Nested timer interrupt violation (irq_depth=2) on cpu=1` (`1.270 s`).
+  3. `preempt_lost_wakeup` (`preempt_fault=lost_wakeup`): Silahsızlandırılmış `ParkToken::None` ile `commit_park` çağrısında `[DRY-PREEMPT-FAIL] Preemptive lost-wakeup protocol violation on slot=64: state=Running token=None` (`1.272 s`).
+  4. `preempt_double_schedule` (`preempt_fault=double_sched`): Halihazırda kuyrukta olan görev (`in_flight_refs=1`) ikinci kez kuyruklanmak istendiğinde `[DRY-PREEMPT-FAIL] Double scheduling / duplicate runqueue enqueue detected on slot=64 (in_flight_refs=2)` (`1.258 s`).
+  5. `preempt_stack_reuse` (`preempt_fault=stack_reuse`): Aktif `stack_owner=0` tutulan görev yığını erken yeniden tahsis edildiğinde `[DRY-PREEMPT-FAIL] Premature stack reuse while stack_owner active on slot=64 cpu=0` (`1.254 s`).
+- **Korunan Regresyon Paketi:** `Milestone 1A-D/E/F` kapsamındaki tüm `11` negatif istisna/SMP/işbirlikçi-H1 testi ve `4` işbirlikçi pozitif aşama (`[DRY-SCHED] PASS:`) tek bir değişiklik veya regresyon olmadan `21/21` koşuda geçti.
+
+### E.3. Geliştirme Sırasında Yakalanıp Çözülen Gerçek Hatalar (Gizlenen Hata = `0`)
+
+1. **Derleme / Clippy Düzeltmeleri:** `ApicCalibrationSummary` alan kısaltması (`has_arat`/`has_inv_tsc`) ve Rust `1.99.1`'de güvenli olan `__cpuid` çevresindeki gereksiz `unsafe` bloğu (`-D unused-unsafe`) düzeltildi (`0` uyarı).
+2. **`init_scheduler` Çoklu-Faz Yığın Kanaryası Nesil (`gen26`) Uyumsuzluğu (`1-vCPU` Koşusunda Yakalandı):** İşbirlikçi `1A-F` fazından sonra ikinci kez çağrılan `init_scheduler()`, yığın tabanına mevcut `cur_gen` (`5`) yerine sabit `gen=1` yazdığı için kullanılmayan `slot=66` kanarya denetiminde panik üretti -> `w.sched.snapshot()` üzerinden gerçek `cur_gen` damgalanarak giderildi.
+3. **Vyukov MPMC `StaticRunQueue` Aynı-CPU Kesme Tekrar-Girişi ve `-smp 20` `G4` Spawner Kilitlenmesi:**
+   - İlk `-smp 20` koşusunda zaman aşımı gözlendi. İncelemede (a) `wake_thread()` çağrısının `RFLAGS.IF == 1` ile `StaticRunQueue::push` çağırdığı — aynı CPU'da `enqueue_pos` CAS ile `cell.seq` yazımı arasına giren bir zamanlayıcı kesmesinin üreticiyi kendi tamamlanmamış hücresinin arkasına kuyruklayabileceği — tespit edilip `wake_thread` `irq_save_cli()` altına alındı ve `push`/`pop` içine `IF == 0` doğrulaması eklendi; (b) CPU 0 zamanlayıcı ISR'ına eklenen `EPOCH_WATCHDOG_TSC` TCB dökümüyle, `G4` fazında 36 yuvanın dolduğu anda BSP'nin `spawn_preemptible_with_assist` içinde `slot=65` (`mixed_bg_spinner_worker`) görevini devraldığı, diğer 19 AP'nin kalan görevleri bitirip kuyrukları boşalttığı (`live=4 <= 20`) ve `slot=65` kesilemediği için BSP'nin kalan 32 görevi üretemediği kesin olarak kanıtlandı -> `>= 2` vCPU'da AP'ler yuvaları boşaltırken BSP üretici rolünde tutuldu ve `mixed_bg_spinner_worker` canlı görev sayısına (`live <= online`) bağlandı; art arda 4 `-smp 20` koşusu `1.84s..2.15s` içinde deterministik geçti.
+4. **Idle Bağlamında (`slot=0`) 1-Tick (`16 ns`) Zamanlayıcı Fırtınası Canlı-Kilitlenmesi (`preempt_irq_storm` Negatif Testinde Yakalandı):** İlk tam paket koşusunda `preempt_irq_storm` testi, `STI` açılır açılmaz `slot=0` (idle dispatcher) üzerinde `1.965.401` kesme üreterek tek bir worker bile çalıştırmadan `EPOCH_WATCHDOG_TSC`'ye takıldı; çünkü fırtına bekçisi yalnızca `cur_slot >= MAX_CPUS` görevlerini izliyordu -> sıfır-ilerleme (`storm_streak >= 256`) denetimi aktif `idle_dispatch_once` döngüsünü de kapsayacak şekilde genişletildi ve fırtına `1.298 s` içinde deterministik olarak yakalandı.

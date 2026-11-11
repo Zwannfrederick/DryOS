@@ -140,6 +140,12 @@ pub fn sched_invariant_panic(msg: core::fmt::Arguments<'_>) -> ! {
     panic!("H1 scheduler invariant failure: {}", msg);
 }
 
+pub fn preempt_invariant_panic(msg: core::fmt::Arguments<'_>) -> ! {
+    crate::enter_fatal_or_halt();
+    crate::serial::emergency_print(format_args!("\r\n[DRY-PREEMPT-FAIL] {}\r\n", msg));
+    panic!("Preemptive H1 invariant failure: {}", msg);
+}
+
 pub struct TaskSchedState {
     sched: AtomicU32,
     stack_owner: AtomicUsize,
@@ -165,6 +171,11 @@ impl TaskSchedState {
         self.stack_owner.load(Ordering::Acquire)
     }
 
+    #[inline]
+    pub fn in_flight_refs(&self) -> usize {
+        self.in_flight_refs.load(Ordering::Acquire)
+    }
+
     pub fn init_idle_running(&self, cpu_idx: usize) {
         self.in_flight_refs.store(0, Ordering::Release);
         self.stack_owner.store(cpu_idx, Ordering::Release);
@@ -175,6 +186,12 @@ impl TaskSchedState {
     pub fn init_spawned_ready(&self, slot: usize, next_gen: u32) -> ThreadId {
         let cur_owner = self.stack_owner.load(Ordering::Acquire);
         if cur_owner != NO_CPU {
+            if crate::sched::is_preemptive_mode_active() {
+                preempt_invariant_panic(format_args!(
+                    "Premature stack reuse while stack_owner active on slot={} cpu={}",
+                    slot, cur_owner
+                ));
+            }
             sched_invariant_panic(format_args!(
                 "H1 Bug1 stack_owner violation on spawn: slot={} still owned by cpu={}",
                 slot, cur_owner
@@ -190,6 +207,18 @@ impl TaskSchedState {
         self.sched
             .store(pack_sched(ExecState::Ready, ParkToken::None, next_gen), Ordering::Release);
         ThreadId::new(slot, next_gen)
+    }
+
+    #[inline]
+    pub fn claim_enqueue_ref(&self, slot: usize) {
+        let prev = self.in_flight_refs.fetch_add(1, Ordering::AcqRel);
+        if prev != 0 {
+            preempt_invariant_panic(format_args!(
+                "Double scheduling / duplicate runqueue enqueue detected on slot={} (in_flight_refs={})",
+                slot,
+                prev + 1
+            ));
+        }
     }
 
     #[inline]
@@ -285,7 +314,7 @@ impl TaskSchedState {
     /// transitions `(SwPreempt, tok, gen) -> (Ready, tok, gen)`, and publishes to `rq`.
     pub fn post_switch_yield(&self, slot: usize, cpu_idx: usize, prio: usize, rq: &PerCpuRunQueue) {
         self.release_stack(slot, cpu_idx);
-        self.in_flight_refs.fetch_add(1, Ordering::AcqRel);
+        self.claim_enqueue_ref(slot);
         let mut raw = self.sched.load(Ordering::Acquire);
         loop {
             let (state, tok, gen26) = unpack_sched(raw);
@@ -380,6 +409,12 @@ impl TaskSchedState {
                     }
                 }
                 (other_state, other_tok) => {
+                    if crate::sched::is_preemptive_mode_active() {
+                        preempt_invariant_panic(format_args!(
+                            "Preemptive lost-wakeup protocol violation on slot={}: state={:?} token={:?}",
+                            slot, other_state, other_tok
+                        ));
+                    }
                     sched_invariant_panic(format_args!(
                         "H1 Bug3 invalid park protocol state on slot={}: state={:?} token={:?}",
                         slot, other_state, other_tok
@@ -398,7 +433,7 @@ impl TaskSchedState {
             assert_eq!(state, ExecState::SwPark, "post_switch_park expected SwPark");
             match tok {
                 ParkToken::Notified => {
-                    self.in_flight_refs.fetch_add(1, Ordering::AcqRel);
+                    self.claim_enqueue_ref(slot);
                     let next = pack_sched(ExecState::Ready, ParkToken::None, gen26);
                     match self.sched.compare_exchange_weak(
                         raw,

@@ -99,6 +99,30 @@ pub fn cli() {
 }
 
 #[inline]
+pub fn sti() {
+    // SAFETY: Caller guarantees IDT, per-CPU GS_BASE, masked 8259 PIC, and Local APIC are ready.
+    unsafe {
+        asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Save current `RFLAGS.IF` (`bit 9`) and mask local interrupts (`CLI`).
+#[inline]
+pub fn irq_save_cli() -> bool {
+    let was_enabled = (read_rflags() & (1 << 9)) != 0;
+    cli();
+    was_enabled
+}
+
+/// Restore `RFLAGS.IF = 1` (`STI`) if interrupts were previously enabled before `irq_save_cli()`.
+#[inline]
+pub fn irq_restore(was_enabled: bool) {
+    if was_enabled {
+        sti();
+    }
+}
+
+#[inline]
 pub fn read_cr3() -> u64 {
     let cr3: u64;
     // SAFETY: Reading CR3 at CPL=0 has no side effects.

@@ -166,15 +166,27 @@ def run_qemu(name: str, img_path: pathlib.Path, smp: int, timeout_sec: int = 25)
         "-no-reboot",
     ]
     t0 = time.monotonic()
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        timeout=timeout_sec,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out_str = (
+            exc.stdout.decode("utf-8", errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        print(
+            f"\n[QEMU-TIMEOUT] {name} (smp={smp}) timed out after {timeout_sec}s! Partial serial output:\n{out_str}",
+            file=sys.stderr,
+        )
+        raise
     elapsed = time.monotonic() - t0
     return proc.returncode, proc.stdout, elapsed
 
@@ -239,13 +251,85 @@ def verify_sched_line(name: str, serial_out: str, smp: int) -> None:
         raise RuntimeError(f"[{name}] Expected cross-CPU migrations >= 1 on smp={smp}, got {fields}")
 
 
-def assert_positive_smp_boot(name: str, kernel_elf: pathlib.Path, smp: int) -> None:
+def verify_apic_and_irq_lines(
+    name: str, serial_out: str, smp: int, expected_mode: str | None = None
+) -> None:
+    apic_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-APIC] PASS:" in ln]
+    if len(apic_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-APIC] PASS line, got {len(apic_lines)}")
+    if expected_mode and f"mode={expected_mode}" not in apic_lines[0]:
+        raise RuntimeError(f"[{name}] Expected mode={expected_mode} in {apic_lines[0]!r}")
+
+    apic_kv: dict[str, int] = {}
+    for tok in apic_lines[0].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            if v.isdigit():
+                apic_kv[k] = int(v)
+    if apic_kv.get("ticks_per_ms", 0) < 100:
+        raise RuntimeError(f"[{name}] Invalid calibrated ticks_per_ms in {apic_lines[0]!r}")
+    if apic_kv.get("tsc_mhz", 0) < 100:
+        raise RuntimeError(f"[{name}] Invalid calibrated tsc_mhz in {apic_lines[0]!r}")
+
+    irq_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-IRQ-ONLY] PASS:" in ln]
+    if len(irq_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-IRQ-ONLY] PASS line, got {len(irq_lines)}")
+    irq_kv: dict[str, int] = {}
+    for tok in irq_lines[0].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            if v.isdigit():
+                irq_kv[k] = int(v)
+    if irq_kv.get("cpus") != smp:
+        raise RuntimeError(f"[{name}] IRQ-only cpus mismatch: {irq_lines[0]!r}")
+    if irq_kv.get("min_cpu_irqs", 0) < 8 or irq_kv.get("total_timer_irqs", 0) < smp * 8:
+        raise RuntimeError(f"[{name}] Insufficient per-CPU timer IRQs in {irq_lines[0]!r}")
+    if "eoi_verified=true" not in irq_lines[0] or "trapframe_gpr_rflags_ok=true" not in irq_lines[0]:
+        raise RuntimeError(f"[{name}] Missing EOI/TrapFrame verification in {irq_lines[0]!r}")
+
+
+def verify_preempt_line(name: str, serial_out: str, smp: int) -> None:
+    p_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PREEMPT] PASS:" in ln]
+    if len(p_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-PREEMPT] PASS line, got {len(p_lines)}")
+    fields: dict[str, int] = {}
+    for tok in p_lines[0].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            if v.isdigit():
+                fields[k] = int(v)
+    if fields.get("cpus") != smp:
+        raise RuntimeError(f"[{name}] Preempt cpus mismatch: {fields}")
+    if fields.get("timer_irqs", 0) < smp * 16:
+        raise RuntimeError(f"[{name}] Expected timer_irqs >= {smp * 16}, got {fields}")
+    if fields.get("preemptions", 0) < 4:
+        raise RuntimeError(f"[{name}] Expected involuntary preemptions >= 4, got {fields}")
+    if fields.get("deferred_rescheds", 0) < 1:
+        raise RuntimeError(f"[{name}] Expected deferred_rescheds >= 1, got {fields}")
+    if fields.get("spinner_preempts", 0) < 4:
+        raise RuntimeError(f"[{name}] Expected spinner_preempts >= 4, got {fields}")
+    if fields.get("race_recycled", 0) < 12:
+        raise RuntimeError(f"[{name}] Expected race_recycled >= 12, got {fields}")
+    if fields.get("stale_wakes_rejected") != 48 or fields.get("orphan_ready") != 0:
+        raise RuntimeError(f"[{name}] Preempt invariant mismatch: {fields}")
+    if smp >= 2 and fields.get("race_migrations", 0) < 1:
+        raise RuntimeError(f"[{name}] Expected preemptive race_migrations >= 1 on smp={smp}, got {fields}")
+
+
+def assert_positive_smp_boot(
+    name: str,
+    kernel_elf: pathlib.Path,
+    smp: int,
+    cmdline: str = "console=com1",
+    irq_only: bool = False,
+    expected_apic_mode: str | None = None,
+) -> None:
     expected_mask = hex((1 << smp) - 1)
     expected_ops = smp * 4096
     spawned, park_rounds, work_units = expected_sched_metrics(smp)
     img_path = BUILD_DIR / f"esp_{name}.img"
-    write_mbr_esp_image(img_path, kernel_elf, "console=com1")
-    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp)
+    write_mbr_esp_image(img_path, kernel_elf, cmdline)
+    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=35)
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
@@ -264,13 +348,23 @@ def assert_positive_smp_boot(name: str, kernel_elf: pathlib.Path, smp: int) -> N
         f"[DRY-SMP] PASS: cpus_online={smp} mask={expected_mask} total_bp_traps={smp} symmetric_ops={expected_ops} stacks_disjoint=true",
         f"[DRY-SCHED] PASS: cpus={smp} spawned={spawned} exited={spawned}",
         f"park_rounds={park_rounds} work_units={work_units} stale_wakes_rejected=48 orphan_ready=0",
-        f"[DRY-BOOT-OK] Milestone 1A-F UEFI boot + {smp}-vCPU SMP + cooperative H1 scheduler verified cleanly.",
+        "[DRY-APIC] PASS:",
+        f"[DRY-IRQ-ONLY] PASS: cpus={smp}",
     ]
+    if not irq_only:
+        must_contain.extend(
+            [
+                f"[DRY-PREEMPT] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1A-G UEFI boot + {smp}-vCPU SMP + cooperative & preemptive H1 scheduler verified cleanly.",
+            ]
+        )
     must_not_contain = [
         "[DRY-PANIC]",
         "[DRY-EXCEPTION]",
         "[DRY-SMP-FAIL]",
         "[DRY-SCHED-FAIL]",
+        "[DRY-PREEMPT-FAIL]",
+        "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
 
@@ -286,13 +380,17 @@ def assert_positive_smp_boot(name: str, kernel_elf: pathlib.Path, smp: int) -> N
             print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
             raise RuntimeError(f"[{name}] Forbidden serial marker found: {token!r}")
     verify_sched_line(name, serial_out, smp)
-    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched invariants verified in {elapsed:.3f}s).")
+    verify_apic_and_irq_lines(name, serial_out, smp, expected_mode=expected_apic_mode)
+    if not irq_only:
+        verify_preempt_line(name, serial_out, smp)
+    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt invariants verified in {elapsed:.3f}s).")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-only", action="store_true", help="Run clippy + release build without QEMU")
     parser.add_argument("--smp-only", type=int, default=0, help="Run only a single positive N-vCPU boot test")
+    parser.add_argument("--irq-only", action="store_true", help="Sub-Stage A: verify only APIC timer IRQ + EOI + TrapFrame")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -302,14 +400,30 @@ def main() -> None:
         return
 
     if args.smp_only > 0:
-        assert_positive_smp_boot(f"boot_{args.smp_only}cpu_ok", kernel_elf, args.smp_only)
+        cmdline = "console=com1 preempt_stage=irq_only" if args.irq_only else "console=com1"
+        assert_positive_smp_boot(
+            f"boot_{args.smp_only}cpu_ok",
+            kernel_elf,
+            args.smp_only,
+            cmdline=cmdline,
+            irq_only=args.irq_only,
+        )
         return
 
-    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E): 1 -> 2 -> 4 -> 20 vCPUs.
+    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E/F/G): 1 -> 2 -> 4 -> 20 vCPUs.
     assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1)
     assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2)
     assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4)
     assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20)
+
+    # Explicit hardware fallback verification: force xAPIC MMIO fallback (`0xFEE0_0000` UC via HHDM) on 2 vCPUs.
+    assert_positive_smp_boot(
+        "boot_2cpu_xapic_fallback",
+        kernel_elf,
+        smp=2,
+        cmdline="console=com1 apic_mode=xapic",
+        expected_apic_mode="xapic-mmio",
+    )
 
     # Negative SMP & hardware fault isolation tests (must fail deterministically with exit=35).
     assert_boot_case(
@@ -462,7 +576,73 @@ def main() -> None:
         must_not_contain=["[DRY-BOOT-OK]"],
     )
 
-    print("\n[QEMU-TEST] ALL 15 MILESTONE 1A-F SMP, SCHEDULER & FAULT CHECKS PASSED.")
+    # Milestone 1A-G Negative Preemptive Scheduler & APIC Timer Fault Isolation Tests (exit=35).
+    assert_boot_case(
+        name="preempt_irq_storm",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 preempt_fault=irq_storm",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-PREEMPT-FAIL] Timer interrupt storm / zero-progress livelock detected",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="preempt_nested_irq",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 preempt_fault=nested_irq",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-PREEMPT-FAIL] Nested timer interrupt violation (irq_depth=2)",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="preempt_lost_wakeup",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 preempt_fault=lost_wakeup",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-PREEMPT-FAIL] Preemptive lost-wakeup protocol violation",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="preempt_double_schedule",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 preempt_fault=double_sched",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-PREEMPT-FAIL] Double scheduling / duplicate runqueue enqueue detected",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="preempt_stack_reuse",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 preempt_fault=stack_reuse",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-PREEMPT-FAIL] Premature stack reuse while stack_owner active",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    print("\n[QEMU-TEST] ALL 21 MILESTONE 1A-G SMP, COOPERATIVE + PREEMPTIVE SCHEDULER & FAULT CHECKS PASSED.")
 
 
 if __name__ == "__main__":

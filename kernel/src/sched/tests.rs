@@ -14,7 +14,7 @@ use crate::sched::{
     cancel_park_current, commit_park_current, current_cpu_idx, current_slot_on_cpu,
     current_thread_id, idle_dispatch_once, init_scheduler, notify_thread, prepare_park_current,
     tcb, try_spawn_kernel_thread, verify_slot_canary, wake_thread, yield_now, AP_PHASE_DONE_CPUS,
-    AP_PHASE_EPOCH, AP_SCHED_RELEASE, AP_SCHED_SHUTDOWN, GLOBAL_CTX_SWITCHES,
+    AP_PHASE_EPOCH, AP_SCHED_RELEASE, GLOBAL_CTX_SWITCHES,
     GLOBAL_EXITED_THREADS, GLOBAL_MIGRATIONS, GLOBAL_RECYCLED_SLOTS, GLOBAL_SPAWNED_THREADS,
     PHASE_PENDING_THREADS, WORKER_POOL_CAP,
 };
@@ -384,8 +384,6 @@ pub fn verify_cooperative_scheduler(
         );
         stale_wakes_rejected += 1;
     }
-
-    AP_SCHED_SHUTDOWN.store(true, Ordering::Release);
 
     let spawned = GLOBAL_SPAWNED_THREADS.load(Ordering::Acquire);
     let exited = GLOBAL_EXITED_THREADS.load(Ordering::Acquire);

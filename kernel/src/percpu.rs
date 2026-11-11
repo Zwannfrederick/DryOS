@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! Cache-line-isolated Per-CPU State (`PerCpuData`) & `IA32_GS_BASE` Hardware Binding.
 //!
-//! Each logical CPU owns a dedicated 128-byte (2 cache lines, `align(64)`) slot in `'static`
+//! Each logical CPU owns a dedicated 192-byte (3 cache lines, `align(64)`) slot in `'static`
 //! kernel `.bss`. Offset `0` stores `self_ptr` and offset `8` stores `cpu_idx`, allowing single-
 //! instruction `mov reg, gs:[0]` / `mov reg, gs:[8]` lookup without locks or atomics.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::mem::{offset_of, size_of};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::{rdmsr, wrmsr, MSR_IA32_GS_BASE, MSR_IA32_KERNEL_GS_BASE};
 use crate::gdt_tss::MAX_CPUS;
@@ -32,7 +32,7 @@ pub struct PerCpuData {
     pub boot_stack_top: u64,
     pub df_ist1_base: u64,
     pub df_ist1_top: u64,
-    /// Second 64-byte cache line: per-CPU atomic counters, active thread slot & `#DF` latch.
+    /// Second 64-byte cache line (`64..128`): per-CPU counters, active thread slot & latches.
     pub tss_base: u64,
     pub gdt_base: u64,
     pub bp_trap_count: AtomicU64,
@@ -41,13 +41,28 @@ pub struct PerCpuData {
     pub current_slot: AtomicU64,
     pub ctx_switches: AtomicU64,
     pub in_df_handler: AtomicBool,
+    pub need_resched: AtomicBool,
+    pub timer_armed: AtomicBool,
+    pub _pad1: [u8; 5],
+    /// Third 64-byte cache line (`128..192`): Local APIC timer IRQ, quantum & preemption state.
+    pub timer_irqs: AtomicU64,
+    pub preemptions: AtomicU64,
+    pub deferred_rescheds: AtomicU64,
+    pub last_progress_seq: AtomicU64,
+    pub preempt_count: AtomicU32,
+    pub irq_depth: AtomicU32,
+    pub quantum_rem: AtomicU32,
+    pub storm_streak: AtomicU32,
+    pub storm_slot: AtomicU64,
+    pub _pad2: u64,
 }
 
 const _: () = assert!(offset_of!(PerCpuData, self_ptr) == 0);
 const _: () = assert!(offset_of!(PerCpuData, cpu_idx) == 8);
 const _: () = assert!(offset_of!(PerCpuData, lapic_id) == 16);
 const _: () = assert!(offset_of!(PerCpuData, magic) == 24);
-const _: () = assert!(size_of::<PerCpuData>() == 128);
+const _: () = assert!(offset_of!(PerCpuData, timer_irqs) == 128);
+const _: () = assert!(size_of::<PerCpuData>() == 192);
 
 impl PerCpuData {
     const fn uninit() -> Self {
@@ -69,6 +84,19 @@ impl PerCpuData {
             current_slot: AtomicU64::new(u64::MAX),
             ctx_switches: AtomicU64::new(0),
             in_df_handler: AtomicBool::new(false),
+            need_resched: AtomicBool::new(false),
+            timer_armed: AtomicBool::new(false),
+            _pad1: [0; 5],
+            timer_irqs: AtomicU64::new(0),
+            preemptions: AtomicU64::new(0),
+            deferred_rescheds: AtomicU64::new(0),
+            last_progress_seq: AtomicU64::new(0),
+            preempt_count: AtomicU32::new(0),
+            irq_depth: AtomicU32::new(0),
+            quantum_rem: AtomicU32::new(0),
+            storm_streak: AtomicU32::new(0),
+            storm_slot: AtomicU64::new(u64::MAX),
+            _pad2: 0,
         }
     }
 }
@@ -120,6 +148,17 @@ pub fn init_cpu_percpu_and_gs(info: CpuRegionInfo) -> &'static PerCpuData {
         slot.current_slot.store(info.cpu_idx as u64, Ordering::Release);
         slot.ctx_switches.store(0, Ordering::Release);
         slot.in_df_handler.store(false, Ordering::Release);
+        slot.need_resched.store(false, Ordering::Release);
+        slot.timer_armed.store(false, Ordering::Release);
+        slot.timer_irqs.store(0, Ordering::Release);
+        slot.preemptions.store(0, Ordering::Release);
+        slot.deferred_rescheds.store(0, Ordering::Release);
+        slot.last_progress_seq.store(0, Ordering::Release);
+        slot.preempt_count.store(0, Ordering::Release);
+        slot.irq_depth.store(0, Ordering::Release);
+        slot.quantum_rem.store(0, Ordering::Release);
+        slot.storm_streak.store(0, Ordering::Release);
+        slot.storm_slot.store(u64::MAX, Ordering::Release);
         slot.magic = PERCPU_MAGIC;
 
         wrmsr(MSR_IA32_GS_BASE, ptr_val);
@@ -183,6 +222,14 @@ pub fn try_current_percpu() -> Option<&'static PerCpuData> {
         return None;
     }
     Some(pcpu)
+}
+
+/// Fast 1-instruction `gs:[0]` lookup for runtime paths after `init_cpu_percpu_and_gs`.
+#[inline]
+pub fn current_percpu() -> &'static PerCpuData {
+    let ptr = read_gs_u64_at_0() as *const PerCpuData;
+    // SAFETY: `gs:[0]` holds the `'static` address of this CPU's `PerCpuData` slot.
+    unsafe { &*ptr }
 }
 
 pub fn get_percpu_by_idx(cpu_idx: usize) -> &'static PerCpuData {

@@ -1,30 +1,31 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! x86-64 Cooperative Kernel-Thread Assembly Context Switch (`Milestone 1A-F`).
+//! x86-64 Kernel-Thread Assembly Context Switch (`Milestone 1A-F` Cooperative & `1A-G` Preemptive).
 //!
 //! # Architectural Context-Switch Contract (`System V AMD64 Kernel ABI`)
 //! 1. **Stack Alignment (`16`-Byte Invariant & `-mno-red-zone`):**
 //!    - Target `x86_64-unknown-none` disables the 128-byte red zone (`disable-redzone: true`) and
 //!      kernel SSE/FPU state (`+soft-float,-mmx,-sse`).
 //!    - Caller invokes `call dry_switch_to` with `RSP % 16 == 0`; `call` pushes 8-byte `return_rip`
-//!      (`RSP % 16 == 8`). Pushing 7 qwords (`56` bytes) yields `saved_rsp % 16 == 0`.
-//!    - After `mov rsp, rsi` (`% 16 == 0`) and popping 7 qwords (`+56` bytes), `RSP % 16 == 8`.
-//!      `sub rsp, 8` aligns `RSP % 16 == 0` prior to `call {post_switch}` so `finish_post_switch`
-//!      is entered with `RSP % 16 == 8` on **both** resumed threads and newly spawned threads.
-//!    - For a brand-new thread, `ret` pops `dry_thread_entry_trampoline` at `stack_top - 8`,
-//!      entering the trampoline with `RSP == stack_top` (`% 16 == 0`) and `RBP == 0`, so
-//!      `call {bootstrap}` enters Rust with `RSP == stack_top - 8` (`% 16 == 8`).
-//! 2. **Callee-Saved Registers:**
-//!    - Preserves `RBX`, `RBP`, `R12`, `R13`, `R14`, `R15` on the outgoing kernel stack.
-//!    - New threads seed `R12 = entry_fn`, `R13 = entry_arg`, `R14 = slot_idx`, `RBP = 0`.
-//! 3. **`RFLAGS` & Interrupt State (`Stage 1 Cooperative Contract`):**
-//!    - `pushfq` / `popfq` + `cld` preserves architectural flags with `DF = 0`.
-//!    - In Milestone 1A-F (cooperative kernel-thread stage), `RFLAGS.IF == 0` (`CLI`) is invariant
-//!      across all threads (seeded as `0x0002`, verified on switch); Local APIC timer and
-//!      interrupt-driven preemption are intentionally excluded until Stage 2.
+//!      (`RSP % 16 == 8`). Pushing `RFLAGS` + 6 callee-saved GPRs (`56` bytes) yields
+//!      `saved_rsp % 16 == 0`.
+//!    - Immediately after `mov rsp, rsi` (`% 16 == 0`) — while `RFLAGS.IF == 0` (`CLI`) and while
+//!      `next`'s saved GPRs/`RFLAGS` remain intact on `next`'s stack — `call {post_switch}` enters
+//!      `finish_post_switch` with System V compliant `RSP % 16 == 8`.
+//!    - After `finish_post_switch` returns (`RSP % 16 == 0`), 6 GPRs + `popfq` (`+56` bytes) leave
+//!      `RSP % 16 == 8` at `ret_rip`, so `ret` enters `dry_thread_entry_trampoline` with
+//!      `RSP == stack_top` (`% 16 == 0`) or resumes the caller with `RSP % 16 == 0`.
+//! 2. **Callee-Saved vs. Caller-Saved Registers:**
+//!    - Voluntary `dry_switch_to` preserves `RBX`, `RBP`, `R12..R15` + `RFLAGS` (`64`B `SwitchFrame`).
+//!    - Involuntary IRQ preemption pushes a `176`B `TrapFrame` (`all 15 GPRs + RFLAGS + RIP + RSP`)
+//!      at `IST = 0` on the interrupted thread's private 16 KiB stack *above* `SwitchFrame`.
+//! 3. **`RFLAGS` & Interrupt-Masking Ordering:**
+//!    - `pushfq; cli` captures the outgoing context's `IF` bit (`0` in cooperative mode or inside
+//!      an Interrupt Gate; `1` if called with interrupts enabled), then holds `IF = 0` across the
+//!      entire stack handoff and `finish_post_switch` (`stack_owner` release + RQ push + APIC One-Shot
+//!      re-arm). `popfq; ret` restores `next`'s exact `IF` state only after handoff is complete.
 //! 4. **Explicit Address-Space (`CR3` / TLB) Boundary:**
-//!    - All Milestone 1A-F cooperative kernel threads share the single kernel `CR3` (`SecDomain::Kernel`).
-//!    - `dry_switch_to` does **not** switch `CR3` or perform `invlpg` / IPI TLB shootdowns; per-process
-//!      `VSpace` switching and `active_cpus` TLB shootdowns are deferred to Milestone 1B.
+//!    - All Milestone 1A-F/G kernel threads share the single kernel `CR3` (`SecDomain::Kernel`).
+//!    - Per-process `VSpace` (`CR3`) switching and `active_cpus` TLB shootdowns belong to Milestone 1B.
 
 use core::arch::global_asm;
 use core::ptr::write_volatile;
@@ -85,6 +86,7 @@ global_asm!(
     ".balign 16",
     "dry_switch_to:",
     "    pushfq",
+    "    cli",
     "    push rbp",
     "    push rbx",
     "    push r12",
@@ -93,6 +95,10 @@ global_asm!(
     "    push r15",
     "    mov [rdi], rsp",
     "    mov rsp, rsi",
+    "    cld",
+    "    mov rdi, rdx",
+    "    mov rsi, rcx",
+    "    call {post_switch}",
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -100,12 +106,6 @@ global_asm!(
     "    pop rbx",
     "    pop rbp",
     "    popfq",
-    "    cld",
-    "    sub rsp, 8",
-    "    mov rdi, rdx",
-    "    mov rsi, rcx",
-    "    call {post_switch}",
-    "    add rsp, 8",
     "    ret",
     ".global dry_thread_entry_trampoline",
     ".balign 16",
@@ -131,13 +131,20 @@ extern "C" {
 }
 
 extern "C" fn finish_post_switch(prev_slot: usize, packed_action: u64) {
-    // Enforce Stage 1 cooperative interrupt-masked invariant (`RFLAGS.IF == 0`).
-    debug_assert_eq!(read_rflags() & (1 << 9), 0, "IF=1 observed during cooperative switch");
+    // Unconditional invariant across BOTH cooperative & preemptive modes: `finish_post_switch`
+    // MUST execute with local interrupts masked (`RFLAGS.IF == 0`) prior to `popfq`.
+    assert_eq!(read_rflags() & (1 << 9), 0, "IF=1 observed inside finish_post_switch");
     crate::sched::complete_post_switch_from_asm(prev_slot, PostSwitchKind::unpack(packed_action));
 }
 
 extern "C" fn thread_bootstrap(entry_raw: usize, arg: u64, slot_idx: usize) -> ! {
-    debug_assert_eq!(read_rflags() & (1 << 9), 0, "IF=1 observed in thread_bootstrap");
+    let if_enabled = (read_rflags() & (1 << 9)) != 0;
+    assert_eq!(
+        if_enabled,
+        crate::sched::is_preemptive_mode_active(),
+        "Bootstrap RFLAGS.IF mismatch on slot {}",
+        slot_idx
+    );
     crate::sched::verify_current_thread_entry_bounds(slot_idx);
     // SAFETY: `entry_raw` was transmuted from a valid `fn(u64)` in `init_new_thread_stack`.
     let entry: KernelThreadFn = unsafe { core::mem::transmute::<usize, KernelThreadFn>(entry_raw) };
@@ -151,10 +158,12 @@ pub unsafe fn init_new_thread_stack(
     slot_idx: usize,
     entry: KernelThreadFn,
     arg: u64,
+    preemptible: bool,
 ) -> u64 {
     assert_eq!(stack_top & 0xf, 0, "Thread stack_top {:#x} not 16-byte aligned", stack_top);
     let frame_addr = stack_top - (core::mem::size_of::<InitialSwitchFrame>() as u64);
     assert_eq!(frame_addr & 0xf, 0, "InitialSwitchFrame not 16-byte aligned");
+    let rflags = if preemptible { 0x0202 } else { 0x0002 };
     let frame = InitialSwitchFrame {
         r15: 0,
         r14: slot_idx as u64,
@@ -162,7 +171,7 @@ pub unsafe fn init_new_thread_stack(
         r12: entry as usize as u64,
         rbx: 0,
         rbp: 0,
-        rflags: 0x0002, // Architectural reserved bit 1 set, IF=0, DF=0
+        rflags,
         ret_rip: dry_thread_entry_trampoline as *const () as usize as u64,
     };
     // SAFETY: Caller exclusively owns the freshly allocated `Dead` stack `[stack_base, stack_top)`.

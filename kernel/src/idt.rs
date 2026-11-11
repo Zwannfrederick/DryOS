@@ -147,6 +147,10 @@ global_asm!(
     "ISR_ERR   29",
     "ISR_ERR   30",
     "ISR_NOERR 31",
+    "ISR_NOERR 39",
+    "ISR_NOERR 47",
+    "ISR_NOERR 239",
+    "ISR_NOERR 254",
     "ISR_NOERR 255",
     ".balign 16",
     "dry_isr_common:",
@@ -221,6 +225,10 @@ extern "C" {
     fn dry_isr_stub_29();
     fn dry_isr_stub_30();
     fn dry_isr_stub_31();
+    fn dry_isr_stub_39();
+    fn dry_isr_stub_47();
+    fn dry_isr_stub_239();
+    fn dry_isr_stub_254();
     fn dry_isr_stub_255();
 }
 
@@ -292,6 +300,23 @@ fn handle_double_fault(frame: &TrapFrame, pcpu: Option<&'static PerCpuData>) -> 
 }
 
 extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
+    if frame.vector == (crate::apic::VEC_LAPIC_TIMER as u64) {
+        crate::sched::on_lapic_timer_irq(frame);
+        return;
+    }
+
+    if frame.vector == (crate::apic::VEC_APIC_SPURIOUS as u64) {
+        // Intel SDM Vol. 3A 10.9: Spurious APIC interrupt MUST NOT write EOI.
+        crate::apic::record_spurious_apic_irq();
+        return;
+    }
+
+    if frame.vector == (crate::apic::VEC_PIC_SPURIOUS_MASTER as u64)
+        || frame.vector == (crate::apic::VEC_PIC_SPURIOUS_SLAVE as u64)
+    {
+        return;
+    }
+
     let pcpu = try_current_percpu();
 
     if frame.vector == 3 {
@@ -352,10 +377,19 @@ pub fn init_bsp_idt() {
             let dpl = if vec == 3 { 3 } else { 0 };
             table[vec] = IdtEntry::gate(*stub as usize as u64, ist, dpl);
         }
-        let fallback = dry_isr_stub_255 as *const () as usize as u64;
+        let fallback = dry_isr_stub_254 as *const () as usize as u64;
         for slot in table.iter_mut().skip(32) {
             *slot = IdtEntry::gate(fallback, 0, 0);
         }
+        table[crate::apic::VEC_PIC_SPURIOUS_MASTER as usize] =
+            IdtEntry::gate(dry_isr_stub_39 as *const () as usize as u64, 0, 0);
+        table[crate::apic::VEC_PIC_SPURIOUS_SLAVE as usize] =
+            IdtEntry::gate(dry_isr_stub_47 as *const () as usize as u64, 0, 0);
+        // `IST = 0`: `TrapFrame` lands on the active thread's private 16 KiB stack (`#DF` owns `IST1`).
+        table[crate::apic::VEC_LAPIC_TIMER as usize] =
+            IdtEntry::gate(dry_isr_stub_239 as *const () as usize as u64, 0, 0);
+        table[crate::apic::VEC_APIC_SPURIOUS as usize] =
+            IdtEntry::gate(dry_isr_stub_255 as *const () as usize as u64, 0, 0);
     }
     IDT_INITIALIZED.store(true, Ordering::Release);
     load_idt();

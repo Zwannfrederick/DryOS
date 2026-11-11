@@ -55,6 +55,11 @@ impl StaticRunQueue {
     }
 
     pub fn push(&self, ticket: u32) -> bool {
+        assert_eq!(
+            crate::arch::read_rflags() & (1 << 9),
+            0,
+            "StaticRunQueue::push called with RFLAGS.IF=1 (IRQ-reentrancy hazard)"
+        );
         let mut pos = self.enqueue_pos.load(Ordering::Relaxed);
         loop {
             let cell = &self.cells[pos & RQ_RING_MASK];
@@ -87,6 +92,11 @@ impl StaticRunQueue {
     }
 
     pub fn pop(&self) -> Option<u32> {
+        assert_eq!(
+            crate::arch::read_rflags() & (1 << 9),
+            0,
+            "StaticRunQueue::pop called with RFLAGS.IF=1 (IRQ-reentrancy hazard)"
+        );
         let mut pos = self.dequeue_pos.load(Ordering::Relaxed);
         loop {
             let cell = &self.cells[pos & RQ_RING_MASK];
