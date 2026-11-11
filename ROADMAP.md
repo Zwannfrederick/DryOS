@@ -5,38 +5,39 @@
 
 ---
 
-## Faz 0: H1 ve H2 Doğrulama & Fizibilite Kapısı
+## Faz 0: H1 ve H2 Doğrulama & Fizibilite Kapısı `[TAMAMLANDI — 11 Kasım 2026]`
 - **Hedef:** Çekirdek kodlamasına tam ölçekli girmeden önce en yüksek riskli iki mimari iddiayı yürütülebilir testlerle sınamak.
-- **Kapsam:**
-  1. `H1`: `AtomicU32(exec_state, park_token)` zamanlayıcı protokolünün TLC model kontrolü (Safety + Liveness ayrı), Rust `loom` zayıf bellek doğrulaması ve çok-çekirdekli stres testi.
-  2. `H2`: Upstream Linux 6.12 & 6.18 `igc` sembol/başlık analizi, `libdry_lx_net` dar çalışma zamanı ve QEMU `intel-iommu` (`caching-mode=on`) + `vfio-pci` üzerinde kalıcı IOVA Arena PoC'si.
-- **Çıkış Kapısı (Gate 0):**
-  - `H1`: Pozitif TLC ve Loom testlerinde **0 ihlal**, negatif testlerde bilinen karşı-örneklerin yakalanması.
-  - `H2`: Karar kapısı — `libdry_lx_net <= 5.000 LOC` ve `<= %1` sürücü değişikliğiyle paket geçerse H2 Faz 3 için onaylanır; aşarsa Faz 3 kapsamı daraltılır ancak **Faz 1 derhal başlar**.
+- **Kapsam & Gerçekleşen Durum:**
+  1. `H1` `[GEÇTİ]`: `AtomicU32(exec_state, park_token)` zamanlayıcı protokolü TLC (`84.351` durum Safety, `54.095` durum Liveness), Rust `loom` (`39.135` permütasyon) ve 20-CPU stres testiyle (`>24M` geçiş) `0` hatayla doğrulandı.
+  2. `H2` `[GEÇTİ]`: Upstream Linux `v6.12` ve `v6.18` `igc` (`18.528` satır) `%0` değişiklik ve `3.468` satırlık `GPL-2.0-only` runtime (`v6.12->v6.18` farkı `38` satır) ile derlenip test edildi; ayrı `e1000e` QEMU `vfio-pci` + emüle `intel-iommu` DMA PoC doğrulandı (fiziksel silikon IOMMU güvenliği Faz 3/4 bare-metal kapısına bırakıldı).
 
 ---
 
-## Faz 1: DRY Kernel Çekirdek Omurgası (`x86-64`, `no_std` Rust)
-- **Hedef:** Bağımsız, BKL içermeyen, donanım izolasyonlu minimal mikroçekirdeğin QEMU ve gerçek x86-64 donanımda ayağa kalkması.
+## Faz 1: DRY Kernel Çekirdek Omurgası (`x86-64`, `no_std` Rust) `[AKTİF]`
+- **Hedef:** Bağımsız, BKL içermeyen, donanım ve alan izolasyonlu (`ADR-007`) minimal mikroçekirdeğin QEMU ve gerçek x86-64 donanımda ayağa kalkması.
 - **Kapsam:**
-  - Limine UEFI önyükleme (`ADR-001`), HHDM, fiziksel çerçeve envanteri ve `Untyped` bellek retyping (çekirdek içi `kmalloc` yok).
-  - 4-seviye MMU (`VSpace`), hedefli TLB shootdown (`active_cpus` maskesi) ve Intel VT-d / AMD-Vi IOMMU temel domain bağlayıcısı (`iommu_pin_count` korumalı).
-  - APIC/IOAPIC/MSI-X kesme yönlendirme, `TSC-Deadline` zamanlayıcı, `INIT-SIPI` / Limine MP ile tüm mantıksal CPU'ların simetrik başlatılması.
-  - Sabit boyutlu korumalı `CSpace` (`ADR-003`), `H1 v2` uyuma/uyanma + CPU başına öncelikli FIFO runqueue + IPC Öncelik Bağışı (`ADR-004`).
-  - Yazmaç-tabanlı `Endpoint` IPC, `TCB`-bağlı `Notification` ve `FaultEndpoint` (`ADR-002`).
+  - **Milestone 1A (Temel Önyükleme, CPU Durumu, SMP ve `H1` Entegrasyonu):**
+    - Repo-yerel tekrarlanabilir `no_std` Rust + Limine UEFI önyükleme araç zinciri (`ADR-001`), bellek haritası ve HHDM doğrulaması, `COM1` seri konsol ve deterministik panik işleyicisi (`1 CPU` otomatik QEMU testi).
+    - `GDT`, `TSS` (`IST` yığınlarıyla), `IDT` ve temel donanım istisna işleme (`#BP`, `#DF`, `#GP`, `#PF`).
+    - Kademeli SMP başlatma (`2 -> 4 -> 20 vCPU`) ve TLC/Loom'da doğrulanan `H1` zamanlayıcısının assembly `switch_to` + `post_switch_*` kurallarıyla çekirdeğe taşınması.
+  - **Milestone 1B (Bellek, Capability, Güvenlik İlkelleri ve IPC):**
+    - Fiziksel çerçeve envanteri ve `Untyped` bellek retyping (çekirdek içi `kmalloc` yok).
+    - 4-seviye MMU (`VSpace`), hedefli TLB shootdown (`active_cpus` maskesi) ve Intel VT-d / AMD-Vi IOMMU temel domain bağlayıcısı (`iommu_pin_count` korumalı).
+    - Sabit boyutlu korumalı `CSpace` (`ADR-003`) + **`ADR-007` sıfır-borç güvenlik ilkelleri**: çekirdek nesnelerinde `SecLabel` (`KERNEL` / `ROOT_SYSTEM` / `USERSPACE`, `READ_ONLY_EXPORT`, `compartment_id`), capability `lease_epoch` alanı, sahtelenemez gönderici etiketi (`INV-SEC-01..04, 06, 08`).
+    - Yazmaç-tabanlı `Endpoint` IPC, `TCB`-bağlı `Notification` ve `FaultEndpoint` (`ADR-002`).
 - **Çıkış Kapısı (Gate 1):**
-  - QEMU `-smp 20` ve yerel 8-thread bare-metal üzerinde tüm çekirdeklerin uyanması; iki izole Ring 3 sürecinin `Endpoint` IPC + paylaşımlı `IoRing` ile 10 milyon mesajı 0 çökme ve 0 bellek sızıntısıyla aktarması; yetkisiz bellek ve sınır-dışı IOMMU DMA erişiminin donanım tuzağıyla engellenmesi.
+  - QEMU `-smp 20` ve yerel 8-thread bare-metal üzerinde tüm çekirdeklerin uyanması; iki izole Ring 3 sürecinin `Endpoint` IPC + paylaşımlı `IoRing` ile 10 milyon mesajı 0 çökme ve 0 bellek sızıntısıyla aktarması; `INV-SEC-01..04, 06, 08` güvenlik invariant'larının ve sınır-dışı IOMMU DMA engelinin donanım tuzağıyla doğrulanması.
 
 ---
 
-## Faz 2: DRY OS Temel Native Ekosistem
-- **Hedef:** Hiçbir yabancı sürücü çevirisine ihtiyaç duymadan kendi kendine yeten mikroçekirdek işletim sistemi katmanı.
+## Faz 2: DRY OS Temel Native Ekosistem, VFS Etiketleme ve `DRY Vault`
+- **Hedef:** Hiçbir yabancı sürücü çevirisine ihtiyaç duymadan kendi kendine yeten, `ADR-007` güvenlik alanlarıyla korunan mikroçekirdek işletim sistemi katmanı.
 - **Kapsam:**
-  - Userspace Root/Capability Manager, VSpace Pager, PCI/IOMMU Bus Manager (PCIe FLR destekli).
+  - `ROOT_SYSTEM` servisleri: Root/Capability Manager, VSpace Pager, PCI/IOMMU Bus Manager (PCIe FLR destekli), **`DRY Vault`** (kimlik doğrulama + süreli/kapsamlı `lease_epoch` yetki üretimi) ve **`Policy Broker`** (deny-by-default karar motoru).
   - Native Rust sürücüleri (`IoRing` + `DmaArena` üzerinde): `VirtIO-Blk`, `VirtIO-Net`, `NVMe` temel kuyruk sürücüsü, UEFI `GOP` / `VirtIO-GPU` 2D çerçeve tamponu, seri/PS2/USB-HID temel girdi.
-  - İzole VFS sunucusu (salt-okunur initrd + temel disk dosya sistemi), sıfır-kopya ağ çoklayıcısı ve native `dry-sdk` süreç kabuğu.
+  - **`ADR-007` Etiketli VFS ve Developer Workspace:** Ebeveynden `SecLabel` mirası alan, `rename`/`symlink`/`hardlink`/`mount` ile yetki yükseltmeyi reddeden (`INV-SEC-05`) izole VFS sunucusu; kontrollü salt-okunur sistem kütüphaneleri (`READ_ONLY_EXPORT`); kapsamlı `DEV_WORKSPACE` (`compartment_id`); canlı servis/paket etkinleştirme ve A/B sonraki-boot çekirdek güncelleme yuvası.
 - **Çıkış Kapısı (Gate 2):**
-  - DRY OS'un QEMU ve bare-metal NVMe diskten önyüklenip ağ üzerinden TCP bağlantısı kurması; bir native sürücü süreci zorla öldürüldüğünde (`kill`) çekirdeğin ayakta kalıp sürücüyü yeniden başlatması.
+  - DRY OS'un QEMU ve bare-metal NVMe diskten önyüklenip TCP bağlantısı kurması; bir `USERSPACE` sürecinin `ROOT_SYSTEM` veya `KERNEL` nesnelerine yazma ve `symlink`/`hardlink` ile yetki yükseltme girişimlerinin `%100` reddedilmesi (`INV-SEC-01..08`); `DRY Vault` kiralama süresi dolduğunda (`INV-SEC-07`) yetkilerin anında düşmesi.
 
 ---
 

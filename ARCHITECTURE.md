@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 10 Kasım 2026  
-> **Aşama:** Geliştirme Öncesi Mimari Dondurma (Pre-Implementation Freeze)  
+> **Durum Tarihi:** 11 Kasım 2026  
+> **Aşama:** Faz 1 Aktif Geliştirme (`H1` ve `H2` Faz 0 Kapıları Geçildi; `ADR-001` .. `ADR-007` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya yerel sistem denetimiyle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak Faz 0 deneyleriyle yanlışlanmaya açık tasarım iddiası.  
@@ -23,26 +23,28 @@
 
 ```
 +-----------------------------------------------------------------------------------+
-|                               USERSPACE (Ring 3)                                  |
+|                  USERSPACE DOMAIN (Ring 3, SecDomain::Userspace)                  |
 |                                                                                   |
 |  [Native DRY Apps]      [Linux ELF Personality]       [Future Win32/NT Subsys]    |
 |         |                         |                              |                |
 |         +------------+------------+------------------------------+                |
 |                      | Kontrol: Endpoint IPC | Veri: IoRing + Notification        |
-|  +-------------------v---------------------------------------------------------+  |
-|  | Native Sistem Servisleri (Rust, MIT OR GPL-2.0-only, Ayrı VSpace)           |  |
-|  | [Root/Cap Mgr] [Pager/VSpace Mgr] [PCI/IOMMU Bus Mgr] [VFS] [Net Mux/TCP]   |  |
-|  +---------------+-------------------------------------+-----------------------+  |
+|                      | Zorunlu Denetim: Object SecLabel + Process Capability Set  |
++----------------------|------------------------------------------------------------+
+|             ROOT / SYSTEM DOMAIN (Ring 3, SecDomain::RootSystem)                  |
+|                                                                                   |
+|  [Root/Cap Mgr] [DRY Vault (Auth/Lease)] [Policy Broker] [Pager] [VFS] [Net Mux]  |
+|  [Scoped Developer Workspace (DEV_WORKSPACE, izole compartment_id)]               |
 |                  |                                     | CPU-Only IoRing          |
 |  +---------------v---------------+     +---------------v-----------------------+  |
 |  | Native Rust Sürücüler         |     | Linux Driver Islands (GPL-2.0-only)   |  |
 |  | VirtIO-Blk/Net, NVMe, GOP     |     | Sürücü C Kodu + libdry_lx_<sınıf>     |  |
 |  +---------------+---------------+     | Kalıcı IOVA DmaArena + Gölge vmemmap  |  |
 +------------------|---------------------+-------------------+-------------------+--+
-                   | Syscall ABI (ADR-002)                   | Strict IOMMU (VT-d)
+                   | Syscall ABI (ADR-002) + SecLabel/Lease  | Strict IOMMU (VT-d)
 +------------------v-----------------------------------------v----------------------+
-|                         DRY KERNEL (Ring 0, Rust no_std)                          |
-|  Untyped Retype | CSpace | VSpace (MMU) | IOMMU Bind | Endpoint/Notif | Scheduler |
+|              KERNEL DOMAIN (Ring 0, SecDomain::Kernel — Mutlak Duvar)             |
+|  Untyped Retype | CSpace + SecLabel | VSpace | IOMMU Bind | IPC/Notif | Scheduler |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -50,11 +52,11 @@
 
 | Mekanizma | Konum | Gerekçe |
 | :--- | :--- | :--- |
-| `CR3` / MMU sayfa tablosu yazımı ve hedefli TLB shootdown | **Ring 0** | Donanım bellek izolasyonu kökü. |
-| IOMMU kök/domain tabloları ve IOTLB invalidation kuyruğu | **Ring 0** | Userspace DMA sürücülerinin çekirdeği ezmesini önleyen tek donanım engeli `[DOĞRULANDI]`. |
-| CPU bağlam değişimi (`RSP`, FPU/SIMD), APIC/MSI-X yönlendirme | **Ring 0** | Ayrıcalıklı yazmaçlar (`MSR`, `XCR0`, `LAPIC`). |
-| `CSpace` yetki doğrulaması ve epoch-tabanlı `Revoke` | **Ring 0** | Sahtelenemez erişim kontrolü. |
-| Bellek politikası, sayfalama (pager), PCI tarama, sürücüler, VFS, TCP/IP | **Ring 3** | Hata izolasyonu ve TCB küçültme. |
+| `CR3` / MMU sayfa tablosu yazımı ve hedefli TLB shootdown | **Ring 0 (`KERNEL`)** | Donanım bellek izolasyonu kökü; `SecDomain::Kernel` Ring 3'e asla eşlenmez (`INV-SEC-01`). |
+| IOMMU kök/domain tabloları ve IOTLB invalidation kuyruğu | **Ring 0 (`KERNEL`)** | Userspace DMA sürücülerinin çekirdeği ezmesini önleyen tek donanım engeli `[DOĞRULANDI]`. |
+| CPU bağlam değişimi (`RSP`, FPU/SIMD), APIC/MSI-X yönlendirme | **Ring 0 (`KERNEL`)** | Ayrıcalıklı yazmaçlar (`MSR`, `XCR0`, `LAPIC`). |
+| `CSpace` yetki, `SecLabel` alan tavanı, `lease_epoch` ve `Revoke` | **Ring 0 (`KERNEL`)** | Sahtelenemez zorunlu erişim kontrolü ilkelleri (`ADR-007`, `INV-SEC-01..08`). |
+| `DRY Vault` (kimlik/lease), `Policy Broker`, `VFS`, sürücüler, TCP/IP | **Ring 3 (`ROOT_SYSTEM`)** | Politika ile mekanizma ayrımı; hata izolasyonu ve TCB küçültme (`ADR-007`). |
 
 ---
 
@@ -88,16 +90,25 @@
 
 ## 3. Zamanlayıcı Mimarisi (`H1` Özeti)
 
-- **Durum Temsili:** Her `TCB` içinde tek bir `sched: AtomicU32` kelimesi iki ortogonal alanı paketler: `exec_state` (`READY`, `RUNNING`, `SW_PREEMPT`, `SW_PARK`, `BLOCKED`, `WAKING`, `EXITING`, `DEAD`) ve `park_token` (`NONE`, `ARMED`, `NOTIFIED`) `[HİPOTEZ — Faz 0 TLC + Loom ile doğrulanacak]`.
+- **Durum Temsili:** Her `TCB` içinde tek bir `sched: AtomicU32` kelimesi iki ortogonal alanı paketler: `exec_state` (`READY`, `RUNNING`, `SW_PREEMPT`, `SW_PARK`, `BLOCKED`, `WAKING`, `EXITING`, `DEAD`) ve `park_token` (`NONE`, `ARMED`, `NOTIFIED`) `[DOĞRULANDI — Faz 0 TLC (84.351 durum) + Rust Loom (39.135 permütasyon) + 20-CPU stres testi]`.
 - **Temel Güvenlik Kuralı:** Hiçbir görev `switch_to()` assembly geçişi bitip yeni görevin stack'i üzerinde `post_switch(prev)` çalışmadan `EXEC_READY` olamaz ve runqueue'ya yayınlanamaz (`ADR-004`).
 - **Aşamalı Karmaşıklık:** Faz 1'de CPU başına intrüzif öncelik kuyruğu + Priority Inheritance kullanılır; topoloji-farkındalıklı iş çalma (*work stealing*) ve `NO_HZ_FULL` Faz 3/4'te ölçümle eklenir.
 
 ---
 
-## 4. Linux Sürücü Adası ve Uyumluluk Mimarisi (`H2` Özeti)
+## 4. Güvenlik Etiketleri, Alan İzolasyonu ve `DRY Vault` Mimarisi (`ADR-007`)
 
-- **İzolasyon Birimi (*Driver Island*):** Upstream C sürücüsü (`GPL-2.0-only`) + sürücü sınıfına özel daraltılmış `libdry_lx_<sınıf>` çalışma zamanı aynı userspace sürecinde derlenir; dış dünyayla yalnızca DRY `IoRing` (CPU paylaşımlı bellek) üzerinden konuşur `[HİPOTEZ]`.
-- **Gölge `vmemmap` ve Kalıcı IOVA Arena:** `igc.ko` ikili analizinde `[DOĞRULANDI]` görülen `vmemmap_base` ve `page_offset_base` satır-içi pointer aritmetiğini karşılamak ve paket başına IOTLB shootdown maliyetinden kaçınmak için 64-bit userspace adres alanında sabit bir `DmaArena` ve ona doğrusal indekslenen gölge `struct page[]` dizisi ayrılır `[TEST EDİLMEDİ]`.
+- **Üç Güvenlik Alanı ve Mutlak Çekirdek Duvarı:** `SecDomain::Kernel (0)`, `SecDomain::RootSystem (1)` ve `SecDomain::Userspace (2)` alanları kesin olarak ayrılır. `USERSPACE` süreçleri yalnızca yetkili oldukları `USERSPACE` nesnelerine yazabilir; sistem kütüphaneleri kontrollü `READ_ONLY_EXPORT` (`W^X`) ile salt-okunur sunulur (`INV-SEC-02`, `INV-SEC-03`). `ROOT_SYSTEM` yetkisi dahil hiçbir Ring 3 bileşeni `KERNEL` belleğine doğrudan erişemez (`INV-SEC-01`).
+- **Nesne Etiketleme ve Path-Bağımsız Denetim:** Her çekirdek nesnesi (`TCB`, `CSpace`, `VSpace`, `Frame`/`DmaArena`, `Endpoint`, `Notification`, `PciCap`) ve VFS inode'u 64-bit `SecLabel { domain, flags, compartment_id, policy_tag }` taşır. Erişim kararları path veya `cwd`'ye değil, **nesne `SecLabel` + süreç capability seti** kesişimine dayanır. Yeni nesneler/dosyalar varsayılan olarak ebeveyn etiketini miras alır; `rename`, `symlink`, `hardlink` ve `mount` işlemleri yetki yükseltemez (`INV-SEC-05`).
+- **`DRY Vault`, `Policy Broker` ve Developer Workspace:** Kimlik doğrulama (`DRY Vault`), politika değerlendirmesi (`Policy Broker`) ve dosya sistemi (`VFS`) userspace servisleridir. `DRY Vault`, `ROOT_SYSTEM` içinde kapsamla sınırlandırılmış (`compartment_id` + `DEV_WORKSPACE`) ve süreli (`lease_epoch`) yetkiler üreterek sürekli izin sorma ihtiyacını ortadan kaldırır; ancak deny-by-default ilkesi ve güvenlik denetimleri hiçbir zaman kapatılamaz (`INV-SEC-04`, `INV-SEC-07`, `INV-SEC-08`).
+- **Etkinleşme Yaşam Döngüsü:** Userspace servis, paket ve politika güncellemeleri atomik nesil değişimiyle anında canlı etkinleşir; çekirdek güncellemeleri ise A/B Limine önyükleme yuvasına yazılıp bir sonraki boot'ta etkinleşir ve kullanıcıya reboot önerilir.
+
+---
+
+## 5. Linux Sürücü Adası ve Uyumluluk Mimarisi (`H2` Özeti)
+
+- **İzolasyon Birimi (*Driver Island*):** Upstream C sürücüsü (`GPL-2.0-only`) + sürücü sınıfına özel daraltılmış `libdry_lx_<sınıf>` çalışma zamanı aynı userspace sürecinde derlenir; dış dünyayla yalnızca DRY `IoRing` (CPU paylaşımlı bellek) üzerinden konuşur `[DOĞRULANDI — Faz 0 H2: 18.528 satır igc %0 değişiklik ve 3.468 satır runtime ile derlendi/test edildi]`.
+- **Gölge `vmemmap` ve Kalıcı IOVA Arena:** `igc.ko` ikili analizinde `[DOĞRULANDI]` görülen `vmemmap_base` ve `page_offset_base` satır-içi pointer aritmetiğini karşılamak ve paket başına IOTLB shootdown maliyetinden kaçınmak için 64-bit userspace adres alanında sabit bir `DmaArena` ve ona doğrusal indekslenen gölge `struct page[]` dizisi ayrılır `[FONKSİYONEL PoC DOĞRULANDI; fiziksel silikon IOMMU güvenliği TEST EDİLMEDİ]`.
 - **Uygulama Uyumluluğu Ayrımı:**
   - *Linux ELF Uygulamaları:* Userspace personality sunucusu + `FaultEndpoint`/`SYSCALL` yönlendirme trampolini (çekirdek ABI'sine POSIX eklenmez).
   - *Windows PE/NT (Faz 5):* Userspace `ntdll` -> `dry-ntos` sunucusu + Wine DLL + `DXVK` (çekirdek modu anti-cheat kapsam dışıdır).

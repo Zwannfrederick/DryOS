@@ -1,7 +1,7 @@
 # DRY OS — Mimari Karar Kayıtları (Architecture Decision Records)
 
-> **Tarih:** 10 Kasım 2026  
-> **Durum:** Geliştirme Öncesi Temel Kararlar (ADR-001 .. ADR-006)
+> **Tarih:** 10–11 Kasım 2026  
+> **Durum:** Aktif Mimari Kararlar (`ADR-001` .. `ADR-007`)
 
 ---
 
@@ -77,4 +77,46 @@
 - **Karar:**
   1. **Faz 0 Sırası:** Yarın (11 Kasım 2026) önce bağımsız, hızlı ve kesin yanlışlanabilir olan **H1 (TLC + Rust Loom + stres testi)** yürütülecek; hemen ardından **H2 (`igc` bağımlılık otomasyonu + `VFIO`/QEMU Driver Island PoC)** çalıştırılacaktır.
   2. **Mimari Bağımsızlık Kuralı:** `dry-kernel` (Faz 1) ve temel DRY OS (Faz 2), native Rust `VirtIO` ve `NVMe` sürücüleriyle **H2 tamamen başarısız olsa bile** kendi başına önyüklenen, çalışan ve test edilebilen eksiksiz bir mikroçekirdek işletim sistemi oluşturacaktır. H2 yalnızca Faz 3'te donanım kapsamını hızlandıran bir çarpan olarak konumlandırılır.
+
+---
+
+## ADR-007: Güvenlik Etiketleri (`SecLabel`), Alan İzolasyonu ve `DRY Vault` Mimarisi
+
+- **Durum:** Kabul Edildi (11 Kasım 2026)
+- **Bağlam:** Geleneksel UNIX/Linux sistemlerinde `uid == 0` (`root`) veya geniş kapsamlı `CAP_SYS_ADMIN`, tek bir ele geçirilmiş servisin tüm sistem dosyalarını değiştirmesine, `/dev/mem` veya yüklenebilir çekirdek modülleri üzerinden Ring 0 çekirdek belleğine sızmasına ve path/symlink yarışlarıyla (*confused deputy*) yetki yükseltmesine yol açar. Öte yandan her yönetimsel işlemde parola/onay soran sistemler de onay yorgunluğu (*prompt fatigue*) yaratarak kullanıcıyı kalıcı admin kabuğu açmaya iter. DRY OS mikroçekirdek saflığını bozmadan zorunlu alan izolasyonu, nesne etiketleme ve ergonomik süreli yetkilendirme sağlamalıdır.
+- **Karar (12 Temel Güvenlik Kuralı):**
+  1. **Üç Güvenlik Alanı (`SecDomain`):** Sistem kesin sınırlarla ayrılmış üç alandan oluşur: `USERSPACE` (`2`), `ROOT_SYSTEM` (`1`) ve `KERNEL` (`0`).
+  2. **Varsayılan Red ve Kontrollü Salt-Okunur Sistem Paylaşımı:** Normal `USERSPACE` süreçleri yalnızca açıkça yetkili oldukları `USERSPACE` nesnelerine yazabilir; `ROOT_SYSTEM` ve `KERNEL` nesnelerine erişim varsayılan olarak reddedilir (`EPERM_CAP`). Gerekli sistem kütüphaneleri ve salt-okunur paylaşımlar (`libc`, `dry-sdk`, yazıtipleri) yalnızca `SecFlags::READ_ONLY_EXPORT` bayrağıyla ve kesin `W^X` (`R` veya `R|X`, **asla `W` değil**) garantisiyle sunulur.
+  3. **Zorunlu Güvenlik Etiketleri (`SecLabel`):** Dosyalar/dizinler, süreçler (`TCB`/`CSpace`), IPC uç noktaları (`Endpoint`/`Notification`), bellek çerçeveleri (`Frame`/`DmaArena`) ve cihaz nesneleri (`PciCap`/`IrqCap`) 64-bit sabit boyutlu bir `SecLabel { domain, flags, compartment_id, policy_tag }` taşır.
+  4. **Ebeveyn Mirası ve Yetki Yükseltmeyen Ad Alanı İşlemleri:** Yeni oluşturulan dosya ve dizinler varsayılan olarak ebeveyn dizinin `SecLabel` etiketini miras alır (`dry_obj_retype` da `Untyped` ebeveyn etiketini miras alır). Taşıma (`rename`), `symlink`, `hardlink` veya `mount` işlemleri **asla yetki yükseltmez**: `hardlink` hedef inode üzerinde yazma/bağlama yetkisi gerektirir, `symlink` ortam yetkisi (*ambient authority*) taşımaz ve `USERSPACE` görünürlüğündeki `mount` işlemleri alan tavanını aşamaz.
+  5. **Path/`cwd` Bağımsız Çift-Faktörlü Denetim:** Erişim denetimi hiçbir zaman yalnızca dosya yoluna (*pathname*) veya çalışma dizinine (`cwd`) dayanmaz; her işlem **Nesne `SecLabel` + Süreç Capability Seti** kesişimini (`Authorize(SubjLabel, SubjCap, ObjLabel)`) doğrular.
+  6. **Kapsamlı `ROOT_SYSTEM` Developer Workspace:** `ROOT_SYSTEM` alanında ayrı bir `DEV_WORKSPACE` (`compartment_id` ile izole edilmiş geliştirici çalışma alanı) oluşturulabilir. Kullanıcı bu alanda yalnızca yetkilendirilmiş kapsam dahilinde derleme, paket yönetimi ve servis işlemleri yürütebilir; kapsam dışı sistem sırlarına (`DRY Vault` anahtarları vb.) erişemez.
+  7. **`DRY Vault` ve Süreli/Kapsamlı Yetki Kiralama (*Lease*):** `DRY Vault`, kimlik doğrulamayı yapar ve belirli süre (`lease_epoch` / `expires_tsc`) ile belirli kapsam (`compartment_id` + daraltılmış hak maskesi) için geçerli yetkiler üretir. Aktif kiralama süresi boyunca tekrar eden geliştirme/paket/servis işlemleri için kullanıcıdan tekrar tekrar izin istenmez.
+  8. **Mutlak Çekirdek Belleği Duvarı:** `ROOT_SYSTEM` yetkisi bile doğrudan `KERNEL` belleğine okuma veya yazma erişimi **vermez** (`/dev/mem`, Ring 3 HHDM eşlemesi, keyfi `MSR`/`CR` yazımı ve yüklenebilir Ring 0 modülü yoktur; IOMMU ikinci seviye tabloları da `KERNEL` çerçevelerini reddeder).
+  9. **Canlı Etkinleşme vs. Sonraki Önyüklemede Çekirdek Güncellemesi:** Userspace servis, sürücü, paket ve politika değişiklikleri mümkün olan her durumda Linux benzeri biçimde (atomik nesil değişimi / servis devriyle) **anında canlı etkinleşir**. `dry-kernel` çekirdek güncellemeleri ise canlı Ring 0 yaması yapmaz; imzalı A/B önyükleme yuvasına yazılıp **sonraki boot'ta** etkinleşir ve kullanıcıya reboot önerilir.
+  10. **Uçtan Uca Denetim Noktaları, Devir ve İptal:** Yetki ve etiket denetimi **VFS, IPC, bellek eşleme (`VSpace`), cihaz erişimi (`PciCap`/`IOMMU`) ve ayrıcalıklı servis çağrılarında** zorunlu uygulanır. Capability devri (`Mint`/`Grant`) yalnızca monotonik hak/süre daraltmayla (`NO_DELEGATE` kapalıysa) yapılabilir; iptal (`Revoke` veya lease bitimi) nesil sayacı + TLB/IOMMU temizliğiyle deterministik yürütülür.
+  11. **Mikroçekirdek Sorumluluk Ayrımı:** `DRY Vault`, `VFS` ve `Policy Broker` **izole userspace (`ROOT_SYSTEM`) servisleridir**. `dry-kernel` çekirdek içinde dosya yolu, parola veya karmaşık politika dili barındırmaz; yalnızca `SecLabel` saklama, $O(1)$ alan/hak denetimi, sahtelenemez gönderici kimliği (`badge` + `sender_label`) ve `Revoke`/lease ilkellerini uygular.
+  12. **Deny-by-Default ve Kapatılamaz Güvenlik:** Varsayılan politika **deny-by-default**'tur. Admin veya Developer Workspace hiçbir zaman güvenlik kontrollerinin kapatılması (`setenforce 0` / sınırsız `CAP_SYS_ADMIN`) anlamına gelmez.
+
+### ADR-007 Tehdit Modeli (`T-01` .. `T-06`)
+
+| Kod | Tehdit Senaryosu | Mimari Savunma Mekanizması |
+| :--- | :--- | :--- |
+| **`T-01`** | **Ele Geçirilmiş `USERSPACE` Süreci & Path/Link Yarışı:** `symlink`, `hardlink`, `rename` veya `..` TOCTOU yarışıyla `/system` kütüphanelerini ya da başka kullanıcı verisini ezme girişimi. | Path/`cwd` yerine hedef nesne `SecLabel` + açık capability kontrolü; ebeveyn etiket mirası; alanlar arası `hardlink` yasağı. |
+| **`T-02`** | **Ele Geçirilmiş `ROOT_SYSTEM` Servisi / Admin Aracının Ring 0'a Sızması:** Root yetkili bir servisin çekirdek veri yapılarını (`TCB`, `CSpace`) bellekte yamama veya sahte DMA yönlendirme girişimi. | `SecDomain::Kernel` nesnelerinin hiçbir Ring 3 `VSpace` veya `IommuDomain` içine eşlenememesi (`SMEP`/`SMAP` + `dry_vspace_map` / `dry_iommu_bind` sert reddi). |
+| **`T-03`** | **Yetkisiz Capability Sızıntısı ve Sahte IPC Kimliği:** İstemcinin kendisine ait olmayan yetkiyi devretmesi veya `Policy Broker` / `VFS`'e başka bir alan adına mesaj göndermesi. | `NO_DELEGATE` bayrağı, monotonik daraltma (`Mint`) ve çekirdeğin `dry_ipc_reply_recv` sırasında sahtelenemez `(badge, sender_label)` teslim etmesi. |
+| **`T-04`** | **Süresi Dolmuş veya İptal Edilmiş Yetkinin Kullanımı (*Stale Lease*):** Developer Workspace oturumu kapandıktan sonra kalan eski capability ile paket/servis değiştirme girişimi. | Capability başlığındaki `lease_epoch` / `generation` alanlarının çekirdek ve `Policy Broker` sınırında atomik doğrulanması (`EREVOKED`). |
+| **`T-05`** | **Paylaşılan Sistem Kütüphanesini Yazılabilir Eşleme:** `USERSPACE` sürecinin salt-okunur sistem kütüphanesi çerçevesini `PROT_WRITE` ile eşleyip diğer süreçleri zehirlemesi. | `SecFlags::READ_ONLY_EXPORT` + `W^X` kuralı: `dry_vspace_map` üzerinde `WRITE` talebinin çekirdek tarafından reddedilmesi. |
+| **`T-06`** | **Onay Yorgunluğu (*Prompt Fatigue*) ve Sınırsız Admin Kabuğu:** Sürekli parola sorulması yüzünden kullanıcının tüm korumaları kapatan kalıcı root kabuğu açması. | `DRY Vault` süreli/kapsamlı `DEV_WORKSPACE` kiralaması + çekirdekte global güvenlik kapatma bayrağının bulunmaması. |
+
+### ADR-007 Test Edilebilir Güvenlik Invariant'ları (`INV-SEC-01` .. `INV-SEC-08`)
+
+1. **`INV-SEC-01 (NoRing3KernelMap)`:** `PTE_PRESENT | PTE_USER` bitleri açık hiçbir Ring 3 sayfa tablosu girişi veya `IommuDomain` eşlemesi `SecDomain::Kernel` etiketli fiziksel çerçeveyi gösteremez.
+2. **`INV-SEC-02 (UserspaceWriteIsolation)`:** `subject.label.domain == Userspace` olan hiçbir özne, `object.label.domain in {RootSystem, Kernel}` olan bir nesne üzerinde `WRITE` / `MUTATE` hakkı elde edemez.
+3. **`INV-SEC-03 (ImmutableSharedExport)`:** `SecFlags::READ_ONLY_EXPORT` taşıyan hiçbir nesne `WRITE` hakkıyla eşlenemez ve aktif eşlemesi varken yeniden tiplenemez (`dry_obj_retype` reddedilir).
+4. **`INV-SEC-04 (MonotonicAttenuation)`:** Her capability türetme (`Mint` / `Grant`) adımında `child.rights ⊆ parent.rights` ve `child.lease_epoch <= parent.lease_epoch` sağlanır; `NO_DELEGATE` bayrağı varsa aktarım reddedilir.
+5. **`INV-SEC-05 (NamespaceNonEscalation)`:** `rename`, `symlink`, `hardlink` veya `mount` üzerinden ulaşılan nesne üzerindeki etkin hak kümesi, nesneye doğrudan erişimdeki hak kümesini **asla aşamaz** ve nesnenin `SecLabel` değerini yükseltemez.
+6. **`INV-SEC-06 (UnforgeableCallerLabel)`:** `dry_ipc_reply_recv` alıcısına iletilen `(badge, sender_label)` çifti doğrudan çekirdek `TCB`/`Endpoint` durumundan okunur; kullanıcı alanı bu alanları sahteleyemez.
+7. **`INV-SEC-07 (DeterministicRevokeAndExpiry)`:** `Revoke` tamamlandığı veya `lease_epoch` süresi dolduğu andan itibaren türetilmiş tüm yetkiler `EREVOKED` (`-6`) döner; aktif eşlemeler TLB shootdown ile sökülür.
+8. **`INV-SEC-08 (NonBypassablePolicy)`:** Çekirdek ve `Policy Broker` içinde `SecLabel` veya capability doğrulamasını devre dışı bırakan hiçbir çalışma zamanı bayrağı (`permissive mode` vb.) bulunmaz.
 
