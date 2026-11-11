@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (12:30 +03:00)
-- **Mevcut Durum:** **Faz 0 doğrulama kapısı (`H1` Scheduler ve `H2` Linux Driver Island Fizibilitesi — Görev 1..4) eksiksiz tamamlandı.** `dry-kernel` Faz 1 QEMU önyükleme aşaması (`Görev 5`) için mimari geçiş önerisi hazırlandı; çekirdek kodlamasına başlamadan önce kullanıcı onayı beklenmektedir.
+- **Son Güncelleme:** 11 Kasım 2026 (13:10 +03:00)
+- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` tek-CPU çekirdek önyükleme + `GDT/TSS/IDT` istisna işleme aşamaları (`Adım A..D`) eksiksiz tamamlandı ve makine tarafından doğrulandı.** İstenen ara kontrol noktası uyarınca **SMP (`2/4/20 vCPU`, `Adım E`) ve `H1` zamanlayıcı entegrasyonu (`Adım F`)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
 
 ---
 
@@ -13,6 +13,7 @@
 4. **ADR-004 (Scheduler):** TLC ve Rust `loom` ile doğrulanan `H1` (`AtomicU32(exec_state, park_token)` + açık `fence(Ordering::SeqCst)` + `CAS` tabanlı `post_switch_*`/`finish_waking_and_push`) + CPU başına öncelikli RR kuyruk + IPC Öncelik Bağışı (*Priority Inheritance*); Faz 3–4'te topoloji-farkındalıklı *work stealing* ve `NO_HZ_FULL`.
 5. **ADR-005 (Lisans):** DRY Kernel ve native servisler `MIT OR GPL-2.0-only`; Linux *Driver Island* süreçleri ve `libdry_lx_*` katmanı `GPL-2.0-only` (saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları sürücü adalarında yasak).
 6. **ADR-006 (Sıra & Bağımsızlık):** **H1 ve H2 tamamlandı (`Gate 0` geçildi).** DRY Kernel gelişimi (Faz 1–2) H2'nin tüm sürücü sınıflarında veya fiziksel silikon IOMMU'da doğrulanmasını beklemeyecektir.
+7. **ADR-007 (Güvenlik Etiketleri, Alan İzolasyonu & `DRY Vault`):** `USERSPACE`, `ROOT_SYSTEM` ve `KERNEL` 3-alan ayrımı, 8-bayt `SecLabel`, path-bağımsız `SecLabel + Capability` kesişim denetimi, kapsamlı `DEV_WORKSPACE`, süreli `DRY Vault` `lease_epoch` kiralaması, mutlak çekirdek belleği duvarı ve `INV-SEC-01..08` invariant'ları yürürlüğe alındı (`a443e6c`).
 
 ---
 
@@ -69,13 +70,13 @@
 
 ---
 
-## 3. Sıradaki Aşama ve Açık Ön-Koşullar (`Görev 5` — Faz 1 `dry-kernel` QEMU Önyükleme)
+## 3. Faz 1 `Milestone 1A` Durumu (`Adım A..D` Tamamlandı — `Adım E..F` Öncesi Ara Kontrol)
 
-### Doğrulanmış Konak Araç Zinciri Durumu
-- **Hazır Olanlar:** `rustc 1.99.1` (Arch Linux `1:1.99.1-1`), `/usr/bin/ld.lld`, `/usr/bin/qemu-system-x86_64` (`11.1.3` + `/dev/kvm`), `/usr/share/edk2/x64/OVMF_CODE.4m.fd` & `OVMF_VARS.4m.fd`, `mtools` (`mformat`, `mmd`, `mcopy` — `xorriso` gerektirmeden GPT/FAT32 UEFI ESP imajı üretebilir).
-- **Eksik Ön-Koşullar (Kullanıcı Onayı / Kurulum Gerektirenler):**
-  1. **`x86_64-unknown-none` / `rust-src`:** Sistemde `rustup` yoktur ve `/usr/lib/rustlib/` yalnızca `x86_64-unknown-linux-gnu` içerir (`/usr/lib/rustlib/src` yok). Bare-metal `no_std` derlemesi için Arch `rust-src` paketinin (`RUSTC_BOOTSTRAP=1 -Z build-std=core,alloc`) veya `rustup` (`rustup target add x86_64-unknown-none`) kurulumu gerekir.
-  2. **Limine UEFI Önyükleyici (`BOOTX64.EFI`):** Sistemde `limine` paketi kurulu değildir; ya sistem paketi (`pacman -S limine`) kurulmalı ya da resmi `limine-v10.x-binary` dalından yalnızca `BOOTX64.EFI` ikilisi `vendor/limine/` altına indirilmelidir.
+### Tamamlanan `Milestone 1A` Adımları (`Adım A..D`) `[TAMAMLANDI — 11 Kasım 2026]`
+- **Adım A — Repo-Yerel Araç Zinciri (`0` Konak Paketi Değişikliği):** `tools/bootstrap_phase1.py` ve `tools/phase1-toolchain-lock.json` ile sistem `rustc 1.99.1` (`58cf8f9c3`) için resmi `rust-src-1.99.1` + Limine `10.8.5` UEFI (`7a9013f305de`) ve `limine.h` (`6e85ddd6f928`) SHA-256 kilitli olarak `.toolchains/` altına kuruldu.
+- **Adım B & C — Minimal 1-CPU `dry-kernel` UEFI Boot & Otomatik QEMU Testi (`bc46907`):** `kernel/src/{main.rs,limine.rs,mem_verify.rs,security.rs,serial.rs,arch.rs}` ve `tools/qemu_boot_test.py` ile Limine HHDM + bellek haritası doğrulaması, `COM1` seri konsol, `ADR-007` `SecLabel`/`CapabilityMeta` öz-testleri ve deterministik panik işleyicisi (`exit=33` başarı / `exit=35` panik) makine tarafından doğrulandı.
+- **Adım D — Per-CPU `GDT`, `TSS` (`IST1`) ve 256 Girişli `IDT` İstisna İşleme:** `kernel/src/{gdt_tss.rs,idt.rs}` ile `SYSCALL`/`SYSRETQ` uyumlu 64-bit GDT, 16 KiB ayrı `#DF` (`IST1`) yığınlı TSS ve assembly `TrapFrame` tabanlı IDT kuruldu; canlı `int3` (`#BP`) kurtarma, `#UD` (`ud2`) ve `#PF` (`CR2=0x7fffdeadbee0`) testleri otomatik QEMU koşusunda doğrulandı (`python3 tools/qemu_boot_test.py`).
 
-### Görev 5: Minimal `dry-kernel` Limine UEFI QEMU Boot İskeleti `[KULLANICI ONAYI BEKLİYOR]`
-- **Planlanan Dosya Konumları:** `kernel/Cargo.toml`, `kernel/linker.ld`, `kernel/src/{main.rs,limine_proto.rs,serial.rs,arch_x86_64.rs,smp.rs,sched_h1.rs}`, `tools/qemu-run.sh`
+### Sıradaki Adımlar (Kullanıcı Değerlendirmesi Sonrası `Adım E & F`)
+- **Adım E (`SMP`):** Limine MP isteğiyle önce `-smp 2`, ardından `-smp 4` ve bunlar geçtikten sonra `-smp 20` vCPU üzerinde simetrik AP uyanışı, per-CPU `GS` alanı ve CPU başına bağımsız GDT/TSS/IDT yüklemesi.
+- **Adım F (`H1` Zamanlayıcı Entegrasyonu):** TLC ve Loom ile doğrulanan `AtomicU32(exec_state, park_token)` + `PerCpuRunQueue` protokolünün, assembly `switch_to`, stack sahipliği ve `thread_entry_trampoline` / `post_switch_*` kurallarıyla `dry-kernel` içine taşınması ve çok-çekirdekli QEMU stres testleri.

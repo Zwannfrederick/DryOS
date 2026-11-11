@@ -5,14 +5,20 @@
 #![no_main]
 
 mod arch;
+mod gdt_tss;
+mod idt;
 mod limine;
 mod mem_verify;
 mod security;
 mod serial;
 
+use core::arch::asm;
 use core::panic::PanicInfo;
+use core::ptr::read_volatile;
 
 use crate::arch::{cli, qemu_exit, read_cr3, read_rsp, QEMU_EXIT_PANIC, QEMU_EXIT_SUCCESS};
+use crate::gdt_tss::init_cpu_gdt_tss;
+use crate::idt::{init_bsp_idt, verify_breakpoint_trap_recovery};
 use crate::limine::{
     base_revision_supported, cstr_to_str, BOOTLOADER_INFO_REQ, CMDLINE_REQ, FIRMWARE_TYPE_REQ,
     LIMINE_FIRMWARE_EFI64,
@@ -72,8 +78,31 @@ pub extern "C" fn _start() -> ! {
         cmdline
     );
 
+    let (df_ist1_top, rsp0_top) = init_cpu_gdt_tss(0);
+    init_bsp_idt();
+    let (bp_hits, bp_rip) = verify_breakpoint_trap_recovery();
+    serial_println!(
+        "[DRY-CPU] PASS: GDT(CS=0x08,TR=0x28) TSS(IST1={:#x},RSP0={:#x}) IDT(256) #BP(hits={},rip={:#x})",
+        df_ist1_top,
+        rsp0_top,
+        bp_hits,
+        bp_rip
+    );
+
     if cmdline.contains("panic_self_test=1") {
         panic!("intentional panic_self_test triggered via kernel cmdline");
+    }
+    if cmdline.contains("fault_self_test=ud2") {
+        // SAFETY: Intentional invalid opcode test verified by automated QEMU harness.
+        unsafe {
+            asm!("ud2", options(nomem, nostack));
+        }
+    }
+    if cmdline.contains("fault_self_test=pf") {
+        // SAFETY: Intentional non-present canonical address read to verify `#PF` + `CR2` capture.
+        unsafe {
+            let _ = read_volatile(0x0000_7fff_dead_bee0usize as *const u64);
+        }
     }
 
     let mem = verify_memory_and_hhdm();

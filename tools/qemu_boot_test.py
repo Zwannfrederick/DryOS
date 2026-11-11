@@ -225,12 +225,14 @@ def main() -> None:
         must_contain=[
             "[DRY-BOOT] DRY Kernel v0.1.0",
             "Firmware: EFI64",
+            "[DRY-CPU] PASS: GDT(CS=0x08,TR=0x28)",
+            "#BP(hits=1,",
             "[DRY-HHDM] PASS:",
             "[DRY-MEMMAP] PASS:",
             "[DRY-SEC] PASS:",
             "[DRY-BOOT-OK]",
         ],
-        must_not_contain=["[DRY-PANIC]"],
+        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]"],
     )
 
     assert_boot_case(
@@ -243,6 +245,33 @@ def main() -> None:
             "[DRY-BOOT] DRY Kernel v0.1.0",
             "[DRY-PANIC]",
             "intentional panic_self_test triggered via kernel cmdline",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="exception_ud2_caught",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 fault_self_test=ud2",
+        smp=1,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-EXCEPTION] vec=6 (#UD Invalid-Opcode)",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="exception_pf_caught",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 fault_self_test=pf",
+        smp=1,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-EXCEPTION] vec=14 (#PF Page-Fault)",
+            "cr2=0x7fffdeadbee0",
+            "[DRY-PANIC]",
         ],
         must_not_contain=["[DRY-BOOT-OK]"],
     )
