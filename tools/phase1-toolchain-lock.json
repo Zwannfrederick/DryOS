@@ -1,0 +1,40 @@
+{
+  "host_rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)",
+  "rust_src": {
+    "release": "1.99.1",
+    "commit_hash": "58cf8f9c35b355199727627d07ae34a4e2846d67",
+    "url": "https://static.rust-lang.org/dist/rust-src-1.99.1.tar.xz",
+    "archive": ".toolchains/downloads/rust-src-1.99.1.tar.xz",
+    "sha256": "e485a88c45db546b73571df7bebfcb4454ba4fb552c492e25fc5b00eeb5bf22d",
+    "library_path": ".toolchains/sysroot/lib/rustlib/src/rust/library"
+  },
+  "limine": {
+    "binary_repo": "https://github.com/limine-bootloader/limine.git",
+    "binary_ref": "refs/heads/v10.x-binary",
+    "binary_commit_sha": "7a9013f305de0bea1f6310e76e7baba30499fef0",
+    "protocol_repo": "https://github.com/limine-bootloader/limine-protocol.git",
+    "protocol_commit_sha": "6e85ddd6f928b5b512015c4d47d1cfce2fd28079",
+    "license": "BSD-2-Clause / 0BSD",
+    "supports_mp_request": true,
+    "files": [
+      {
+        "name": "BOOTX64.EFI",
+        "bytes": 307200,
+        "sha256": "91ef81c1f95c4ac8bf77c4393a0b2fcd2628550827d7abf89a43194400e17a85",
+        "url": "https://raw.githubusercontent.com/limine-bootloader/limine/7a9013f305de0bea1f6310e76e7baba30499fef0/BOOTX64.EFI"
+      },
+      {
+        "name": "LICENSE",
+        "bytes": 659,
+        "sha256": "e2b1c35814afb22acbddf7ff567d2b05a467e503628ffea62752bc1f3fa2595c",
+        "url": "https://raw.githubusercontent.com/limine-bootloader/limine-protocol/6e85ddd6f928b5b512015c4d47d1cfce2fd28079/LICENSE"
+      },
+      {
+        "name": "limine.h",
+        "bytes": 17709,
+        "sha256": "0aadf2633c85d8cb145344c968add158aeb1deb68af567d55ba8431c492b6d4c",
+        "url": "https://raw.githubusercontent.com/limine-bootloader/limine-protocol/6e85ddd6f928b5b512015c4d47d1cfce2fd28079/include/limine.h"
+      }
+    ]
+  }
+}

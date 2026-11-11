@@ -1,4 +1,5 @@
-/target/
+/.toolchains/
+**/target/
 /tools/*.jar
 /vendor/linux-drivers/v*/
 **/build/
