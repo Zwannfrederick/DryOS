@@ -6,12 +6,13 @@ use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::gdt_tss::{DF_IST_INDEX, KERNEL_CS};
+use crate::arch::{qemu_exit, read_rsp, QEMU_EXIT_PANIC};
+use crate::gdt_tss::{verify_df_canary_only, DF_IST_INDEX, KERNEL_CS};
+use crate::percpu::{try_current_percpu, PerCpuData};
 use crate::serial;
 
 static IDT_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static BP_TRAP_COUNT: AtomicU64 = AtomicU64::new(0);
-static LAST_BP_RIP: AtomicU64 = AtomicU64::new(0);
+static TOTAL_BP_TRAPS: AtomicU64 = AtomicU64::new(0);
 
 /// Unified CPU Trap/Interrupt Frame pushed by hardware + `dry_isr_common` assembly stub.
 #[repr(C)]
@@ -86,7 +87,8 @@ impl IdtEntry {
 #[repr(C, align(16))]
 struct IdtTable(UnsafeCell<[IdtEntry; 256]>);
 
-// SAFETY: `IDT` is populated once on BSP before `IDT_INITIALIZED` becomes true, then read-only.
+// SAFETY: `IDT` is populated once on BSP before `IDT_INITIALIZED` is published (`Release`),
+// after which all CPUs only perform read-only `lidt` and hardware interrupt vector lookups.
 unsafe impl Sync for IdtTable {}
 
 static IDT: IdtTable = IdtTable(UnsafeCell::new([IdtEntry::missing(); 256]));
@@ -97,8 +99,6 @@ struct IdtPtr {
     base: u64,
 }
 
-// Generate 32 architectural exception stubs (`0..=31`) + generic fallback stub (`32..=255`).
-// Vectors `8, 10, 11, 12, 13, 14, 17, 21, 29, 30` push a hardware error code; others push `0`.
 global_asm!(
     ".macro ISR_NOERR vec",
     ".global dry_isr_stub_\\vec",
@@ -258,17 +258,62 @@ fn vector_mnemonic(vec: u64) -> &'static str {
     }
 }
 
+fn handle_double_fault(frame: &TrapFrame, pcpu: Option<&'static PerCpuData>) -> ! {
+    crate::enter_fatal_or_halt();
+    let handler_rsp = read_rsp();
+    if let Some(cpu) = pcpu {
+        // Non-reentrancy guard: nested `#DF` on `IST1` would clobber the active frame; exit immediately.
+        if cpu.in_df_handler.swap(true, Ordering::AcqRel) {
+            qemu_exit(QEMU_EXIT_PANIC);
+        }
+        let on_private_ist1 = handler_rsp >= cpu.df_ist1_base && handler_rsp < cpu.df_ist1_top;
+        let canary_ok = verify_df_canary_only(cpu.cpu_idx as usize);
+        if on_private_ist1 && canary_ok {
+            serial::emergency_print(format_args!(
+                "\r\n[DRY-DF-IST1] PASS: hardware #DF caught on cpu={} lapic={} on private IST1 rsp={:#x} [base={:#x}, top={:#x}] fault_rsp={:#x}\r\n",
+                cpu.cpu_idx,
+                cpu.lapic_id,
+                handler_rsp,
+                cpu.df_ist1_base,
+                cpu.df_ist1_top,
+                frame.rsp
+            ));
+        } else {
+            serial::emergency_print(format_args!(
+                "\r\n[DRY-DF-IST1] FAIL: cpu={} rsp={:#x} expected=[{:#x}, {:#x}) canary_ok={}\r\n",
+                cpu.cpu_idx, handler_rsp, cpu.df_ist1_base, cpu.df_ist1_top, canary_ok
+            ));
+        }
+    }
+    panic!(
+        "terminal hardware Double Fault (#DF) at rip={:#x} fault_rsp={:#x}",
+        frame.rip, frame.rsp
+    );
+}
+
 extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
+    let pcpu = try_current_percpu();
+
     if frame.vector == 3 {
         // `#BP` (`int3`) is a Trap: `frame.rip` points to the instruction immediately after `0xcc`.
-        BP_TRAP_COUNT.fetch_add(1, Ordering::AcqRel);
-        LAST_BP_RIP.store(frame.rip, Ordering::Release);
+        TOTAL_BP_TRAPS.fetch_add(1, Ordering::AcqRel);
+        if let Some(cpu) = pcpu {
+            cpu.bp_trap_count.fetch_add(1, Ordering::AcqRel);
+            cpu.last_bp_rip.store(frame.rip, Ordering::Release);
+        }
         return;
     }
 
+    if frame.vector == 8 {
+        handle_double_fault(frame, pcpu);
+    }
+
+    crate::enter_fatal_or_halt();
     let cr2 = if frame.vector == 14 { read_cr2() } else { 0 };
+    let cpu_id = pcpu.map_or(u64::MAX, |c| c.cpu_idx);
     serial::emergency_print(format_args!(
-        "\r\n[DRY-EXCEPTION] vec={} ({}) rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} err={:#x} cr2={:#x}\r\n",
+        "\r\n[DRY-EXCEPTION] cpu={} vec={} ({}) rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} err={:#x} cr2={:#x}\r\n",
+        cpu_id,
         frame.vector,
         vector_mnemonic(frame.vector),
         frame.rip,
@@ -279,9 +324,10 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
         cr2
     ));
     panic!(
-        "unrecoverable kernel CPU exception vec={} ({}) at rip={:#x}",
+        "unrecoverable kernel CPU exception vec={} ({}) on cpu={} at rip={:#x}",
         frame.vector,
         vector_mnemonic(frame.vector),
+        cpu_id,
         frame.rip
     );
 }
@@ -321,17 +367,18 @@ pub fn load_idt() {
         limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
         base: IDT.0.get() as u64,
     };
-    // SAFETY: `IDT` contains 256 valid 64-bit interrupt gates in static kernel `.bss`/`.data`.
+    // SAFETY: `IDT` contains 256 valid 64-bit interrupt gates in static kernel `.bss`.
     unsafe {
         asm!("lidt [{}]", in(reg) &idtr, options(nostack, preserves_flags));
     }
 }
 
-/// Trigger a live hardware `#BP` (`int3`) trap and verify exact `RIP` capture + `iretq` resume.
-pub fn verify_breakpoint_trap_recovery() -> (u64, u64) {
-    let before = BP_TRAP_COUNT.load(Ordering::Acquire);
+/// Trigger a live hardware `#BP` (`int3`) trap on the calling CPU and verify per-CPU `GS_BASE`
+/// trap accounting + exact `RIP` capture + `iretq` resume.
+pub fn verify_breakpoint_trap_recovery(pcpu: &'static PerCpuData) -> (u64, u64) {
+    let before = pcpu.bp_trap_count.load(Ordering::Acquire);
     let after_int3_label: u64;
-    // SAFETY: `int3` triggers vector 3 (`#BP`), which records `frame.rip` and returns via `iretq`.
+    // SAFETY: `int3` triggers vector 3 (`#BP`), updating `pcpu.bp_trap_count` and returning via `iretq`.
     unsafe {
         asm!(
             "int3",
@@ -341,9 +388,13 @@ pub fn verify_breakpoint_trap_recovery() -> (u64, u64) {
             options(nostack, preserves_flags),
         );
     }
-    let after = BP_TRAP_COUNT.load(Ordering::Acquire);
-    let recorded_rip = LAST_BP_RIP.load(Ordering::Acquire);
-    assert_eq!(after, before + 1, "#BP trap handler did not fire exactly once");
-    assert_eq!(recorded_rip, after_int3_label, "#BP saved RIP mismatch");
+    let after = pcpu.bp_trap_count.load(Ordering::Acquire);
+    let recorded_rip = pcpu.last_bp_rip.load(Ordering::Acquire);
+    assert_eq!(after, before + 1, "Per-CPU #BP trap handler did not fire once on CPU {}", pcpu.cpu_idx);
+    assert_eq!(recorded_rip, after_int3_label, "Per-CPU #BP saved RIP mismatch on CPU {}", pcpu.cpu_idx);
     (after, recorded_rip)
+}
+
+pub fn total_bp_traps() -> u64 {
+    TOTAL_BP_TRAPS.load(Ordering::Acquire)
 }

@@ -9,25 +9,52 @@ mod gdt_tss;
 mod idt;
 mod limine;
 mod mem_verify;
+mod percpu;
 mod security;
 mod serial;
+mod smp;
 
-use core::arch::asm;
+use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr::read_volatile;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::{cli, qemu_exit, read_cr3, read_rsp, QEMU_EXIT_PANIC, QEMU_EXIT_SUCCESS};
-use crate::gdt_tss::init_cpu_gdt_tss;
+use crate::arch::{cli, halt_forever, qemu_exit, read_cr3, read_rsp, QEMU_EXIT_PANIC, QEMU_EXIT_SUCCESS};
+use crate::gdt_tss::{init_cpu_gdt_tss, prepare_cpu_boot_stack};
 use crate::idt::{init_bsp_idt, verify_breakpoint_trap_recovery};
 use crate::limine::{
     base_revision_supported, cstr_to_str, BOOTLOADER_INFO_REQ, CMDLINE_REQ, FIRMWARE_TYPE_REQ,
-    LIMINE_FIRMWARE_EFI64,
+    LIMINE_FIRMWARE_EFI64, MP_REQ,
 };
 use crate::mem_verify::verify_memory_and_hhdm;
+use crate::percpu::{init_cpu_percpu_and_gs, CpuRegionInfo};
 use crate::security::verify_boot_security_invariants;
+use crate::smp::{init_and_verify_smp, SmpFaultTest};
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+// Switch BSP (`cpu_idx = 0`) immediately from Limine's temporary `BOOTLOADER_RECLAIMABLE` stack
+// onto its permanent 16 KiB `'static` `CPU_DESCS[0].boot_stack` so BSP and all APs share identical
+// stack lifetime & canary invariants.
+global_asm!(
+    ".global _start",
+    ".balign 16",
+    "_start:",
+    "    cli",
+    "    cld",
+    "    and rsp, -16",
+    "    call {prep_bsp}",
+    "    mov rsp, rax",
+    "    xor ebp, ebp",
+    "    call {bsp_main}",
+    prep_bsp = sym prepare_bsp_stack_top,
+    bsp_main = sym bsp_kmain,
+);
+
+extern "C" fn prepare_bsp_stack_top() -> u64 {
+    let (_, top) = prepare_cpu_boot_stack(0);
+    top
+}
+
+extern "C" fn bsp_kmain() -> ! {
     cli();
     serial::init();
 
@@ -69,6 +96,13 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    let bsp_lapic_id = {
+        let mp_resp = MP_REQ.read().response;
+        assert!(!mp_resp.is_null(), "Limine MP response is null");
+        // SAFETY: Valid response struct supplied by Limine.
+        unsafe { (*mp_resp).bsp_lapic_id }
+    };
+
     serial_println!(
         "[DRY-BOOT] Bootloader: {} {} | Firmware: EFI64 | CR3={:#x} RSP={:#x} | cmdline=\"{}\"",
         bl_name,
@@ -78,13 +112,25 @@ pub extern "C" fn _start() -> ! {
         cmdline
     );
 
-    let (df_ist1_top, rsp0_top) = init_cpu_gdt_tss(0);
+    let layout = init_cpu_gdt_tss(0);
     init_bsp_idt();
-    let (bp_hits, bp_rip) = verify_breakpoint_trap_recovery();
+    let bsp_pcpu = init_cpu_percpu_and_gs(CpuRegionInfo {
+        cpu_idx: 0,
+        lapic_id: bsp_lapic_id,
+        boot_stack_base: layout.boot_stack_base,
+        boot_stack_top: layout.boot_stack_top,
+        df_ist1_base: layout.df_ist1_base,
+        df_ist1_top: layout.df_ist1_top,
+        tss_base: layout.tss_base,
+        gdt_base: layout.gdt_base,
+    });
+    let (bp_hits, bp_rip) = verify_breakpoint_trap_recovery(bsp_pcpu);
     serial_println!(
-        "[DRY-CPU] PASS: GDT(CS=0x08,TR=0x28) TSS(IST1={:#x},RSP0={:#x}) IDT(256) #BP(hits={},rip={:#x})",
-        df_ist1_top,
-        rsp0_top,
+        "[DRY-CPU] PASS: BSP(cpu=0,lapic={}) GDT(CS=0x08,TR=0x28,Busy=0x8b) TSS(IST1={:#x},RSP0={:#x}) GS={:#x} IDT(256) #BP(hits={},rip={:#x})",
+        bsp_lapic_id,
+        layout.df_ist1_top,
+        layout.boot_stack_top,
+        bsp_pcpu.self_ptr,
         bp_hits,
         bp_rip
     );
@@ -125,23 +171,67 @@ pub extern "C" fn _start() -> ! {
         "[DRY-SEC] PASS: ADR-007 SecLabel (8B) + 3-Domain + Lease/Revoke invariants verified"
     );
 
-    serial_println!("[DRY-BOOT-OK] Milestone 1A single-CPU UEFI boot verified cleanly.");
+    let smp_fault = SmpFaultTest::from_cmdline(cmdline);
+    let smp = init_and_verify_smp(bsp_pcpu, smp_fault);
+    serial_println!(
+        "[DRY-SMP] PASS: cpus_online={} mask={:#x} total_bp_traps={} symmetric_ops={} stacks_disjoint=true",
+        smp.cpu_count,
+        smp.online_mask,
+        smp.total_bp_traps,
+        smp.total_work_ops
+    );
+
+    serial_println!(
+        "[DRY-BOOT-OK] Milestone 1A-E UEFI boot + {}-vCPU SMP verified cleanly.",
+        smp.cpu_count
+    );
     qemu_exit(QEMU_EXIT_SUCCESS);
+}
+
+const NO_PANIC_OWNER: u64 = u64::MAX;
+const EARLY_CPU_TOKEN: u64 = u64::MAX - 1;
+static PANIC_OWNER: AtomicU64 = AtomicU64::new(NO_PANIC_OWNER);
+
+/// Claim exclusive ownership of fatal serial reporting; if another CPU is already panicking, halt.
+pub fn enter_fatal_or_halt() {
+    cli();
+    let token = percpu::try_current_percpu().map_or(EARLY_CPU_TOKEN, |c| c.cpu_idx);
+    if matches!(
+        PANIC_OWNER.compare_exchange(
+            NO_PANIC_OWNER,
+            token,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ),
+        Err(owner) if owner != token
+    ) {
+        halt_forever();
+    }
+}
+
+pub fn is_panicking() -> bool {
+    PANIC_OWNER.load(Ordering::Acquire) != NO_PANIC_OWNER
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    cli();
+    enter_fatal_or_halt();
+    let cpu_id = percpu::try_current_percpu().map_or(u64::MAX, |c| c.cpu_idx);
     if let Some(loc) = info.location() {
         serial::emergency_print(format_args!(
-            "\r\n[DRY-PANIC] {}:{}:{} — {}\r\n",
+            "\r\n[DRY-PANIC] cpu={} {}:{}:{} — {}\r\n",
+            cpu_id,
             loc.file(),
             loc.line(),
             loc.column(),
             info.message()
         ));
     } else {
-        serial::emergency_print(format_args!("\r\n[DRY-PANIC] <no-location> — {}\r\n", info.message()));
+        serial::emergency_print(format_args!(
+            "\r\n[DRY-PANIC] cpu={} <no-location> — {}\r\n",
+            cpu_id,
+            info.message()
+        ));
     }
     qemu_exit(QEMU_EXIT_PANIC);
 }

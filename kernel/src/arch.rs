@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Low-level x86-64 port I/O, CPU control, and QEMU `isa-debug-exit` helpers.
+//! Low-level x86-64 port I/O, MSRs, TSC, CPU control, and QEMU `isa-debug-exit` helpers.
 
 use core::arch::asm;
 
 /// QEMU `-device isa-debug-exit,iobase=0xf4,iosize=0x04` port.
-/// Writing `code` causes QEMU to exit with host status `(code << 1) | 1`.
 const QEMU_DEBUG_EXIT_PORT: u16 = 0xf4;
 
 /// Host exit status `(0x10 << 1) | 1 == 33`.
 pub const QEMU_EXIT_SUCCESS: u32 = 0x10;
 /// Host exit status `(0x11 << 1) | 1 == 35`.
 pub const QEMU_EXIT_PANIC: u32 = 0x11;
+
+pub const MSR_IA32_GS_BASE: u32 = 0xc000_0101;
+pub const MSR_IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
 
 #[inline]
 pub unsafe fn outb(port: u16, val: u8) {
@@ -36,6 +38,56 @@ pub unsafe fn outl(port: u16, val: u32) {
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
     }
+}
+
+#[inline]
+pub unsafe fn wrmsr(msr: u32, val: u64) {
+    let low = val as u32;
+    let high = (val >> 32) as u32;
+    // SAFETY: Caller guarantees `msr` and `val` are architecturally valid at CPL=0.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") low,
+            in("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: Caller guarantees `msr` is readable at CPL=0.
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((high as u64) << 32) | (low as u64)
+}
+
+#[inline]
+pub fn rdtsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: Serialized `lfence; rdtsc` is readable at CPL=0 with no side effects.
+    unsafe {
+        asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((high as u64) << 32) | (low as u64)
 }
 
 #[inline]

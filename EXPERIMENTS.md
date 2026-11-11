@@ -283,3 +283,50 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 2. **Seviye 2 — Derlenebilir ve Çalışan `igc` (`v6.12` & `v6.18`) Userspace Driver Island `[FONKSİYONEL PoC BAŞARILI — SİMÜLE DONANIM]`:** `18.528` satırlık upstream `igc` sürücüsü `%0` değişiklik ve `3.468` satırlık `GPL-2.0-only` runtime ile derlenip simüle I225 DMA/MSI-X geri-döngüsünde uçtan uca TX/RX paket geçirdi.
 3. **Seviye 3 — Canlı VFIO + IOMMU Donanım-Arayüz PoC (`e1000e` Ayrı Deneyi) `[FONKSİYONEL PoC BAŞARILI — FARKLI CİHAZ MODELİ & EMÜLE IOMMU]`:** Gerçek Linux `vfio-pci` + KVM `intel-iommu` üzerinde 0 dinamik IOMMU çağrısıyla canlı Ethernet DMA TX/RX ve `0xdead0000` DMAR sayfa hatası yakalama doğrulandı.
 4. **Doğrulanmamış Alan (Açık Sınır):** Fiziksel Intel I225/I226 silikonu üzerinde gerçek zamanlama/link eğitimi ve fiziksel VT-d silikon IOMMU güvenlik izolasyonu **henüz doğrulanmamıştır** (Faz 3 giriş kriteri olarak korunmaktadır; Faz 1 `dry-kernel` geliştirmesini engellemez).
+
+---
+
+## Bölüm C — Faz 1 `Milestone 1A-E`: Limine SMP (`1/2/4/20 vCPU`), Per-CPU İzolasyon ve `#DF` `IST1` Doğrulaması
+
+- **Tarih:** 11 Kasım 2026
+- **Kapsam:** `dry-kernel` (`x86_64-unknown-none`, `no_std`, Limine `10.8.5` UEFI + `OVMF` + KVM) üzerinde `1`, `2`, `4` ve `20` vCPU kademeli SMP uyanışı, CPU başına bağımsız `GDT`, `TSS`, `IST1` (`#DF`), `IA32_GS_BASE` ve `PerCpuData` izolasyonu, negatif arıza testleri ve gerçek donanım `#PF -> #DF` yığın geçişi.
+- **Tekrarlanabilir Komut:** `python3 tools/qemu_boot_test.py` (tekil SMP koşusu için `--smp-only {1|2|4|20}`).
+
+### C.1. AP Başlangıç Eşzamanlılık ve Bellek Sıralaması Kuralları (`kernel/src/smp.rs`)
+
+1. **Faz 1 — Tek Yazıcılı BSP Ön-Hazırlığı (`Single-Writer Pre-Publication`):** BSP (`cpu_idx = 0`), paylaşılan 256-girişli `IDT` tablosunu kurup `IDT_INITIALIZED.store(true, Release)` ile yayınlar; her AP için `prepare_cpu_boot_stack(cpu_idx)` ile kalıcı 16 KiB `boot_stack` ve 16 KiB `df_stack` taban kanaryalarını yazar, `AP_LAUNCH_SLOTS[cpu_idx]` kaydını doldurur ve `mp_info.extra_argument` alanına slot adresini yazar.
+2. **Faz 2 — `LimineMpInfo::goto_address` Üzerinden `Release -> Acquire` Devri:** BSP, `fence(Ordering::Release)` sonrasında `mp_info.goto_address.store(dry_ap_trampoline, Ordering::Release)` yazar. Limine'in AP bekleme döngüsü bu adresi gözlemleyip `RFLAGS.IF = 0` (`CLI`), 64-bit Long Mode ve BSP ile özdeş `CR3` altında `dry_ap_trampoline(mp_info)` noktasına atlar.
+3. **Faz 3 — Anında Kalıcı Yığın Devri (`dry_ap_trampoline` & `_start`):** Hem BSP (`_start`) hem her AP (`dry_ap_trampoline`), herhangi bir Rust yığın çerçevesi oluşturmadan önce assembly içinde Limine'in geçici `BOOTLOADER_RECLAIMABLE` yığınından çıkarak `'static` çekirdek `.bss` içindeki 16-bayt hizalı `CPU_DESCS[cpu_idx].boot_stack` tavanına geçer; `ap_main_rust` girişinde `fence(Ordering::Acquire)` ile BSP'nin tüm ön-yazımlarının görünürlüğü garanti edilir.
+4. **Faz 4 — Per-CPU Donanım Bağlama Sırası ve Ayrıklık Denetimi:** x86-64'te `mov gs, ax` buyruğu gizli `IA32_GS_BASE` yazmacını sıfırladığı için her CPU **zorunlu olarak önce** `init_cpu_gdt_tss(cpu_idx)` (`lgdt`, uzak `retfq`, `ltr 0x28`), ardından `load_idt()` ve **sonrasında** `init_cpu_percpu_and_gs(...)` (`wrmsr(0xC000_0101)` + `0xC000_0102` + `gs:[0]`/`gs:[8]`/`gs:[24]` geri-okuma) çalıştırır. `register_cpu_identity_and_stacks` atomik bitmaske (`CLAIMED_CPU_MASK`, `AcqRel`) ve kilitli aralık tablosuyla (`STACK_REGISTRY`) yinelenen `cpu_idx`, yinelenen `lapic_id` ve kesişen `boot_stack`/`df_ist1` aralıklarını reddeder; her CPU canlı `int3` (`#BP`) tuzağını doğrulayıp `ONLINE_COUNT.fetch_add(1, Release)` ile hazır olduğunu bildirir.
+5. **Faz 5 — Sınırlı Zaman Aşımı ve Simetrik Rendezvous (`Kontrolör Çekirdek Yok`):** BSP, `ONLINE_COUNT == cpu_count` koşulunu hem TSC (`3.0e9` çevrim) hem iterasyon (`2.0e8` spin) tavanıyla bekler; başka bir CPU paniklemişse `PANIC_OWNER` kilidi sayesinde sahte zaman aşımı basmadan `hlt` durumuna geçer. Tüm CPU'lar hazır olduğunda `RENDEZVOUS_GATE.store(true, Release)` açılır ve **BSP dahil tüm CPU'lar simetrik olarak** `4.096` tur boyunca `gs:[8] == cpu_idx` doğrulaması + `PerCpuData::exec_ticks` + `GLOBAL_WORK_COUNTER` (`AcqRel`) artışı yürütür.
+
+### C.2. Per-CPU `TSS` Ömrü ve `#DF` (`IST1`) Sahiplik İncelemesi (`kernel/src/gdt_tss.rs`, `idt.rs`)
+
+- **`TSS` Ömrü ve Donanım `Busy` Biti (`0x89 -> 0x8B`):** `ltr 0x28` buyruğu bellekteki GDT TSS tanımlayıcısının erişim baytını `0x89` (*Available*) değerinden `0x8B` (*Busy*) değerine çevirir ve `&CPU_DESCS[cpu_idx].tss` adresini çekirdeğin gizli `TR.base` yazmacına önbellekler. Donanım her istisna/kesme geçişinde doğrudan bu adresi okuduğu için:
+  1. GDT ve TSS kesinlikle CPU başına özeldir (paylaşılan TSS ikinci çekirdeğin `ltr` çağrısında `#GP(0x28)` üretir ve `RSP0`/`IST1` yığınlarını birbirine karıştırır).
+  2. `CPU_DESCS[MAX_CPUS]` dizisi geri kazanılamaz `'static` çekirdek `.bss` (`SecDomain::Kernel`) içinde yaşar; yığın üzerinde veya `BOOTLOADER_RECLAIMABLE` bellekte tutulamaz. Her CPU `ltr` sonrasında ve iş yükü sonunda `access_byte == 0x8b` ve `str == 0x28` kontrolünü doğrular.
+- **`#DF` (`IST1`) Münhasır Sahipliği ve Tekrar-Girişsizlik (*Non-Reentrancy*):** IDT vektör `8` (`#DF`) `IST = 1` kullandığında donanım koşulsuz olarak `RSP = TSS.IST[0]` yükler. `IST1`'in `#PF`, `#GP`, `#BP` veya kesmelerle paylaşılması, iç içe bir hatada aktif `TrapFrame`'in ezilmesine yol açar. Bu nedenle `IST1` **yalnızca** ölümcül `#DF` (vektör `8`) kapısına atanmıştır (`vec != 8 => IST = 0`), taban kanaryası (`DF_CANARY_MAGIC ^ cpu_idx`) ve CPU-yerel `in_df_handler: AtomicBool` tekrar-giriş kilidiyle korunmuştur.
+
+### C.3. Ölçülen QEMU KVM UEFI Test Sonuçları (`11/11` Senaryo)
+
+| Senaryo | vCPU (`-smp`) | Cmdline / Enjekte Hata | Beklenen / Gerçek Çıkış | Doğrulanan Kanıt (`COM1` Seri Çıktısı) | Süre |
+| :--- | :---: | :--- | :---: | :--- | :---: |
+| `boot_1cpu_ok` | `1` | `console=com1` | `33` / **`33`** | `cpus_online=1 mask=0x1 total_bp_traps=1 symmetric_ops=4096 stacks_disjoint=true` | `1.240 s` |
+| `boot_2cpu_ok` | `2` | `console=com1` | `33` / **`33`** | `cpus_online=2 mask=0x3 total_bp_traps=2 symmetric_ops=8192 stacks_disjoint=true` | `1.349 s` |
+| `boot_4cpu_ok` | `4` | `console=com1` | `33` / **`33`** | `cpus_online=4 mask=0xf total_bp_traps=4 symmetric_ops=16384 stacks_disjoint=true` | `1.477 s` |
+| `boot_20cpu_ok` | `20` | `console=com1` | `33` / **`33`** | `cpus_online=20 mask=0xfffff total_bp_traps=20 symmetric_ops=81920 stacks_disjoint=true` | `1.837 s` |
+| `smp_ap_timeout` | `2` | `smp_fault=ap_timeout` | `35` / **`35`** | `[DRY-SMP-FAIL] AP timeout: online=1/2 online_mask=0x1 missing_mask=0x2` + `[DRY-PANIC] cpu=0` | `2.380 s` |
+| `smp_dup_cpu_id` | `2` | `smp_fault=dup_cpu_id` | `35` / **`35`** | `[DRY-SMP-FAIL] Duplicate CPU ID detected: cpu_idx=0 lapic_id=1` + `[DRY-PANIC] cpu=1` | `1.415 s` |
+| `smp_stack_overlap` | `2` | `smp_fault=stack_overlap` | `35` / **`35`** | `[DRY-SMP-FAIL] Stack/LAPIC conflict (stack_overlap) between cpu=1 and cpu=0` + `[DRY-PANIC] cpu=1` | `1.344 s` |
+| `smp_df_ist1_ap` | `2` | `smp_fault=df_ist1_ap` | `35` / **`35`** | `#PF->#DF` AP 1 üzerinde `fault_rsp=0x7fffdead0008 -> IST1 rsp=0xffffffff80016110 [0xffffffff80012320, 0xffffffff80016320]` | `1.312 s` |
+| `panic_handler_deterministic` | `1` | `panic_self_test=1` | `35` / **`35`** | `[DRY-PANIC] cpu=0 src/main.rs:139:9` | `1.299 s` |
+| `exception_ud2_caught` | `1` | `fault_self_test=ud2` | `35` / **`35`** | `[DRY-EXCEPTION] cpu=0 vec=6 (#UD Invalid-Opcode)` + `[DRY-PANIC] cpu=0` | `1.239 s` |
+| `exception_pf_caught` | `1` | `fault_self_test=pf` | `35` / **`35`** | `[DRY-EXCEPTION] cpu=0 vec=14 (#PF Page-Fault) ... cr2=0x7fffdeadbee0` | `1.291 s` |
+
+### C.4. Fiziksel Donanım Sınırı ve Geliştirme Sırasında Yakalanan Hatalar (Gizlenen Hata = `0`)
+
+- **20-vCPU Testinin Fiziksel Performans Sınırı (Zorunlu Kayıt):** Test konağı 4 fiziksel çekirdek / 8 donanım iş parçacıklı (*Tiger Lake*) bir işlemcidir. `-smp 20` koşusu KVM zaman-dilimlemeli *vCPU oversubscription* (`2.5x`) altında çalışır; **fonksiyonel SMP eşzamanlılığını, bellek bariyeri doğruluğunu ve 20 çekirdekli yığın/GDT/TSS/GS izolasyonunu kanıtlar**, ancak **fiziksel 20 çekirdekli donanım önbellek tutarlılığı gecikmesini veya doğrusal ölçeklenme performansını kanıtlamaz**.
+- **Derleme/Lint Sırasında Yakalanıp Düzeltilen 2 Hata (`0` QEMU Başarısızlığı):**
+  1. `kernel/src/main.rs:199`: `enter_fatal_or_halt()` içinde kullanılan `if let Err(owner) = ... && owner != token` ifadesi `edition = "2021"` altında derleyici tarafından reddedildi (`let chains are only allowed in Rust 2024 or later`) -> `matches!(..., Err(owner) if owner != token)` olarak düzeltildi.
+  2. `kernel/src/smp.rs:373`: `cpu_count >= 1 && cpu_count <= MAX_CPUS` ifadesi `cargo clippy -D warnings` altında `clippy::manual_range_contains` uyarısı verdi -> `(1..=MAX_CPUS).contains(&cpu_count)` olarak düzeltildi.
+  3. Bu iki statik düzeltme sonrasında `1`, `2`, `4`, `20` vCPU ve tüm negatif testler ilk QEMU koşularında `0` yeniden deneme ile geçti.

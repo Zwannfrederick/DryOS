@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (13:10 +03:00)
-- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` tek-CPU çekirdek önyükleme + `GDT/TSS/IDT` istisna işleme aşamaları (`Adım A..D`) eksiksiz tamamlandı ve makine tarafından doğrulandı.** İstenen ara kontrol noktası uyarınca **SMP (`2/4/20 vCPU`, `Adım E`) ve `H1` zamanlayıcı entegrasyonu (`Adım F`)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
+- **Son Güncelleme:** 11 Kasım 2026 (13:30 +03:00)
+- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` (`Adım A..E`: UEFI Boot + Per-CPU `GDT/TSS/IST1/GS_BASE` + `1/2/4/20 vCPU` Limine SMP + negatif arıza testleri) eksiksiz tamamlandı ve makine tarafından doğrulandı.** Belirlenen ara kontrol noktası uyarınca **`H1` zamanlayıcı entegrasyonu (`Adım F`)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
 
 ---
 
@@ -70,13 +70,16 @@
 
 ---
 
-## 3. Faz 1 `Milestone 1A` Durumu (`Adım A..D` Tamamlandı — `Adım E..F` Öncesi Ara Kontrol)
+## 3. Faz 1 `Milestone 1A` Durumu (`Adım A..E` Tamamlandı — `Adım F` Öncesi Ara Kontrol)
 
-### Tamamlanan `Milestone 1A` Adımları (`Adım A..D`) `[TAMAMLANDI — 11 Kasım 2026]`
+### Tamamlanan `Milestone 1A` Adımları (`Adım A..E`) `[TAMAMLANDI — 11 Kasım 2026]`
 - **Adım A — Repo-Yerel Araç Zinciri (`0` Konak Paketi Değişikliği):** `tools/bootstrap_phase1.py` ve `tools/phase1-toolchain-lock.json` ile sistem `rustc 1.99.1` (`58cf8f9c3`) için resmi `rust-src-1.99.1` + Limine `10.8.5` UEFI (`7a9013f305de`) ve `limine.h` (`6e85ddd6f928`) SHA-256 kilitli olarak `.toolchains/` altına kuruldu.
 - **Adım B & C — Minimal 1-CPU `dry-kernel` UEFI Boot & Otomatik QEMU Testi (`bc46907`):** `kernel/src/{main.rs,limine.rs,mem_verify.rs,security.rs,serial.rs,arch.rs}` ve `tools/qemu_boot_test.py` ile Limine HHDM + bellek haritası doğrulaması, `COM1` seri konsol, `ADR-007` `SecLabel`/`CapabilityMeta` öz-testleri ve deterministik panik işleyicisi (`exit=33` başarı / `exit=35` panik) makine tarafından doğrulandı.
-- **Adım D — Per-CPU `GDT`, `TSS` (`IST1`) ve 256 Girişli `IDT` İstisna İşleme:** `kernel/src/{gdt_tss.rs,idt.rs}` ile `SYSCALL`/`SYSRETQ` uyumlu 64-bit GDT, 16 KiB ayrı `#DF` (`IST1`) yığınlı TSS ve assembly `TrapFrame` tabanlı IDT kuruldu; canlı `int3` (`#BP`) kurtarma, `#UD` (`ud2`) ve `#PF` (`CR2=0x7fffdeadbee0`) testleri otomatik QEMU koşusunda doğrulandı (`python3 tools/qemu_boot_test.py`).
+- **Adım D — Per-CPU `GDT`, `TSS` (`IST1`) ve 256 Girişli `IDT` İstisna İşleme (`7ecf5b2`):** `kernel/src/{gdt_tss.rs,idt.rs}` ile `SYSCALL`/`SYSRETQ` uyumlu 64-bit GDT, 16 KiB ayrı `#DF` (`IST1`) yığınlı TSS ve assembly `TrapFrame` tabanlı IDT kuruldu; canlı `int3` (`#BP`) kurtarma, `#UD` (`ud2`) ve `#PF` (`CR2=0x7fffdeadbee0`) testleri otomatik QEMU koşusunda doğrulandı.
+- **Adım E — Limine MP Üzerinden `1/2/4/20 vCPU` SMP, Per-CPU `GS_BASE` ve Negatif Testler:**
+  - `kernel/src/{percpu.rs,smp.rs,gdt_tss.rs,idt.rs,main.rs}` ile hem BSP hem her AP geçici Limine yığınından kalıcı 16 KiB `.bss` yığınına geçirildi; CPU başına bağımsız GDT, TSS (`ltr 0x28` -> `Busy = 0x8b`), münhasır `#DF` `IST1` yığını, `IA32_GS_BASE` (`128` bayt önbellek-hizalı `PerCpuData`) ve `Release -> Acquire` AP başlatma protokolü kuruldu.
+  - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif testleri (`mask=0x1 / 0x3 / 0xf / 0xfffff`, CPU başına `#BP` tuzağı ve `4.096` simetrik iş yükü turu, `exit=33`) ile 4 negatif SMP/donanım arıza testi (`smp_ap_timeout`, `smp_dup_cpu_id`, `smp_stack_overlap`, AP 1 özel `IST1` üzerinde gerçek `#PF -> #DF` geçişini doğrulayan `smp_df_ist1_ap`, tamamı deterministik `exit=35`) `python3 tools/qemu_boot_test.py` (`11/11 PASS`) ile doğrulandı.
+  - **Önemli Sınır Notu:** 4C/8T konak işlemcide `-smp 20` KVM zaman-dilimlemesi (*oversubscription*) altında fonksiyonel eşzamanlılığı ve per-CPU izolasyonu doğrular; fiziksel 20 çekirdekli donanım performansını kanıtlamaz.
 
-### Sıradaki Adımlar (Kullanıcı Değerlendirmesi Sonrası `Adım E & F`)
-- **Adım E (`SMP`):** Limine MP isteğiyle önce `-smp 2`, ardından `-smp 4` ve bunlar geçtikten sonra `-smp 20` vCPU üzerinde simetrik AP uyanışı, per-CPU `GS` alanı ve CPU başına bağımsız GDT/TSS/IDT yüklemesi.
+### Sıradaki Adım (Kullanıcı Değerlendirmesi Sonrası `Adım F`)
 - **Adım F (`H1` Zamanlayıcı Entegrasyonu):** TLC ve Loom ile doğrulanan `AtomicU32(exec_state, park_token)` + `PerCpuRunQueue` protokolünün, assembly `switch_to`, stack sahipliği ve `thread_entry_trampoline` / `post_switch_*` kurallarıyla `dry-kernel` içine taşınması ve çok-çekirdekli QEMU stres testleri.

@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
@@ -133,8 +134,8 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
     subprocess.check_call(["mcopy", "-i", part_spec, str(kernel_elf), "::/boot/dry-kernel"], env=mtools_env)
 
 
-def run_qemu(img_path: pathlib.Path, smp: int, timeout_sec: int = 20) -> tuple[int, str]:
-    vars_copy = BUILD_DIR / "OVMF_VARS.4m.fd"
+def run_qemu(name: str, img_path: pathlib.Path, smp: int, timeout_sec: int = 25) -> tuple[int, str, float]:
+    vars_copy = BUILD_DIR / f"OVMF_VARS_{name}.4m.fd"
     shutil.copyfile(OVMF_VARS, vars_copy)
 
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -164,6 +165,7 @@ def run_qemu(img_path: pathlib.Path, smp: int, timeout_sec: int = 20) -> tuple[i
         "none",
         "-no-reboot",
     ]
+    t0 = time.monotonic()
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -173,7 +175,8 @@ def run_qemu(img_path: pathlib.Path, smp: int, timeout_sec: int = 20) -> tuple[i
         timeout=timeout_sec,
         check=False,
     )
-    return proc.returncode, proc.stdout
+    elapsed = time.monotonic() - t0
+    return proc.returncode, proc.stdout, elapsed
 
 
 def assert_boot_case(
@@ -187,9 +190,9 @@ def assert_boot_case(
 ) -> None:
     img_path = BUILD_DIR / f"esp_{name}.img"
     write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out = run_qemu(img_path, smp=smp)
+    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp)
 
-    print(f"\n--- [{name}] QEMU exit={rc} (expected {expected_rc}) ---")
+    print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {expected_rc}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
         if "[DRY-" in line or "Limine" in line or "PANIC" in line:
             print(f"  {line}")
@@ -205,36 +208,113 @@ def assert_boot_case(
         if token in serial_out:
             print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
             raise RuntimeError(f"[{name}] Forbidden serial marker found: {token!r}")
-    print(f"[PASS] {name}: exit={rc} and all {len(must_contain)} serial assertions verified.")
+    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions verified in {elapsed:.3f}s).")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--smp", type=int, default=1, help="vCPU count for normal boot check")
-    args = parser.parse_args()
-
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    kernel_elf = build_kernel()
-
+def assert_positive_smp_boot(name: str, kernel_elf: pathlib.Path, smp: int) -> None:
+    expected_mask = hex((1 << smp) - 1)
+    expected_ops = smp * 4096
     assert_boot_case(
-        name="boot_1cpu_ok",
+        name=name,
         kernel_elf=kernel_elf,
         cmdline="console=com1",
-        smp=args.smp,
+        smp=smp,
         expected_rc=EXIT_CODE_SUCCESS,
         must_contain=[
             "[DRY-BOOT] DRY Kernel v0.1.0",
             "Firmware: EFI64",
-            "[DRY-CPU] PASS: GDT(CS=0x08,TR=0x28)",
+            "[DRY-CPU] PASS: BSP(cpu=0,",
+            "GDT(CS=0x08,TR=0x28,Busy=0x8b)",
             "#BP(hits=1,",
             "[DRY-HHDM] PASS:",
             "[DRY-MEMMAP] PASS:",
             "[DRY-SEC] PASS:",
-            "[DRY-BOOT-OK]",
+            f"[DRY-SMP] PASS: cpus_online={smp} mask={expected_mask} total_bp_traps={smp} symmetric_ops={expected_ops} stacks_disjoint=true",
+            f"[DRY-BOOT-OK] Milestone 1A-E UEFI boot + {smp}-vCPU SMP verified cleanly.",
         ],
-        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]"],
+        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]", "[DRY-SMP-FAIL]", "[DRY-DF-IST1] FAIL"],
     )
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build-only", action="store_true", help="Run clippy + release build without QEMU")
+    parser.add_argument("--smp-only", type=int, default=0, help="Run only a single positive N-vCPU boot test")
+    args = parser.parse_args()
+
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    kernel_elf = build_kernel()
+    if args.build_only:
+        print(f"[QEMU-TEST] Build-only check succeeded: {kernel_elf}")
+        return
+
+    if args.smp_only > 0:
+        assert_positive_smp_boot(f"boot_{args.smp_only}cpu_ok", kernel_elf, args.smp_only)
+        return
+
+    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E): 1 -> 2 -> 4 -> 20 vCPUs.
+    assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1)
+    assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2)
+    assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4)
+    assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20)
+
+    # Negative SMP & hardware fault isolation tests (must fail deterministically with exit=35).
+    assert_boot_case(
+        name="smp_ap_timeout",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 smp_fault=ap_timeout",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SMP-FAIL] AP timeout: online=1/2 online_mask=0x1 missing_mask=0x2",
+            "[DRY-PANIC] cpu=0",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="smp_dup_cpu_id",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 smp_fault=dup_cpu_id",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SMP-FAIL] Duplicate CPU ID detected: cpu_idx=0",
+            "[DRY-PANIC] cpu=1",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]", "AP timeout"],
+    )
+
+    assert_boot_case(
+        name="smp_stack_overlap",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 smp_fault=stack_overlap",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SMP-FAIL] Stack/LAPIC conflict (stack_overlap) between cpu=1 and cpu=0",
+            "[DRY-PANIC] cpu=1",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]", "AP timeout"],
+    )
+
+    assert_boot_case(
+        name="smp_df_ist1_ap",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 smp_fault=df_ist1_ap",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SMP-INFO] Triggering intentional hardware #PF->#DF on AP 1 IST1...",
+            "[DRY-DF-IST1] PASS: hardware #DF caught on cpu=1",
+            "on private IST1 rsp=",
+            "fault_rsp=0x7fffdead0008",
+            "[DRY-PANIC] cpu=1",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]", "[DRY-DF-IST1] FAIL"],
+    )
+
+    # Milestone 1A-D 1-CPU exception & panic regression suite.
     assert_boot_case(
         name="panic_handler_deterministic",
         kernel_elf=kernel_elf,
@@ -243,7 +323,7 @@ def main() -> None:
         expected_rc=EXIT_CODE_PANIC,
         must_contain=[
             "[DRY-BOOT] DRY Kernel v0.1.0",
-            "[DRY-PANIC]",
+            "[DRY-PANIC] cpu=0",
             "intentional panic_self_test triggered via kernel cmdline",
         ],
         must_not_contain=["[DRY-BOOT-OK]"],
@@ -256,8 +336,8 @@ def main() -> None:
         smp=1,
         expected_rc=EXIT_CODE_PANIC,
         must_contain=[
-            "[DRY-EXCEPTION] vec=6 (#UD Invalid-Opcode)",
-            "[DRY-PANIC]",
+            "[DRY-EXCEPTION] cpu=0 vec=6 (#UD Invalid-Opcode)",
+            "[DRY-PANIC] cpu=0",
         ],
         must_not_contain=["[DRY-BOOT-OK]"],
     )
@@ -269,14 +349,14 @@ def main() -> None:
         smp=1,
         expected_rc=EXIT_CODE_PANIC,
         must_contain=[
-            "[DRY-EXCEPTION] vec=14 (#PF Page-Fault)",
+            "[DRY-EXCEPTION] cpu=0 vec=14 (#PF Page-Fault)",
             "cr2=0x7fffdeadbee0",
-            "[DRY-PANIC]",
+            "[DRY-PANIC] cpu=0",
         ],
         must_not_contain=["[DRY-BOOT-OK]"],
     )
 
-    print("\n[QEMU-TEST] ALL MILESTONE 1A BOOT CHECKS PASSED.")
+    print("\n[QEMU-TEST] ALL 11 MILESTONE 1A-E SMP & FAULT CHECKS PASSED.")
 
 
 if __name__ == "__main__":

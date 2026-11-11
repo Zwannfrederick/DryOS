@@ -3,7 +3,9 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_char;
+use core::mem::{offset_of, size_of};
 use core::ptr::read_volatile;
+use core::sync::atomic::AtomicU64;
 
 pub const LIMINE_COMMON_MAGIC_0: u64 = 0xc7b1_dd30_df4c_8b88;
 pub const LIMINE_COMMON_MAGIC_1: u64 = 0x0a82_e883_a194_f07b;
@@ -130,6 +132,38 @@ pub struct ExecutableAddressRequest {
     pub response: *const ExecutableAddressResponse,
 }
 
+#[repr(C)]
+pub struct LimineMpInfo {
+    pub processor_id: u32,
+    pub lapic_id: u32,
+    pub reserved: u64,
+    pub goto_address: AtomicU64,
+    pub extra_argument: u64,
+}
+
+const _: () = assert!(size_of::<LimineMpInfo>() == 32);
+const _: () = assert!(offset_of!(LimineMpInfo, goto_address) == 16);
+const _: () = assert!(offset_of!(LimineMpInfo, extra_argument) == 24);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineMpResponse {
+    pub revision: u64,
+    pub flags: u32,
+    pub bsp_lapic_id: u32,
+    pub cpu_count: u64,
+    pub cpus: *const *mut LimineMpInfo,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineMpRequest {
+    pub id: [u64; 4],
+    pub revision: u64,
+    pub response: *const LimineMpResponse,
+    pub flags: u64,
+}
+
 #[used]
 #[link_section = ".limine_requests_start"]
 pub static REQUESTS_START_MARKER: [u64; 4] = [
@@ -199,6 +233,15 @@ pub static EXEC_ADDR_REQ: BootSlot<ExecutableAddressRequest> = BootSlot(UnsafeCe
         response: core::ptr::null(),
     },
 ));
+
+#[used]
+#[link_section = ".limine_requests"]
+pub static MP_REQ: BootSlot<LimineMpRequest> = BootSlot(UnsafeCell::new(LimineMpRequest {
+    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1, 0x95a6_7b81_9a1b_857e, 0xa0b6_1b72_3b6a_73e0],
+    revision: 0,
+    response: core::ptr::null(),
+    flags: 0,
+}));
 
 #[used]
 #[link_section = ".limine_requests_end"]
