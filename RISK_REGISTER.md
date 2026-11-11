@@ -1,71 +1,70 @@
-# DRY OS — Teknik Risk Kaydı (Risk Register)
+# DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Tarih:** 10 Kasım 2026  
-> **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P3` Düşük).
+> **Son Güncelleme:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
+> **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
+> **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
 ---
 
 ## P0 — Varoluşsal / Mimariyi Kırabilecek Riskler
 
-### R-01: Zamanlayıcıda `switch_to` veya Zayıf Bellek Sıralaması Kaynaklı Çift-CPU Stack Ezilmesi / Kayıp Uyandırma
-- **Durum:** `[TEST EDİLMEDİ — Yarın Görev 1 & 2 hedefi]`
-- **Teknik Mekanizma:** (a) Yeni oluşturulan bir görevin başlangıç trampolininde `post_switch(prev)` çağrısının unutulması veya derleyicinin `prev.sched` güncellemesini `RSP` değişiminin önüne alması; (b) `EXEC_WAKING -> EXEC_READY` geçişinde `CAS` yerine düz `store` kullanılarak eşzamanlı `TOK_NOTIFIED` bitinin ezilmesi; (c) AArch64/C11 modelinde iki farklı atomik değişken (`T.sched` ve `Notification.word`) arasında açık `fence(SeqCst)` konulmaması.
-- **Erken Tespit:** Negatif/pozitif TLC durum taraması ve Rust `loom` permütasyon testleri.
-- **Azaltma:** `post_switch` kancasını tek bir merkezi assembly çıkış noktasına bağlamak; tüm durum geçişlerinde `park_token` koruyan `fetch_update`/`CAS` zorunluluğu.
+### R-01: Zamanlayıcıda `switch_to`, Zayıf Bellek Sıralaması veya `active_mask` Kaynaklı Stack Ezilmesi / Kayıp Uyandırma
+- **Durum:** `MITIGATED (QEMU/Formal)` — Sürekli regresyon koruması altında (`formal/h1/DrySched.tla`, `loom_sched`, `56/56` QEMU).
+- **Teknik Mekanizma:** (a) `RSP` geçişinden önce `prev` yığınının serbest bırakılması; (b) `prepare_park` ile `Notification::signal` arasında açık `fence(Ordering::SeqCst)` unutulması; (c) `PerCpuRunQueue::pop_masked` içinde `active_mask` biti temizlenirken eşzamanlı `push` yarışında kuyruğun yetim kalması.
+- **Uygulanan Savunma:** Merkezi assembly `dry_switch_to -> finish_post_switch` sınırı (`stack_owner` yalnızca yeni yığında bırakılır), zorunlu `SeqCst` çitleri ve `pop_masked` içinde Dekker yeniden kontrolü (`fetch_and` sonrası `!rings[p].is_empty()` ise `fetch_or`). **Bu bölgelere dokunan her değişiklik negatif yarış testi gerektirir.**
 
-### R-02: `TCB` Silinmesi veya Capability `Revoke` Sırasında Eşzamanlı `wakeup` (*Use-After-Free*)
-- **Durum:** `[HİPOTEZ]`
-- **Teknik Mekanizma:** `dry_notify_signal` içindeki bir CPU `Notification.bound_tcb` adresini okuduktan hemen sonra başka bir CPU'nun o `TCB` çerçevesini iptal edip (`Revoke`) sayfa tablosu veya kullanıcı verisine dönüştürmesi ve `LOCK CMPXCHG` buyruğunun yabancı belleği bozması.
-- **Azaltma:** `EXEC_EXITING` / `EXEC_DEAD` durumları, `iommu_pin_count` kilidi ve fiziksel çerçeve yeniden tiplemesi öncesinde zorunlu **Çekirdek Epoch Bekleme Süresi (*Quiescent Grace Period*)**.
+### R-02: Capability `Revoke` veya Süreç Çıkışı Sırasında Eşzamanlı `Lookup` / `Wakeup` (*Use-After-Free* & ABA)
+- **Durum:** `MITIGATED (QEMU/Formal)` — `Milestone 1B-C`, `1B-D` ve `1C` ile doğrulandı (`uaf_errors = 0`).
+- **Teknik Mekanizma:** Bir çekirdek nesnesi (`TCB`, `Endpoint`, `Frame4K`, `VSpace`) kullanılırken başka bir CPU'da `revoke` edilmesi veya `TCB` yuvasının erken geri dönüştürülüp ABA çarpışması yaratması.
+- **Uygulanan Savunma:** Çift-nesil ABA kalkanı (`slot_gen` + canlı nesne `generation`), `with_pinned_cap` içindeki `slot.in_flight_ops` (`SeqCst`) Dekker pini, `CSpace`-sahibi `TCB` yuvalarının yalnızca `cspace_destroy_object -> release_dead_tcb_slot` sonrasında havuza dönmesi ve çerçeve geri kazanımı öncesi senkron SMP TLB shootdown (`INV-CAP-05`, `INV-USR-08`).
 
-### R-03: Kalıcı IOVA `DmaArena` İçinde DMA Sahiplik İhlali (*Intra-Arena Corruption*) ve Çökme Sonrası Kaçak DMA
-- **Durum:** `[HİPOTEZ — Yarın Görev 4'te sınanacak]`
-- **Teknik Mekanizma:** Sıcak yolda IOTLB shootdown yapmamak için kalıcı haritalanan `DmaArena` içinde hatalı/kötücül PCIe cihazının `dma_unmap` sonrasında da tamponlara yazabilmesi; ayrıca sürücü süreci çöktüğünde cihazın aktif DMA motorunun belleği ezmeye devam etmesi.
-- **Azaltma:**
-  1. `IoRing` kontrol/descriptor halkalarını **asla** `DmaArena` içine koymamak (yalnızca CPU-paylaşımlı bellek).
-  2. TX (`IOMMU_READ`) ve RX (`IOMMU_WRITE`) arenalarını donanım IOMMU izinleriyle ayırmak; RX başlıklarını doğrulamadan önce kopyalamak (TOCTOU engeli).
-  3. Sürücü çökmesinde bellek sıfırlamadan önce zorunlu PCI `Bus Master Enable = 0` + **PCIe FLR** + IOMMU domain temizliği.
+### R-03: Kalıcı IOVA `DmaArena` İçinde DMA Sahiplik İhlali ve Çökme Sonrası Kaçak DMA
+- **Durum:** `OPEN / PLANNED` (`H2` QEMU `vfio-pci` PoC doğrulandı; Faz 2C/3 çekirdek entegrasyonu ve Faz 4/`P5` fiziksel silikon testi sırada).
+- **Azaltma:** `IoRing` kontrol halkalarının `DmaArena` dışında tutulması, TX (`IOMMU_READ`) ve RX (`IOMMU_WRITE`) ayrımı, RX başlıklarının doğrulamadan önce kopyalanması ve sürücü çöküşünde bellek iadesi öncesi zorunlu `Bus Master Enable = 0` + PCIe FLR + IOMMU temizliği.
 
 ### R-04: Alt-Sistem Geçişli Bağımlılık Patlaması (*Monolithic Shim Creep*)
-- **Durum:** `[DOĞRULANDI — İkili sembol analiziyle kanıtlandı]`
-- **Kanıt:** `igc` (`247` sembol) ve `e1000e` (`200` sembol, `%72` ortak) dar bir ağ adasına sığarken; `r8169` harici `libphy.ko` (`444` ihraç sembol) + `clk_*` çerçevesi istemekte, `iwlwifi` ise `iwlmvm` + `mac80211` + `cfg80211` katmanlarını çekmekte, `amdgpu` ise **1.107 dış sembol ve 30.5 MiB ELF** boyutuna ulaşmaktadır.
-- **Azaltma:** Ortak `LinuxKPI` katmanı yasaktır. `libdry_lx_net` için sert üst sınır `< 10.000 LOC` (hedef `<= 5.000 LOC`) olarak sabitlenmiştir; bu sınırı aşan sınıflar çevrilmez (`ADR-006`).
+- **Durum:** `BOUNDED BY DESIGN` (`ADR-006`).
+- **Kanıt & Azaltma:** `igc` (`247` sembol) ve `e1000e` (`200` sembol) dar bir ağ adasına (`3.028 SLOC` runtime) sığarken `amdgpu` (`1.107` sembol, `30.5 MiB` ELF) ve `nvidia-open` (`HMM`/`mmu_notifier`) sığmamaktadır. Ortak `LinuxKPI` yasaktır; `< 10.000 LOC` sınırını aşan sınıflar çevrilmez.
+
+### R-11: `16 KiB` Sabit Çekirdek Yığını Bütçesi ve Derleyici Satır-İçi (*Inlining*) Yığın Taşması (Yeni — 11 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU)` — Yeni kod eklenirken aktif dikkat gerektirir!
+- **Kanıt:** `Optimization Pass v1` sırasında `verify_cpu_stack_canaries_fast`, `bsp_kmain` (`5.448 B`) -> `verify_userspace_and_syscalls` içine gömülen `run_stage_g_benchmarks` (`8.192 B` tampon) + `on_process_terminating` (`1.816 B` `[WakeBatchItem; 64]`) zincirinin `16.384 B` yığın tavanını aştığını (`16.680 B`) yakaladı.
+- **Azaltma:** Soğuk/test/benchmark fonksiyonları `#[inline(never)]` ile izole edilerek `CPU 0` yığınında `+7.704 B` boşluk açıldı (`proc/bench.rs`, `proc/tests.rs`). **Kural:** Çekirdekte `>= 1 KiB` yığın dizisi ayırmak yasaktır veya mutlaka `#[inline(never)]` yaprak fonksiyon / per-CPU statik kazıma alanı kullanılmalıdır; Faz 2'de çekirdek yığınları koruma sayfalı (*guard-paged*) sanal aralıklara taşınacaktır.
 
 ---
 
-## P1 — Yüksek Şiddetli Mühendislik ve Hukuk Riskleri
+## P1 — Yüksek Şiddetli Mühendislik, Ürün ve Hukuk Riskleri
 
-### R-05: Emüle QEMU IOMMU ile Gerçek Silikon VT-d Farkından Doğan Yanlış Güven
-- **Durum:** `[DOĞRULANDI]`
-- **Teknik Mekanizma:** Konak makinede fiziksel `igc` kartı yoktur ve `/sys/kernel/iommu_groups` şu an `0`'dır (`linux-zen` cmdline'da `intel_iommu=on` eksik). QEMU `intel-iommu,caching-mode=on` fonksiyonel sınır hatalarını yakalar ancak gerçek donanım IOTLB invalidation gecikmesini (~2.000 döngü), PCIe *No-Snoop* önbellek tutarsızlığını ve fiziksel PHY zamanlamasını simüle etmez.
-- **Azaltma:** `EXPERIMENTS.md` içinde emüle test sonuçları yalnızca "fonksiyonel IOVA doğrulaması" olarak etiketlenecek; performans ve önbellek iddiaları gerçek VT-d açık donanım testine kadar `[TEST EDİLMEDİ]` kalacaktır.
+### R-05: QEMU/KVM Mikrobenchmarkları ve Emüle IOMMU ile Gerçek Fiziksel Donanım Farkı
+- **Durum:** `OPEN / PLANNED` (`ADR-008`, `P5`).
+- **Teknik Mekanizma:** QEMU/KVM içindeki `SYSCALL` (`231 cyc`), `IPC` (`1.952 cyc`) ve emüle `intel-iommu` testleri gerçek silikon önbellek/TLB/IOTLB gecikmelerini, fiziksel PCIe *No-Snoop* davranışını ve bütün-sistem G/Ç darboğazlarını temsil etmez; `4C/8T` konakta `-smp 20` koşusu `2.5x` konak CFS aşırı-aboneliğidir.
+- **Azaltma:** KVM mikro-ölçütleri hiçbir belgede "Linux'tan hızlı" veya "gerçek 20 çekirdek kanıtı" olarak sunulmaz; gerçek donanım iddiaları `P5` bare-metal A/B benchmark kapısına bağlanmıştır.
 
-### R-06: `PREEMPT_RT` Semantik Uyumsuzlukları (`primary_handler`, `local_lock_t`, `raw_spinlock_t`)
-- **Durum:** `[DOĞRULANDI]`
-- **Teknik Mekanizma:** `PREEMPT_RT`'de `spin_lock_irqsave` kesme maskelemez; `request_threaded_irq` birincil işleyicisi atomiktir ve `raw_spinlock_t` uyuyamaz. Sürücü CPU-yerel kesme kapatmaya güveniyorsa userspace'de veri yarışı oluşur.
-- **Azaltma:** `IRQF_ONESHOT` zorlaması, `local_lock_t`/`bh_lock` eşlemesi ve `raw_spinlock_t` / `IRQF_NO_THREAD` kullanan sürücülerin derleme zamanında otomatik reddi.
-
-### R-07: Gölge `vmemmap` Dışından Gelen Scatter-Gather / Kontrol Pointer'ları
-- **Durum:** `[HİPOTEZ]`
-- **Teknik Mekanizma:** `page_address()` ve `dma_map_single()` aritmetiğine `DmaArena` dışından (`kmalloc` veya yığın üzerinden) tahsis edilmiş bir adres gelirse geçersiz bellek erişimi oluşur.
-- **Azaltma:** Tüm `dry_lx_dma_map_*` girişlerinde açık adres aralığı denetimi (`[arena_base, arena_end)`); soğuk kontrol tamponları için arena içi küçük *bounce buffer* havuzu.
+### R-06 & R-07: Sürücü Adası `PREEMPT_RT` Semantiği ve `DmaArena` Dışı Scatter-Gather Pointer'ları
+- **Durum:** `OPEN / PLANNED` (Faz 3 `H2` entegrasyonunda zorunlu derleme ve çalışma zamanı kapıları).
+- **Azaltma:** `IRQF_ONESHOT` zorlaması, `raw_spinlock_t`/`IRQF_NO_THREAD` derleme reddi ve tüm `dry_lx_dma_map_*` girişlerinde açık `[arena_base, arena_end)` sınır doğrulaması.
 
 ### R-08: `GPL-2.0-only` Sürücü Adaları ile `Apache-2.0` / `GPL-3.0` Lisans Çatışması
-- **Durum:** `[DOĞRULANDI]`
-- **Teknik Mekanizma:** Saf `Apache-2.0` ve `GPL-3.0` kütüphaneleri `GPL-2.0-only` Linux sürücü koduyla aynı süreçte bağlanamaz (`ADR-005`).
-- **Azaltma:** Çekirdek/native kodda `MIT OR GPL-2.0-only` ikili lisansı; sürücü adalarında `cargo-deny` / SPDX otomatik derleme kapısı.
+- **Durum:** `BOUNDED BY DESIGN` (`ADR-005`).
+- **Azaltma:** Çekirdek ve native servisler `MIT OR GPL-2.0-only`; Linux sürücü adaları ayrı süreç sınırında `GPL-2.0-only`; saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları yasak.
+
+### R-12: `DRY Desktop` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Yeni)
+- **Durum:** `OPEN / PLANNED` (`ADR-009`, `P2`).
+- **Teknik Mekanizma:** `liquid-glass` üst çubuk, bulanıklık/gölge efektleri ve `Floating + Tiling + Stacking/Tabbed` pencere geçişlerinin yazılımsal GOP veya giriş seviyesi iGPU'larda kare hızı düşüşü (*frame drop*) yaratması ya da UI mantığının çekirdeğe sızdırılması.
+- **Azaltma:** Tüm görsel/WM mantığı Ring 3 compositor içinde tutulur (`0` çekirdek UI kodu); bulanıklık/animasyon maliyetini donanım yeteneğine göre otomatik kapatan *Low-End Fallback* katmanı ve `Floating` diyalogların `Tiling` ağacını bozmamasını garanti eden ayrık sahne grafı zorunludur (`docs/DRY_DESKTOP_SPEC.md`).
+
+### R-13: `drypkg` Runtime Şişmesi ve Linux/Windows Uyumluluğunda Aşırı Vaat Riski (Yeni)
+- **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).
+- **Teknik Mekanizma:** Yabancı uyumluluk çalışma zamanlarının varsayılan kurulumu şişirmesi (`DRY Server` saflığını bozması) veya kararsız paket formatı/gerçekçi olmayan "%100 Windows/Linux uyumu" beklentisi.
+- **Azaltma:** Kodlama öncesi zorunlu paket/ABI tasarım kapısı, isteğe bağlı (*on-demand*) salt-okunur (`READ_ONLY_EXPORT`) runtime kurulumu, kesin öncelik sırası (`Native DRY -> Linux ELF -> Seçilmiş Win32`) ve `DRY Store` üzerinde görünür uyumluluk/kısıtlama rozetleri.
 
 ---
 
-## P2 & P3 — Orta/Düşük Ortam ve Ölçekleme Riskleri
+## P2 — Ortam ve Araç Zinciri Riskleri
 
-### R-09: Geliştirme Makinesinin 8 Mantıksal CPU Sınırı (`CPU 0..7`)
-- **Durum:** `[DOĞRULANDI]`
-- **Etki:** Yerel donanım 4C/8T Tiger Lake işlemcidir; 20-CPU ölçekleme ve P/E hibrit ya da çoklu NUMA davranışları yerel bare-metal'de doğrudan ölçülemez (QEMU `-smp 20` yalnızca fonksiyonel doğruluk sağlar).
-- **Azaltma:** Yerel bare-metal ölçümleri 1, 2, 4, 8 thread için alınacak; 16 ve 20+ çekirdek performans kapısı (Faz 4) adanmış çok-çekirdekli test sunucusunda koşturulacaktır.
+### R-09: Yerel Geliştirme Makinesinin `4C/8T` (`8` Donanım İzleği) Sınırı
+- **Durum:** `OPEN / PLANNED` (`P5` çok-çekirdekli fiziksel sunucu testine kadar geçerli).
+- **Azaltma:** Yerel ortamda 1, 2, 4, 8 vCPU gerçek paralelliği temsil eder; `-smp 20` yalnızca eşzamanlılık doğruluğu ve yarış avı içindir.
 
-### R-10: Eksik Yerel Araç ve Kaynak Paketleri (`tla2tools.jar`, `rust-src`, `limine`, Linux `.c` kaynakları)
-- **Durum:** `[DOĞRULANDI — Çözüm komutları HANDOVER.md içinde tanımlandı]`
-- **Etki:** Çevrimdışı ortamda bu 4 bileşen olmadan sırasıyla Görev 1, Görev 5 ve Görev 3 bloklanır.
-- **Azaltma:** Yarınki oturum başında her görev öncesi bağımlılık indirme/paket kurulum adımları açıkça ayrılmıştır.
-
+### R-10: Çevrimdışı Araç Zinciri ve Önyükleyici Tekrarlanabilirliği
+- **Durum:** `MITIGATED` (`tools/bootstrap_phase1.py` + `tools/phase1-toolchain-lock.json` ile SHA-256 kilitli `.toolchains/` kurulumu tamamlandı).

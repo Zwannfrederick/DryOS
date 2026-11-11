@@ -1,12 +1,12 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 11 Kasım 2026  
-> **Aşama:** Faz 1 Tamamlandı (`Milestone 1A`, `Milestone 1B-A..1B-D` & `Milestone 1C` Tamamlandı; `56/56` QEMU/KVM Doğrulaması + İlk Ring 3 Grafik Ekranı Yeşil; `ADR-001` .. `ADR-007` Yürürlükte)  
+> **Durum Tarihi:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
+> **Aşama:** Faz 1 (`Milestone 1A`, `1B-A..1B-D`, `1C` [`1df3842`]) & `Low-Level Optimization Pass v1` (`69522a3`) Tamamlandı (`56/56` QEMU/KVM Doğrulaması + İlk Ring 3 Grafik Ekranı Yeşil; `ADR-001` .. `ADR-011` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
-> - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya yerel sistem denetimiyle kanıtlandı.  
-> - `[HİPOTEZ]` — Teknik olarak tutarlı ancak Faz 0 deneyleriyle yanlışlanmaya açık tasarım iddiası.  
+> - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya otomatik testlerle kanıtlandı.  
+> - `[HİPOTEZ]` — Teknik olarak tutarlı ancak deney/bare-metal ile yanlışlanmaya açık tasarım iddiası.  
 > - `[TAHMİN]` — Mühendislik ölçek/satır sayısı öngörüsü.  
-> - `[TEST EDİLMEDİ]` — Henüz yürütülebilir model, Loom veya donanım üzerinde sınanmadı.
+> - `[TEST EDİLMEDİ]` / `[PLANNED]` — Henüz yürütülebilir kod veya fiziksel donanım üzerinde uygulanmadı/sınanmadı.
 
 ---
 
@@ -99,15 +99,15 @@
   - Yalnızca statik `ET_EXEC` `x86-64` ELF64 ikilileri (`PT_INTERP` ve dinamik relokasyon reddedilir) sıkı `W^X` kuralıyla (`PF_W && PF_X -> Err(WxViolation)`) yüklenir; `p_memsz > p_filesz` `.bss` kuyruğu sıfırlanır ve kullanıcı yığını taban/tavan eşlenmemiş koruma sayfaları (*guard pages*) arasına yerleştirilir (`userspace/` crate: `user-hello.elf`, `user-peer.elf`).
   - Sıralı ve idempotent geri kazanım: `in_flight_syscalls == 0` (`SeqCst`) -> `TCB` `Dead && stack_owner == NO_CPU` (`release_dead_tcb_slot`) -> `VSpace.active_cpus == 0` -> `Frame4K` / `CapMapRecord` temizliği -> `destroy_cspace` -> `ProcessState::Reclaimed` (`leaked_frames = 0`).
 - **Uygulanan `DRY Native Syscall ABI v0.1` (`ABI_VERSION = 0x0001_0000`, `kernel/src/syscall/`):**
-  - Giriş: `RAX = num`, `RDI, RSI, RDX, R10, R8, R9 = arg0..arg5`; Dönüş: `RAX` (birincil veya negatif `SysError`), `RDX` (ikincil); `RBX, RBP, R12..R15` korunur, `RDI, RSI, R8, R9, R10` çekirdek sızıntısını önlemek için `0`'lanır. Kanonik hızlı yol `SYSRETQ` (`p50 = 320 cyc`), kanonik olmayan/özel dönüş çerçevesi `IRETQ` yedek yolunu (`p50 = 617 cyc`) kullanır.
-  - Başlangıç v0.1 çağrı tablosu: `0 = SYS_ABI_PING`, `1 = SYS_WRITE_DEBUG` (yalnızca seri konsol tanılama, <= 256 B), `2 = SYS_YIELD`, `3 = SYS_EXIT`, `4 = SYS_GET_TID`, `5 = SYS_CAP_QUERY` (`CSpace` + `SecLabel` + `lease_epoch` doğrulamalı), ve `Milestone 1C` ile eklenen `6..19` IPC, süreç yönetimi ve GOP çerçeve tamponu çağrıları. FPU/SIMD `XSAVE` izolasyonu sonraki aşamadadır.
+  - Giriş: `RAX = num`, `RDI, RSI, RDX, R10, R8, R9 = arg0..arg5`; Dönüş: `RAX` (birincil veya negatif `SysError`), `RDX` (ikincil); `RBX, RBP, R12..R15` korunur, `RDI, RSI, R8, R9, R10` çekirdek sızıntısını önlemek için `0`'lanır. Kanonik hızlı yol `SYSRETQ` (`Pass v1` sonrası `p50 = 231 cyc` @ `1-2 vCPU`, `1df3842` tabanı `326 cyc`), kanonik olmayan/özel dönüş çerçevesi `IRETQ` yedek yolunu (`Pass v1` `p50 = 522 cyc`, taban `619 cyc`) kullanır.
+  - Başlangıç v0.1 çağrı tablosu: `0 = SYS_ABI_PING`, `1 = SYS_WRITE_DEBUG` (yalnızca seri konsol tanılama, <= 512 B), `2 = SYS_YIELD`, `3 = SYS_EXIT`, `4 = SYS_GET_TID`, `5 = SYS_CAP_QUERY` (`CSpace` + `SecLabel` + `lease_epoch` doğrulamalı), ve `Milestone 1C` ile eklenen `6..19` IPC, süreç yönetimi ve GOP çerçeve tamponu çağrıları. FPU/SIMD `XSAVE` izolasyonu sonraki aşamadadır (`[PLANNED]`).
 
-### 2.4. `Milestone 1C` Yetenek Tabanlı IPC, Kök Servis Süpervizörü ve Ring 3 GOP Çerçeve Tamponu (`[DOĞRULANDI — 56/56 QEMU/KVM]`)
+### 2.4. `Milestone 1C` Yetenek Tabanlı IPC, Kök Servis Süpervizörü ve Ring 3 GOP Çerçeve Tamponu + `Optimization Pass v1` (`[DOĞRULANDI — 56/56 QEMU/KVM]`)
 
 - **Çift İlkelli İletişim (`kernel/src/ipc/`):**
-  - **Senkron `Endpoint` (`endpoint_state.rs`, `endpoint.rs`):** `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)` ve tek sistem çağrılı sunucu hızlı yolu `SYS_IPC_REPLY_RECV (11)`. `MsgTag` (`RAX/RSI`) + `R12..R15` (`mr0..mr3` = 32 B kopyasız yazmaç aktarımı), opsiyonel `<= 256 B` kullanıcı dilimi ve geleceğe uyumlu sıfır-kopya `SharedPayloadDesc` desteklenir.
+  - **Senkron `Endpoint` (`endpoint_state.rs`, `endpoint.rs`):** `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)` ve tek capability pini + tek spinlock altında birleştirilmiş sunucu hızlı yolu `SYS_IPC_REPLY_RECV (11)` (`Pass v1` sonrası `1 vCPU call_reply p50 = 1.952 cyc` [`0.63 µs`], `2..20 vCPU = 4.876..6.535 cyc`). `MsgTag` (`RAX/RSI`) + `R12..R15` (`mr0..mr3` = 32 B kopyasız yazmaç aktarımı), opsiyonel `<= 256 B` kullanıcı dilimi ve geleceğe uyumlu sıfır-kopya `SharedPayloadDesc` desteklenir.
   - **Tek-Kazananlı (`Single-Winner`) Uyandırma ve Tek-Atımlık `ReplyToken`:** Her bekleyen iş parçacığı uç nokta kilidi altında `Waiting* -> Delivered | Failed(err)` geçişini en fazla bir kez yapar (`0` kayıp mesaj, `0` çift uyandırma). `Endpoint::call` çağrısı `(ep_idx, caller_slot, caller_gen26, call_seq)` bağlı tek kullanımlık `ReplyToken` üretir; çift yanıt, token tekrarı veya istemci zaman aşımı/çıkışı `-EBADCAP`/`-EPIPE` döner. `irq_depth > 0 || preempt_count > 0` iken bloklanan IPC `-EIRQCTX (-95)` ile reddedilir.
-  - **Asenkron `Notification` (`notif.rs`):** `SYS_NOTIF_CREATE (12)`, bloklanmayan `SYS_NOTIF_SIGNAL (13)` (`fetch_or` + `fence(SeqCst)`) ve `SYS_NOTIF_WAIT (14)`.
+  - **Asenkron `Notification` (`notif.rs`):** `SYS_NOTIFY_CREATE (12)`, bloklanmayan `SYS_NOTIFY_SIGNAL (13)` (`fetch_or` + `fence(SeqCst)`) ve `SYS_NOTIFY_WAIT (14)`.
   - **Sınırlı 4-Sıçramalı Öncelik Bağışı (`sched/donate.rs`):** Senkron `call` sırasında `caller.effective_prio < server.prio` ise en fazla `MAX_DONATION_DEPTH = 4` sıçrama boyunca öncelik yükseltilir; döngüsel çağrı zinciri (`A -> ... -> A`) `-EDEADLK (-35)` ile yakalanır ve `reply`/zaman aşımı/`revoke`/çıkış anında taban önceliğe geri dönülür.
 - **Kök Kullanıcı Alanı Süpervizörü ve İzole Servis Yaşam Döngüsü (`userspace/src/bin/{dry_init,dry_echo}.rs`, `proc/supervisor.rs`):**
   - Çekirdek içinde gömülü servis yöneticisi yoktur. `dry-init.elf` (`SecDomain::RootSystem`), Limine modüllerine ait açık `CapObjectKind::BootModule` yetkileriyle başlatılır; `SYS_PROC_SPAWN (17)` ile ayrı `VSpace` + `CSpace` ve daraltılmış `SecDomain::Userspace` kompartmanında `dry-echo.elf` servisini başlatır, yalnızca türetilmiş `Endpoint` yetkisini devreder, `ping -> pong` RPC turunu doğrular, `ud2` (`#UD`) çöküşünü `SYS_PROC_WAIT (18)` ve `-EPIPE` ile algılayıp kaynakları geri kazanarak (`leaked_frames = 0`) servisi yeniden başlatır.
@@ -141,4 +141,25 @@
   - *Linux ELF Uygulamaları:* Userspace personality sunucusu + `FaultEndpoint`/`SYSCALL` yönlendirme trampolini (çekirdek ABI'sine POSIX eklenmez).
   - *Windows PE/NT (Faz 5):* Userspace `ntdll` -> `dry-ntos` sunucusu + Wine DLL + `DXVK` (çekirdek modu anti-cheat kapsam dışıdır).
   - *GPU:* Faz 2–3'te yalnızca UEFI `GOP` ve `VirtIO-GPU`; `amdgpu` (~1.107 dış sembol, ~30.5 MiB ELF `[DOĞRULANDI]`) ve `nvidia-open` (`nvidia-uvm` `HMM`/`mmu_notifier` bağımlılığı `[DOĞRULANDI]`) çeviri kapsamı dışındadır.
+
+---
+
+## 6. Ürün Katmanı, Kurulum Profilleri, Açılış Hattı ve Paketleme Mimarisi (`ADR-008` .. `ADR-011`, `[PLANNED]`)
+
+> **Kapsam Notu:** Aşağıdaki ürün ve kullanıcı alanı bileşenleri mimari olarak kesinleştirilmiş tasarım hedefleridir (`PLANNED`); `Milestone 1C` itibarıyla yalnızca kök süpervizör (`dry-init.elf`), örnek IPC servisi (`dry-echo.elf`) ve ilk statik GOP çerçeve tamponu çizicisi (`dry-display.elf`) uygulanmıştır (`[DOĞRULANDI]`). Ayrıntılı yol haritası `docs/PRODUCT_ROADMAP.md`, masaüstü/kabuk spesifikasyonu ise `docs/DRY_DESKTOP_SPEC.md` içindedir.
+
+- **Tek Çekirdek, İki Kurulum Profili (`ADR-008` — *One Microkernel, Multiple Experiences*):**
+  - Aynı `dry-kernel` ikilisi, aynı `Endpoint`/`Notification`/`IoRing` IPC katmanı, aynı `ADR-007` güvenlik alanları ve aynı `drypkg` altyapısı üzerinde iki ayrı profil kurulur:
+    1. **`DRY Desktop` (`[PLANNED]`):** Ring 3 `dry-compositor` + `DRY Shell`, ekran/girdi/ses servisleri, `DRY Store`, etkileşim gecikmesi ve güç verimliliği odaklı kaynak politikaları.
+    2. **`DRY Server` (`[PLANNED]`):** Varsayılan başsız (*headless*, sıfır masaüstü/compositor bağımlılığı), CLI ve uzaktan yönetim servisleri, yüksek verimli ağ/depolama yığını, CPU yakınlığı (*affinity*), NUMA yerelliği, kaynak izolasyonu ve AI inference / yüksek eşzamanlı sunucu iş yüklerine uygun politikalar.
+  - Kurulumdan sonra yeniden kurulum gerekmeden atomik `drypkg` nesilleriyle profil dönüşümü veya karşı profil bileşenlerinin eklenmesi desteklenir.
+- **Compositor, `DRY Shell` ve Ortak `Action API` Sınırı (`ADR-009`, `[PLANNED]`):**
+  - Pencere yönetimi (varsayılan `Floating`, tek tık `Tiling`, `Stacking`/`Tabbed`, `Tiling` düzenini bozmayan `Floating` diyaloglar), görsel efektler (`liquid-glass` üst çubuk, tema, `Normal`/`Compact UI`, düşük donanım *fallback*, hareket azaltma) ve fare/klavye/menü/komut paletini birleştiren **`Action API`** tamamen Ring 3 kullanıcı alanında çalışır; `dry-kernel` içine hiçbir pencere, yazıtipi veya efekt mantığı eklenmez.
+- **Tek Olay Akışlı Çift Açılış (`Clean` / `Diagnostic`) ve Kimlik Sınırı (`ADR-010`, `[PLANNED]`):**
+  - `dry-init` ve sistem servislerinin ürettiği yapılandırılmış önyükleme olay akışı iki Ring 3 görünüm kipini besler: varsayılan sade **`Clean Boot`** ve canlı tanılama/kurtarma panelli **`Diagnostic Boot`** (önyükleme sırasında `Esc` ile anlık geçiş; sahte yüzde göstergesi yasaktır).
+  - Oturum doğrulayan **`Login / Authentication Manager`** (`SecDomain::RootSystem` + `DRY Vault` kiralama) ile kullanıcının kişisel uygulama parolalarını saklayan **`Password Manager`** (`SecDomain::Userspace` şifreli kompartman) kesin olarak ayrı güvenlik bileşenleridir.
+- **`drypkg`, `DRY Store` ve İsteğe Bağlı Uyumluluk Katmanları (`ADR-011`, `[PLANNED]`):**
+  - Ortak `drypkg` arka ucu CLI ve `DRY Store` arayüzlerini besler; imzalı paketleri, `ADR-007` capability izin şablonlarını ve atomik güncelleme/*rollback* nesillerini yönetir.
+  - Uygulama desteği **(1) Native DRY -> (2) Linux ELF/ABI -> (3) Seçilmiş Windows PE/Win32** öncelik sırasıyla ilerler; yabancı çalışma zamanları yalnızca ihtiyaç duyulduğunda kurulur ve uyumluluk sınırları kullanıcıya şeffaf biçimde gösterilir.
+- **Performans İddiası Sınırı:** KVM içindeki sentetik mikro-ölçütler (`null_sys = 231 cyc`, `call_reply = 1.952 cyc`) yalnızca çekirdek sıcak yol disiplininin kanıtıdır; gerçek fiziksel donanımda (`bare-metal`) Linux ile uçtan uca A/B karşılaştırması tamamlanana dek (`P5`) "Linux'tan hızlı" iddiasında bulunulmaz (`[TEST EDİLMEDİ]`).
 

@@ -1,72 +1,63 @@
-# DRY OS — Geliştirme Yol Haritası ve Faz Geçiş Kapıları
+# DRY OS — Teknik Çekirdek ve Altyapı Yol Haritası (`ROADMAP.md`)
 
-> **Başlangıç:** 11 Kasım 2026  
-> **Temel İlke (`ADR-006`):** Her faz ölçülebilir bir mühendislik çıkış kapısına (*Exit Gate*) sahiptir. **DRY Kernel gelişimi (Faz 1–2), Linux sürücü çevirisinin (H2) tüm sürücü sınıflarında başarılı olmasına BAĞIMLI DEĞİLDİR.**
-
----
-
-## Faz 0: H1 ve H2 Doğrulama & Fizibilite Kapısı `[TAMAMLANDI — 11 Kasım 2026]`
-- **Hedef:** Çekirdek kodlamasına tam ölçekli girmeden önce en yüksek riskli iki mimari iddiayı yürütülebilir testlerle sınamak.
-- **Kapsam & Gerçekleşen Durum:**
-  1. `H1` `[GEÇTİ]`: `AtomicU32(exec_state, park_token)` zamanlayıcı protokolü TLC (`84.351` durum Safety, `54.095` durum Liveness), Rust `loom` (`39.135` permütasyon) ve 20-CPU stres testiyle (`>24M` geçiş) `0` hatayla doğrulandı.
-  2. `H2` `[GEÇTİ]`: Upstream Linux `v6.12` ve `v6.18` `igc` (`18.528` satır) `%0` değişiklik ve `3.468` satırlık `GPL-2.0-only` runtime (`v6.12->v6.18` farkı `38` satır) ile derlenip test edildi; ayrı `e1000e` QEMU `vfio-pci` + emüle `intel-iommu` DMA PoC doğrulandı (fiziksel silikon IOMMU güvenliği Faz 3/4 bare-metal kapısına bırakıldı).
+> **Son Güncelleme:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
+> **Durum Etiketleri:** `DONE` (tamamlandı & doğrulandı), `IN PROGRESS` (aktif geliştirme), `PLANNED` (tasarlandı/sırada), `BLOCKED` (dış/donanım engelli).  
+> **Ürün Eşlemesi:** Kullanıcı deneyimi, `DRY Desktop` / `DRY Server` kurulum profilleri ve `P0..P5` ürün aşamaları için ayrı belge: `docs/PRODUCT_ROADMAP.md` (bu belgedeki teknik milestone numaraları değiştirilmeden korunur).  
+> **Temel İlke (`ADR-006`):** **DRY Kernel gelişimi (Faz 1–2), Linux sürücü çevirisinin (`H2`) tüm sürücü sınıflarında başarılı olmasına BAĞIMLI DEĞİLDİR.**
 
 ---
 
-## Faz 1: DRY Kernel Çekirdek Omurgası (`x86-64`, `no_std` Rust) `[AKTİF]`
-- **Hedef:** Bağımsız, BKL içermeyen, donanım ve alan izolasyonlu (`ADR-007`) minimal mikroçekirdeğin QEMU ve gerçek x86-64 donanımda ayağa kalkması.
-- **Kapsam:**
-  - **Milestone 1A (Temel Önyükleme, CPU Durumu, SMP ve `H1` Entegrasyonu):**
-    - Repo-yerel tekrarlanabilir `no_std` Rust + Limine UEFI önyükleme araç zinciri (`ADR-001`), bellek haritası ve HHDM doğrulaması, `COM1` seri konsol ve deterministik panik işleyicisi (`1 CPU` otomatik QEMU testi).
-    - `GDT`, `TSS` (`IST` yığınlarıyla), `IDT` ve temel donanım istisna işleme (`#BP`, `#DF`, `#GP`, `#PF`).
-    - Kademeli SMP başlatma (`2 -> 4 -> 20 vCPU`) ve TLC/Loom'da doğrulanan `H1` zamanlayıcısının assembly `switch_to` + `post_switch_*` kurallarıyla çekirdeğe taşınması.
-  - **Milestone 1B (Bellek, Capability, Güvenlik İlkelleri ve IPC):**
-    - Fiziksel çerçeve envanteri ve `Untyped` bellek retyping (çekirdek içi `kmalloc` yok).
-    - 4-seviye MMU (`VSpace`), hedefli TLB shootdown (`active_cpus` maskesi) ve Intel VT-d / AMD-Vi IOMMU temel domain bağlayıcısı (`iommu_pin_count` korumalı).
-    - Sabit boyutlu korumalı `CSpace` (`ADR-003`) + **`ADR-007` sıfır-borç güvenlik ilkelleri**: çekirdek nesnelerinde `SecLabel` (`KERNEL` / `ROOT_SYSTEM` / `USERSPACE`, `READ_ONLY_EXPORT`, `compartment_id`), capability `lease_epoch` alanı, sahtelenemez gönderici etiketi (`INV-SEC-01..04, 06, 08`).
-    - Yazmaç-tabanlı `Endpoint` IPC, `TCB`-bağlı `Notification` ve `FaultEndpoint` (`ADR-002`).
-- **Çıkış Kapısı (Gate 1):**
-  - QEMU `-smp 20` ve yerel 8-thread bare-metal üzerinde tüm çekirdeklerin uyanması; iki izole Ring 3 sürecinin `Endpoint` IPC + paylaşımlı `IoRing` ile 10 milyon mesajı 0 çökme ve 0 bellek sızıntısıyla aktarması; `INV-SEC-01..04, 06, 08` güvenlik invariant'larının ve sınır-dışı IOMMU DMA engelinin donanım tuzağıyla doğrulanması.
+## Faz 0: `H1` ve `H2` Doğrulama & Fizibilite Kapısı — `DONE` (`11 Kasım 2026`)
+- **Kapsam & Kanıtlar:**
+  1. **`H1` (`DONE`):** `AtomicU32(exec_state, park_token)` zamanlayıcı protokolü TLC (`84.351` durum Safety, `54.095` durum Liveness), Rust `loom` (`39.135` permütasyon) ve 20-CPU stres testiyle (`>24M` geçiş) `0` hatayla doğrulandı.
+  2. **`H2` (`DONE` — QEMU/VFIO PoC):** Upstream Linux `v6.12` ve `v6.18` `igc` (`18.528` satır) `%0` değişiklik ve `3.468` satırlık `GPL-2.0-only` runtime (`v6.12 -> v6.18` farkı `38` satır) ile derlenip test edildi; `e1000e` QEMU `vfio-pci` + emüle `intel-iommu` DMA PoC doğrulandı (fiziksel silikon IOMMU güvenliği Faz 4/`P5` bare-metal kapısındadır: `PLANNED`).
 
 ---
 
-## Faz 2: DRY OS Temel Native Ekosistem, VFS Etiketleme ve `DRY Vault`
-- **Hedef:** Hiçbir yabancı sürücü çevirisine ihtiyaç duymadan kendi kendine yeten, `ADR-007` güvenlik alanlarıyla korunan mikroçekirdek işletim sistemi katmanı.
-- **Kapsam:**
-  - `ROOT_SYSTEM` servisleri: Root/Capability Manager, VSpace Pager, PCI/IOMMU Bus Manager (PCIe FLR destekli), **`DRY Vault`** (kimlik doğrulama + süreli/kapsamlı `lease_epoch` yetki üretimi) ve **`Policy Broker`** (deny-by-default karar motoru).
-  - Native Rust sürücüleri (`IoRing` + `DmaArena` üzerinde): `VirtIO-Blk`, `VirtIO-Net`, `NVMe` temel kuyruk sürücüsü, UEFI `GOP` / `VirtIO-GPU` 2D çerçeve tamponu, seri/PS2/USB-HID temel girdi.
-  - **`ADR-007` Etiketli VFS ve Developer Workspace:** Ebeveynden `SecLabel` mirası alan, `rename`/`symlink`/`hardlink`/`mount` ile yetki yükseltmeyi reddeden (`INV-SEC-05`) izole VFS sunucusu; kontrollü salt-okunur sistem kütüphaneleri (`READ_ONLY_EXPORT`); kapsamlı `DEV_WORKSPACE` (`compartment_id`); canlı servis/paket etkinleştirme ve A/B sonraki-boot çekirdek güncelleme yuvası.
-- **Çıkış Kapısı (Gate 2):**
-  - DRY OS'un QEMU ve bare-metal NVMe diskten önyüklenip TCP bağlantısı kurması; bir `USERSPACE` sürecinin `ROOT_SYSTEM` veya `KERNEL` nesnelerine yazma ve `symlink`/`hardlink` ile yetki yükseltme girişimlerinin `%100` reddedilmesi (`INV-SEC-01..08`); `DRY Vault` kiralama süresi dolduğunda (`INV-SEC-07`) yetkilerin anında düşmesi.
+## Faz 1: DRY Kernel Çekirdek Omurgası (`x86-64`, `no_std` Rust) — `DONE (QEMU/KVM 56/56)` / `PLANNED (Bare-Metal & Fiziksel IOMMU)`
+- **Tamamlanan Alt Aşamalar (`DONE`):**
+  - **`Milestone 1A` (`fad423b` — `DONE`):** Repo-yerel kilitli `rust-src` + Limine UEFI önyükleme (`bc46907`), per-CPU `GDT`/`TSS` (`IST1` `#DF` yığını) ve 256-girişli `IDT` (`7ecf5b2`), `1/2/4/20 vCPU` SMP (`0ae3a94`), işbirlikçi (`b6ad2e9`) ve `x2APIC`/`xAPIC` kalibrasyonlu preemptive `H1` zamanlayıcısı (`fad423b`, `21/21` QEMU testi).
+  - **`Milestone 1B-A` (`78ac64b` — `DONE`):** `BootstrapAllocator` mühürleme, `16 B` `FrameMeta` (`%0.39` ek yük), per-CPU şarjörlü `PMM` (`Order4KiB`/`Order2MiB`), kompartmanlar arası sıfırlama ve `Untyped` `split/retype/revoke` (`26/26` QEMU testi).
+  - **`Milestone 1B-B` (`6445641` — `DONE`):** 4-seviye `VSpace`, varsayılan `W^X`, `KERNEL_VSPACE` devri (`~53 MiB` önyükleyici çerçevesi geri kazanımı), `2 MiB` büyük sayfa ve `active_cpus` hedefli SMP TLB shootdown (`35/35` QEMU testi).
+  - **`Milestone 1B-C` (`b4ca6f8` — `DONE`):** Korumalı `CSpace` (`MAX_CSPACES = 32`, `256` yuva/`CNode`, `64 B/slot`), kilitsiz seqlock `cspace_lookup_fast`, intrüzif CDT $O(k)$ `revoke` + otomatik `VSpace` `unmap` ve `ADR-007` 3-alan/kiralama zorlaması (`46/46` QEMU testi).
+  - **`Milestone 1B-D` (`29002d3` — `DONE`):** Gerçek `CPL=3` statik ELF64 süreçleri (`user-hello.elf`, `user-peer.elf`), `Syscall ABI v0.1`, `CR4.SMAP` + `#PF` `extable` `uaccess`, `NMI/#DF` MSR-doğrulamalı `swapgs` ve sıralı/idempotent süreç geri kazanımı (`50/50` QEMU testi).
+  - **`Milestone 1C` (`1df3842` — `DONE`):** Senkron `Endpoint` (`send/recv/call/reply/reply_recv`) + asenkron `Notification`, 4-sıçramalı Öncelik Bağışı, `CPL=3` kök süpervizör (`dry-init.elf`), çökme/yeniden başlatma doğrulamalı `dry-echo.elf` ve yetenek-kapılı ilk Ring 3 UEFI GOP grafik çıktısı (`dry-display.elf`, `1280x800x32`, `56/56` QEMU testi + canlı QMP `screendump`).
+  - **`Low-Level Optimization Pass v1` (`69522a3` — `DONE`):** Koşullu APIC One-Shot yeniden kurma (`0` gönüllü VM-exit), `STR` VM-exit elemesi, `248 B` çerçeveli `rust_syscall_dispatch` (`null_sys = 231 cyc`), birleşik `ep_reply_recv` (`call_reply = 1.952 cyc`, `12.8x` kazanç), `tzcnt` `active_mask` runqueue ve `-16 KiB` yerleşik meta küçültme (`56/56` QEMU testi).
+- **Faz 2 / `P1..P5` Aşamalarına Devredilen Açık Çekirdek Maddeleri (`PLANNED`):**
+  - `CapObjectKind::IoRing` sıfır-kopyalı paylaşımlı bellek veri düzlemi, `FaultEndpoint` userspace pager yönlendirmesi ve donanım IRQ/IOAPIC -> `Notification` bağlaması (`dry_irq_ctrl`) -> **Faz 2A (`PLANNED`)**.
+  - Fiziksel bare-metal önyükleme ve gerçek Intel VT-d / AMD-Vi IOMMU silikon doğrulaması -> **Faz 4 / `P5` (`PLANNED`)**.
 
 ---
 
-## Faz 3: Uyumluluk Katmanı — Linux ELF Personality & Seçilmiş Sürücü Adaları
-- **Hedef:** Çekirdek saflığını bozmadan uygulama ve çevre birimi ekosistemini genişletmek.
-- **Kapsam:**
-  - İki seviyeli radiks `CSpace` ve epoch-tabanlı BKL'siz `Revoke` (`ADR-003`).
-  -Topoloji-farkındalıklı (`LLC -> Fiziksel Çekirdek -> SMT`) `EXEC_READY` *work stealing* ve tek görevli çekirdeklerde `NO_HZ_FULL` (`ADR-004`).
-  - **Linux ELF Personality:** `FaultEndpoint` / `SYSCALL` trampolini + `libdry_linux_abi` ile statik/musl (ve temel glibc) CLI/sunucu ikililerinin çalıştırılması.
-  - **Linux Driver Islands (`GPL-2.0-only`):** Gate 0'ı geçen sınıflar için (`igc`, `e1000e`, `igb`, USB `xHCI`) `dryc-drv` destekli izole sürücü adalarının DRY `PciCap` + `DmaArena` üzerine taşınması.
-- **Çıkış Kapısı (Gate 3):**
-  - Değiştirilmemiş Linux ELF test araçlarının çalışması; izole `igc`/`e1000e` sürücü adasının Strict IOMMU altında 0 sıcak-yol IOMMU syscall ile kararlı ağ trafiği taşıması ve FLR ile çökmelerden kurtulması.
+## Faz 2: DRY OS Temel Native Ekosistem, Etkileşimli Sistem, VFS Etiketleme ve `DRY Vault` — `PLANNED` (Sıradaki Faz)
+- **Hedef:** Yabancı sürücü çevirisine bağımlı olmadan etkileşimli (`P1`), grafik temel altyapılı (`P2` çekirdek servisleri) ve `ADR-007` alanlarıyla korunan kendi kendine yeten mikroçekirdek işletim sistemi katmanı.
+- **Kapsam (`PLANNED`):**
+  - **Milestone 2A (Etkileşim, IRQ, `IoRing` & `FaultEndpoint`):** IOAPIC/MSI-X -> `Notification` (`dry_irq_ctrl`), `PS/2` + `VirtIO-Input` klavye/fare girdi servisi, IPC üzerinden etkileşimli Ring 3 terminal/kabuk (`dry-term`/`dry-cli`), `CapObjectKind::IoRing` veri düzlemi, `FaultEndpoint` userspace pager ve FPU/SIMD `XSAVEOPT`/`XRSTOR` bağlam izolasyonu.
+  - **Milestone 2B (`DRY Vault`, `Policy Broker` & Etiketli `VFS`):** İzole `ROOT_SYSTEM` `dry-vault` (oturum kiralaması `lease_epoch`), `dry-policy`, `ADR-007` etiket miraslı `dry-vfs` (`rename`/`symlink`/`hardlink`/`mount` yetki yükseltmeme garantisi: `INV-SEC-05`), `READ_ONLY_EXPORT` kütüphane paylaşımı ve `DEV_WORKSPACE`.
+  - **Milestone 2C (Native Sürücüler, Görsel Servis & `Low-Level Optimization Pass v2`):** `DmaArena` (`iommu_pin_count`) üzerinde native Rust `VirtIO-Blk`, `VirtIO-Net`, temel `NVMe`, `VirtIO-GPU` 2D/çift-tamponlu ekran sunucusu; ayrıca `Optimization Pass v2` (`CR4.PCIDE`/`INVPCID`, doğrudan IPC thread switch, `IA32_TSC_DEADLINE`).
+- **Çıkış Kapısı (Gate 2):** Etkileşimli klavye -> Ring 3 kabuk -> canlı ekran döngüsü; NVMe/`VirtIO-Blk` diskten önyükleme ve ağ bağlantısı; `INV-SEC-01..08` VFS/kiralama negatif testlerinin `%100` geçmesi.
 
 ---
 
-## Faz 4: Kararlılık, Güvenlik Sertleştirme ve Çok-Çekirdek Performans Doğrulaması
-- **Hedef:** Üretim kalitesinde hata toleransı, güvenlik denetimi ve 20+ mantıksal CPU bare-metal doğrulaması.
-- **Kapsam:**
-  - Syscall ABI, IPC, `CSpace` `Revoke` ve `IoRing` sınırları için sürekli *fuzzing* ve hata enjeksiyonu (*fault injection*).
-  - Gerçek 20+ mantıksal CPU'lu (SMT ve P/E hibrit) fiziksel test donanımında 1, 2, 4, 8, 16, 20 CPU ölçekleme, gecikme (`p99.9`) ve IOMMU throughput ölçümleri.
+## Faz 3: Uyumluluk Katmanı (`Linux ELF` Öncelikli), Paket Altyapısı ve Sürücü Adaları — `PLANNED`
+- **Kapsam (`PLANNED`):**
+  - İki seviyeli radiks `CSpace` ve epoch-tabanlı `Revoke` (`ADR-003`); topoloji-farkındalıklı (`LLC/SMT/NUMA`) *work stealing* ve `NO_HZ_FULL` (`ADR-004`).
+  - **Linux ELF Personality (`ADR-011` Öncelik #1):** `FaultEndpoint` / `SYSCALL` yönlendirme trampolini + userspace Linux ABI/POSIX sunucusu ile `musl`/temel `glibc` uygulamalarının çalıştırılması.
+  - **Linux Driver Islands (`GPL-2.0-only`):** Faz 0 `H2`'de kanıtlanan `igc`, `e1000e`, `igb` ve USB `xHCI` sürücü adalarının DRY `PciCap` + `DmaArena` + `IoRing` üzerine taşınması.
+  - **`drypkg` Çekirdek Spesifikasyonu ve İlk Paket Motoru (`ADR-011`):** İmzalı paket formatı, isteğe bağlı runtime çözümleme, capability sandbox profilleri ve atomik nesil/*rollback* altyapısı.
+- **Çıkış Kapısı (Gate 3):** Değiştirilmemiş Linux ELF ikililerinin çalışması; izole `igc`/`e1000e` sürücü adasının 0 sıcak-yol IOMMU syscall ile ağ trafiği taşıması ve FLR ile çökmelerden kurtulması.
+
+---
+
+## Faz 4: Kararlılık, Bare-Metal Doğrulama, Kurulum Profilleri ve Performans Sertleştirme — `PLANNED`
+- **Kapsam (`PLANNED`):**
+  - `DRY Desktop` ve `DRY Server` kurulum profillerinin (`ADR-008`), `DRY Store` arayüzünün ve çift yönlü profil geçişlerinin tamamlanması (`P4`).
+  - Sürekli *fuzzing*, *fault injection* ve `>= 72` saatlik *soak* testleri; gerçek fiziksel donanımda (USB live boot + fiziksel VT-d/AMD-Vi IOMMU + 20+ mantıksal CPU sunucu) ölçekleme ve Linux ile adil, tekrarlanabilir A/B benchmark raporları (`P5`).
   - **AArch64 Çekirdek Portu:** GICv3, SMMUv3 ve zayıf bellek modeli + DMA önbellek tutarlılığı doğrulaması.
-- **Çıkış Kapısı (Gate 4 — Developer Preview Adayı):**
-  - 72 saatlik kesintisiz bare-metal stres testinde 0 çekirdek paniği; 20 CPU bağımsız hesaplama yükünde `>= %98.5` faydalı kullanıcı zamanı.
 
 ---
 
-## Faz 5: İleri Uyumluluk ve Platform Genişletme (Uzun Vadeli)
-- **Kapsam:**
-  - RISC-V (`RV64GC` + `RVWMO` + `AIA`/`IOPMP`) çekirdek portu.
-  - `VirtIO-GPU` Venus/Rutabaga Vulkan hızlandırması ve seçilmiş donanımlarda dar kapsamlı KMS/DMA-BUF ekran sunucusu.
-  - Araştırma/deneysel userspace Windows NT/Win32 alt-sistemi (`dry-ntos` + Wine DLL + `DXVK`).
-
+## Faz 5: İleri Uyumluluk (`Win32`) ve Platform Genişletme (Uzun Vadeli) — `PLANNED`
+- **Kapsam (`PLANNED`):**
+  - Seçilmiş kullanıcı alanı **Windows PE / Win32** uygulamaları için `dry-ntos` + Wine DLL + `DXVK` uyumluluk katmanı (`ADR-011` Öncelik #2; çekirdek modu anti-cheat kapsam dışı).
+  - `VirtIO-GPU` Venus/Rutabaga Vulkan hızlandırması, seçilmiş KMS/DMA-BUF ekran sürücüleri ve RISC-V (`RV64GC` + `RVWMO`) çekirdek portu.

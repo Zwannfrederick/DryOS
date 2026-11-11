@@ -1,7 +1,7 @@
 # DRY OS — Mimari Karar Kayıtları (Architecture Decision Records)
 
 > **Tarih:** 10–11 Kasım 2026  
-> **Durum:** Aktif Mimari Kararlar (`ADR-001` .. `ADR-007`)
+> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-011`)
 
 ---
 
@@ -139,4 +139,75 @@
   - `SecFlags::READ_ONLY_EXPORT` için 3-katmanlı savunma (`CSpace` türetme/aktarım + `VSpace::protect_4k` yazma yükseltme engeli + `PMM` `map_ref_inc_data_frame` donanım sınırı: yalnızca `!writable && expected_owner.domain != Kernel` kabul edilir).
 - **Henüz Uygulanmayan Gelecek Faz Sınırları (Dürüst Kapsam Beyanı):**
   - VFS dosya/dizin ad alanı kuralları (`INV-SEC-05`: `rename`, `symlink`, `hardlink`, `mount`, dosya tabanlı `mmap`), FPU/SIMD `XSAVE`/`XRSTOR` bağlam izolasyonu ve izole Ring 3 userspace `DRY Vault` / `Policy Broker` / `VFS` servis süreçleri Faz 2 kapsamındadır.
+
+---
+
+## ADR-008: Ürün Felsefesi ve Çift Kurulum Profili — Tek Çekirdek Üzerinde `DRY Desktop` ve `DRY Server`
+
+- **Durum:** Kabul Edildi — Ürün ve Mimari Çerçeve (`PLANNED` Kurulum Profilleri, 11 Kasım 2026)
+- **Bağlam:** Masaüstü ve sunucu için ayrı çekirdek çatalları (*forks*) veya ayrı paket/güvenlik modelleri geliştirmek hem doğrulama maliyetini ikiye katlar hem de mimari tutarlılığı bozar. Tersine, sunucu sürümünü yalnızca grafik arayüzü gizlenmiş bir masaüstü imajı olarak dağıtmak gereksiz arka plan servisleri, bellek tüketimi ve saldırı yüzeyi üretir.
+- **Karar:**
+  1. **Temel Mühendislik ve Ürün İlkeleri:**
+     - *One kernel, multiple experiences:* Tek repository ve mümkün olan her hedef donanımda **tek `dry-kernel` ikilisi** kullanılır.
+     - *Minimum overhead, maximum useful work* & *Zero unnecessary work:* Aynı işlevsellik, güvenlik ve doğruluk korunurken gereksiz CPU buyruğu, bellek kopyası, bağlam değişimi ve kilit çekişmesi ortadan kaldırılır.
+     - *Rust by default, assembly by evidence:* Varsayılan dil güvenli/yalın `no_std` Rust'tır; satır-içi veya harici assembly yalnızca donanım sınırı (`SYSCALL`, `IDT`, `switch_to`, `SMAP`) veya `objdump`/döngü ölçümüyle kanıtlanmış sıcak yollarda kullanılır (`69522a3`).
+     - *Security and isolation by architecture:* İzolasyon sonradan eklenen bir yama değil, `CSpace` + `ADR-007` `SecLabel` + Ring 3 servis sınırlarının doğal sonucudur.
+     - *Functional minimalism, not feature deprivation:* Minimalizm, kullanıcının ihtiyaç duyduğu özellikleri silmek değil; aynı işlevi daha az kaynak, daha küçük güvenilir bilgi işlem tabanı (*TCB*) ve daha az karmaşıklıkla sunmaktır.
+     - *Ölçeklenebilirlik ve Epistemik Dürüstlük:* Düşük sınıf dizüstü/istemci donanımından yüksek çekirdekli NUMA sunuculara kadar ölçeklenebilirlik hedeflenir. **QEMU/KVM mikrobenchmark sonuçları (`null_sys = 231 cyc`, `call_reply = 1.952 cyc`) mikroçekirdeğin Linux'tan hızlı olduğunu kanıtlamaz;** sentetik KVM ölçümleri gerçek fiziksel donanım ve bütün-sistem (*end-to-end*) iş yükü performansından her zaman ayrı raporlanır.
+  2. **İki Birinci Sınıf Kurulum Profili (`PLANNED — P4`):**
+     - **`DRY Desktop`:** `DRY Shell` ve tekil Ring 3 compositor, ekran/girdi/ses servisleri, `DRY Store`, grafik sistem uygulamaları; etkileşim gecikmesi (*frame pacing*, girdi tepkiselliği) ve enerji verimliliği öncelikli kaynak/zamanlayıcı politikaları.
+     - **`DRY Server`:** Varsayılan olarak tamamen başsız (*headless*), sıfır masaüstü/compositor paket bağımlılığıyla temiz kurulum; CLI ve uzaktan yönetim araçları; yüksek verimli ağ/depolama/servis yığını; CPU yakınlığı (*affinity*), NUMA yerelliği, kaynak izolasyonu, yüksek eşzamanlı sunucu iş yükleri ve AI inference servislerine uygun bellek/G/Ç politikaları. **Server profili yalnızca arayüzü kapatılmış bir Desktop kurulumu değildir.**
+  3. **Ortak Altyapı ve Çift Yönlü Geçiş:** Her iki profil aynı `drypkg` paket yöneticisini, aynı `Endpoint`/`Notification`/`IoRing` IPC mimarisini ve aynı `ADR-007` güvenlik modelini kullanır. Kurulum sonrasında sistemi yeniden biçimlendirmeden profil değiştirmek veya diğer profilin bileşenlerini eklemek/kaldırmak atomik paket nesilleriyle desteklenecektir.
+
+---
+
+## ADR-009: `DRY Desktop` / `DRY Shell` Pencere Yönetimi, Görsel Mimari ve Ortak `Action API`
+
+- **Durum:** Kabul Edildi — Tasarım Spesifikasyonu (`PLANNED — P2`, 11 Kasım 2026; detaylar: `docs/DRY_DESKTOP_SPEC.md`)
+- **Bağlam:** Mevcut masaüstü ortamları genellikle klavye-odaklı hız (tiling WM'ler) ile keşfedilebilirlik/rahatlık (geleneksel masaüstleri) arasında kullanıcıyı ikili bir seçime zorlar; görsel efektler ise ya düşük donanımı ezer ya da çekirdek/sürücü katmanına sızar.
+- **Karar:**
+  1. **Özgün Birleşik Tasarım Dili:** `DRY Shell`; Hyprland'in dinamik döşeme (*tiling*), çalışma alanı ve klavye hakimiyetini; KDE Plasma'nın zengin özelleştirme ve pencere kurallarını; macOS/GNOME çizgisinin tutarlı menü, global arama ve sadeliğini doğrudan kopyalamadan DRY OS'ye özgü tek bir tasarım dilinde birleştirir.
+  2. **Tek Compositor Üzerinde Hibrit Pencere Yöneticisi:**
+     - Varsayılan kip **Floating**'dir; ayarlardan veya kısayolla tek tıkla dinamik **Tiling** kipine geçilir; **Stacking** ve **Tabbed** pencere grupları yerleşik desteklenir.
+     - Diyalog, açılır menü (*popup*), geçici (*transient*) ve küçük yardımcı pencereler varsayılan olarak `Floating` açılır ve arkadaki `Tiling` ağacını yeniden boyutlandırıp bozmaz.
+     - `Floating <-> Tiling` geçişlerinde pencere geometrisi ve çalışma alanı yerleşimi korunur; çoklu çalışma alanı (*workspace*), kenar tutturma (*snap*) ve bildirimsel pencere kuralları tek Ring 3 compositor içinde çalışır.
+  3. **Donanım-Uyarlamalı Görsel Tasarım ve Ring 3 Sınırı:**
+     - Üstte `liquid-glass` esinli erişilebilirlik ve sistem çubuğu (global arama, aktif uygulama menüleri, sistem kontrolleri), koyu/açık tema, **Normal** ve **Compact UI** yoğunluk kipleri sunulur.
+     - Tüm görsel efektler (ölçülü bulanıklık, gölge, akıcı animasyonlar) **kesin olarak Ring 3 compositor/userspace sorumluluğudur; `dry-kernel` içinde UI/efekt mantığı yer almaz.** Düşük donanımda veya yazılımsal GOP kipinde pahalı efektleri otomatik kapatan *fallback* profili ve kullanıcı erişilebilirliği için hareket azaltma / animasyon kapatma seçenekleri zorunludur.
+  4. **Fare + Klavye Eşliği ve Ortak `Action API`:** Fare etkileşimleri, klavye kısayolları, bağlam menüleri (*context menus*), üst menü çubuğu ve komut paleti (*command palette*) aynı tipli **`Action API`** üzerinden uygulama ve kabuk komutlarını çağırır. Yeni kullanıcı her işlemi menülerden keşfedebilirken ileri seviye kullanıcı aynı eylemi klavye kısayolu veya komut paletiyle anında tetikler.
+
+---
+
+## ADR-010: Çift Açılış Deneyimi (`Clean Boot` / `Diagnostic Boot`) ve Kimlik Doğrulama Sınır Ayrımı
+
+- **Durum:** Kabul Edildi — Tasarım Spesifikasyonu (`PLANNED — P2`, 11 Kasım 2026)
+- **Bağlam:** Son kullanıcılar sessiz, temiz bir açılış beklerken sistem mühendisleri ve arıza giderme senaryoları gerçek zamanlı çekirdek/servis/güvenlik tanılama kayıtlarına ihtiyaç duyar. Ayrıca oturum açma bileşeni ile kullanıcının uygulama parolalarını tutan kasayı aynı süreçte birleştirmek güvenilir bilgi işlem tabanını (*TCB*) gereksiz büyütür.
+- **Karar:**
+  1. **Tek Olay Akışı, İki Userspace Görünümü:**
+     - **`Clean Boot` (Varsayılan):** Koyu ve sade arka plan, merkezde DRY logosu ve ince gerçek ilerleme/etkinlik göstergesi; teknik metin kalabalığı olmadan hazır olunduğunda doğrudan `DRY Login` ekranına geçiş.
+     - **`Diagnostic Boot`:** Arch Linux benzeri okunabilir canlı açılış günlüğü paneli; çekirdek, `ROOT_SYSTEM` servisleri, sürücüler ve `ADR-007` güvenlik doğrulama durumları; kritik arızalarda yapılandırılmış hata ve kurtarma görünümü.
+     - Bu iki deneyim ayrı önyükleme mekanizmaları **değildir**; aynı yapılandırılmış önyükleme olay akışını tüketen iki görünüm kipidir ve önyükleme sırasında tek tuşla (ör. `Esc`) canlı olarak değiştirilebilir.
+     - **Dürüst İlerleme Kuralı:** Sahte veya zamanlayıcıyla uydurulmuş yükleme yüzdeleri kesinlikle gösterilmez; yalnızca gerçek servis/birim hazırlık geçişleri yansıtılır.
+  2. **Kimlik Doğrulama ile Parola Kasası Ayrımı:**
+     - **Login / Authentication Manager (`SecDomain::RootSystem`):** Kullanıcı oturumunu doğrular ve `DRY Vault` üzerinden oturum/çalışma alanı `lease_epoch` yetkilerini başlatır.
+     - **User Password Manager / Secret Store (`SecDomain::Userspace` izole kompartman):** Kullanıcının web/uygulama parolalarını ve kişisel sırlarını tutan ayrı şifreli kasadır; önyükleme veya oturum açma yöneticisinin TCB'si içine dahil edilmez.
+
+---
+
+## ADR-011: Paket Yöneticisi (`drypkg`), `DRY Store` ve Kademeli Uyumluluk Mimarisi
+
+- **Durum:** Kabul Edildi — Mimari Çerçeve (`PLANNED — P3/P4`, 11 Kasım 2026)
+- **Bağlam:** Mikroçekirdek tabanlı bir işletim sisteminin günlük kullanımda benimsenebilmesi için paket kurulumu, çalışma zamanı (*runtime*) yönetimi ve yabancı ikili uyumluluğu kullanıcıya karmaşık manuel adımlar yüklememeli; ancak bunu yaparken kullanılmayan dev uyumluluk katmanlarını sisteme zorla kurmamalı ve gerçekçi olmayan uyumluluk vaatlerinde bulunmamalıdır.
+- **Karar:**
+  1. **Ortak Motor (`drypkg` + `DRY Store`):** Hem CLI (`drypkg`) hem grafik mağaza (`DRY Store`) aynı arka uç motorunu kullanır. Temel akış **"Uygulamayı bul -> Kur -> Çalıştır"** sadeliğindedir; gereken çalışma zamanı ve uyumluluk katmanı otomatik çözümlenir.
+  2. **Üç Uygulama Sınıfı ve Kesin Öncelik Sırası:**
+     - **1. Native DRY Uygulamaları:** Doğrudan DRY SDK, `Syscall ABI` ve `ADR-007` capability sözleşmesiyle çalışan birincil hedef.
+     - **2. Linux ELF / Linux ABI Uygulamaları (`P3` Birincil Uyumluluk Önceliği):** İzole userspace Linux personality sunucusu, `FaultEndpoint`/`SYSCALL` yönlendirmesi ve VFS/POSIX köprüsü üzerinde çalışır.
+     - **3. Seçilmiş Windows PE / Win32 Uygulamaları (`P3+` İkincil / Uzun Vadeli Hedef):** Linux uyumluluğu olgunlaştıktan sonra seçilmiş kullanıcı alanı Win32/PE iş yükleri için devreye alınır.
+  3. **Güvenlik, İsteğe Bağlı Runtime ve Şeffaflık Kuralları:**
+     - İmzalı paket doğrulaması, `ADR-007` capability/sandbox izin bildirimi, atomik nesil güncellemesi ve tek-adım *rollback* zorunludur.
+     - İhtiyaç duyulmayan hiçbir yabancı runtime (Linux ABI veya Win32 katmanı) önceden yüklenmez; yalnızca ilgili türde ilk paket kurulduğunda isteğe bağlı (*on-demand*) indirilir ve salt-okunur (`READ_ONLY_EXPORT`) paylaşılır.
+     - **Dürüst Uyumluluk Sınırı:** Linux veya Windows uygulamalarının tamamının çalışacağı **asla vaat edilmez** (ör. çekirdek modu anti-cheat veya belgesiz çekirdek sürücüsü isteyen yazılımlar kapsam dışıdır). Her paketin uyumluluk sınıfı, beklenen başarım düzeyi ve bilinen kısıtlamaları `drypkg` ve `DRY Store` arayüzünde açıkça görünür tutulur.
+  4. **Uygulama Öncesi Tasarım Kapısı:** Paket arşiv formatı, imza güven zinciri, servis bağımlılık şeması ve uyumluluk ABI sözleşmeleri kodlamaya geçilmeden önce ayrı bir teknik spesifikasyon olarak yazılıp denetlenecektir.
+
 
