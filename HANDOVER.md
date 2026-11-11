@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (13:30 +03:00)
-- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` (`Adım A..E`: UEFI Boot + Per-CPU `GDT/TSS/IST1/GS_BASE` + `1/2/4/20 vCPU` Limine SMP + negatif arıza testleri) eksiksiz tamamlandı ve makine tarafından doğrulandı.** Belirlenen ara kontrol noktası uyarınca **`H1` zamanlayıcı entegrasyonu (`Adım F`)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
+- **Son Güncelleme:** 11 Kasım 2026 (14:02 +03:00)
+- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` (`Adım A..E` SMP + `Adım F Aşama 1` İşbirlikçi `H1` Kernel-Thread Zamanlayıcısı, `15/15` otomatik QEMU testi) eksiksiz tamamlandı ve makine tarafından doğrulandı.** Talimat uyarınca **`Local APIC` zamanlayıcı / kesme güdümlü *preemption* (Aşama 2)** veya **`Milestone 1B` (`VSpace`/`CR3`, `CSpace`, IPC)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
 
 ---
 
@@ -70,16 +70,19 @@
 
 ---
 
-## 3. Faz 1 `Milestone 1A` Durumu (`Adım A..E` Tamamlandı — `Adım F` Öncesi Ara Kontrol)
+## 3. Faz 1 `Milestone 1A` Durumu (`Adım A..E` + `Adım F Aşama 1` Tamamlandı)
 
-### Tamamlanan `Milestone 1A` Adımları (`Adım A..E`) `[TAMAMLANDI — 11 Kasım 2026]`
+### Tamamlanan `Milestone 1A` Adımları `[TAMAMLANDI — 11 Kasım 2026]`
 - **Adım A — Repo-Yerel Araç Zinciri (`0` Konak Paketi Değişikliği):** `tools/bootstrap_phase1.py` ve `tools/phase1-toolchain-lock.json` ile sistem `rustc 1.99.1` (`58cf8f9c3`) için resmi `rust-src-1.99.1` + Limine `10.8.5` UEFI (`7a9013f305de`) ve `limine.h` (`6e85ddd6f928`) SHA-256 kilitli olarak `.toolchains/` altına kuruldu.
 - **Adım B & C — Minimal 1-CPU `dry-kernel` UEFI Boot & Otomatik QEMU Testi (`bc46907`):** `kernel/src/{main.rs,limine.rs,mem_verify.rs,security.rs,serial.rs,arch.rs}` ve `tools/qemu_boot_test.py` ile Limine HHDM + bellek haritası doğrulaması, `COM1` seri konsol, `ADR-007` `SecLabel`/`CapabilityMeta` öz-testleri ve deterministik panik işleyicisi (`exit=33` başarı / `exit=35` panik) makine tarafından doğrulandı.
 - **Adım D — Per-CPU `GDT`, `TSS` (`IST1`) ve 256 Girişli `IDT` İstisna İşleme (`7ecf5b2`):** `kernel/src/{gdt_tss.rs,idt.rs}` ile `SYSCALL`/`SYSRETQ` uyumlu 64-bit GDT, 16 KiB ayrı `#DF` (`IST1`) yığınlı TSS ve assembly `TrapFrame` tabanlı IDT kuruldu; canlı `int3` (`#BP`) kurtarma, `#UD` (`ud2`) ve `#PF` (`CR2=0x7fffdeadbee0`) testleri otomatik QEMU koşusunda doğrulandı.
-- **Adım E — Limine MP Üzerinden `1/2/4/20 vCPU` SMP, Per-CPU `GS_BASE` ve Negatif Testler:**
+- **Adım E — Limine MP Üzerinden `1/2/4/20 vCPU` SMP, Per-CPU `GS_BASE` ve Negatif Testler (`0ae3a94`):**
   - `kernel/src/{percpu.rs,smp.rs,gdt_tss.rs,idt.rs,main.rs}` ile hem BSP hem her AP geçici Limine yığınından kalıcı 16 KiB `.bss` yığınına geçirildi; CPU başına bağımsız GDT, TSS (`ltr 0x28` -> `Busy = 0x8b`), münhasır `#DF` `IST1` yığını, `IA32_GS_BASE` (`128` bayt önbellek-hizalı `PerCpuData`) ve `Release -> Acquire` AP başlatma protokolü kuruldu.
-  - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif testleri (`mask=0x1 / 0x3 / 0xf / 0xfffff`, CPU başına `#BP` tuzağı ve `4.096` simetrik iş yükü turu, `exit=33`) ile 4 negatif SMP/donanım arıza testi (`smp_ap_timeout`, `smp_dup_cpu_id`, `smp_stack_overlap`, AP 1 özel `IST1` üzerinde gerçek `#PF -> #DF` geçişini doğrulayan `smp_df_ist1_ap`, tamamı deterministik `exit=35`) `python3 tools/qemu_boot_test.py` (`11/11 PASS`) ile doğrulandı.
-  - **Önemli Sınır Notu:** 4C/8T konak işlemcide `-smp 20` KVM zaman-dilimlemesi (*oversubscription*) altında fonksiyonel eşzamanlılığı ve per-CPU izolasyonu doğrular; fiziksel 20 çekirdekli donanım performansını kanıtlamaz.
+  - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif testleri ve 4 negatif SMP/donanım arıza testi (`smp_ap_timeout`, `smp_dup_cpu_id`, `smp_stack_overlap`, `smp_df_ist1_ap`) doğrulandı.
+- **Adım F (Aşama 1) — İşbirlikçi (`Cooperative`) `H1` Kernel-Thread Zamanlayıcısı:**
+  - `kernel/src/sched/{state.rs,runqueue.rs,context.rs,mod.rs,tests.rs}` ile `AtomicU32(exec_state, park_token, gen26)`, açık `fence(Ordering::SeqCst)`, lock-free `PerCpuRunQueue` + CPU'lar arası *work stealing*, 36 adet bağımsız 16 KiB worker yığını (`Dead` sonrası güvenli `gen26 + 1` geri dönüşümlü), System V 16-bayt hizalı `dry_switch_to` + `dry_thread_entry_trampoline` ve `RSP` değişimi sonrası `finish_post_switch` (`post_switch_yield`, `post_switch_park`, `post_switch_exit_and_reap`) uygulandı.
+  - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif koşuları (`1.088 .. 3.507` bağlam değişimi, `808 / 669 / 497` CPU göçü, `0` kayıp uyandırma, `28 .. 65` geri dönüştürülmüş yığın tahsisi, `48/48` reddedilen bayat `wakeup`, `orphan_ready=0`, `exit=33`) ve 4 negatif `H1` hata sınıfı testi (`sched_stack_owner_conflict`, `sched_orphan_ready_detected`, `sched_lost_wakeup_unarmed`, `sched_exit_resurrection`, tamamı `exit=35`) dahil `15/15` QEMU senaryosu geçti (`python3 tools/qemu_boot_test.py`).
+  - **Açık Sınırlar:** (1) `CR3`/TLB ve adres alanı değişimi henüz yoktur (tüm çekirdek thread'leri tekil çekirdek `VSpace` paylaşır); (2) `Local APIC` zamanlayıcısı ve kesme tabanlı *preemption* Aşama 1 kapsamı dışında tutulmuştur (`RFLAGS.IF == 0`); (3) 4C/8T konakta `-smp 20` fiziksel 20 çekirdek performans kanıtı değildir.
 
-### Sıradaki Adım (Kullanıcı Değerlendirmesi Sonrası `Adım F`)
-- **Adım F (`H1` Zamanlayıcı Entegrasyonu):** TLC ve Loom ile doğrulanan `AtomicU32(exec_state, park_token)` + `PerCpuRunQueue` protokolünün, assembly `switch_to`, stack sahipliği ve `thread_entry_trampoline` / `post_switch_*` kurallarıyla `dry-kernel` içine taşınması ve çok-çekirdekli QEMU stres testleri.
+### Sıradaki Adım (Kullanıcı Değerlendirmesi Sonrası)
+- **Adım F (Aşama 2 — Preemptive `H1`):** `Local APIC` / `x2APIC` kurulumu, zamanlayıcı kesmesi + kesme çıkışında `SwPreempt` tabanlı zorlayıcı (*preemptive*) bağlam değişimi ve sıfır-buyruk kesme kilitlenmesi koruması; ardından **`Milestone 1B`** (`Untyped` bellek, 4-seviye `VSpace`/`CR3` + `active_cpus` TLB shootdown, `CSpace`, `ADR-007` zorlaması ve `Endpoint` IPC).

@@ -338,6 +338,10 @@ extern "C" fn ap_main_rust(mp_info: *const LimineMpInfo, slot_ptr: *const ApLaun
         }
     }
 
+    if slot.fault_mode == (SmpFaultTest::None as u64) {
+        crate::sched::ap_scheduler_service_loop(cpu_idx);
+    }
+
     halt_forever()
 }
 

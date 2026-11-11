@@ -32,12 +32,14 @@ pub struct PerCpuData {
     pub boot_stack_top: u64,
     pub df_ist1_base: u64,
     pub df_ist1_top: u64,
-    /// Second 64-byte cache line: per-CPU atomic counters & `#DF` re-entrancy latch.
+    /// Second 64-byte cache line: per-CPU atomic counters, active thread slot & `#DF` latch.
     pub tss_base: u64,
     pub gdt_base: u64,
     pub bp_trap_count: AtomicU64,
     pub last_bp_rip: AtomicU64,
     pub exec_ticks: AtomicU64,
+    pub current_slot: AtomicU64,
+    pub ctx_switches: AtomicU64,
     pub in_df_handler: AtomicBool,
 }
 
@@ -64,6 +66,8 @@ impl PerCpuData {
             bp_trap_count: AtomicU64::new(0),
             last_bp_rip: AtomicU64::new(0),
             exec_ticks: AtomicU64::new(0),
+            current_slot: AtomicU64::new(u64::MAX),
+            ctx_switches: AtomicU64::new(0),
             in_df_handler: AtomicBool::new(false),
         }
     }
@@ -113,6 +117,8 @@ pub fn init_cpu_percpu_and_gs(info: CpuRegionInfo) -> &'static PerCpuData {
         slot.bp_trap_count.store(0, Ordering::Release);
         slot.last_bp_rip.store(0, Ordering::Release);
         slot.exec_ticks.store(0, Ordering::Release);
+        slot.current_slot.store(info.cpu_idx as u64, Ordering::Release);
+        slot.ctx_switches.store(0, Ordering::Release);
         slot.in_df_handler.store(false, Ordering::Release);
         slot.magic = PERCPU_MAGIC;
 

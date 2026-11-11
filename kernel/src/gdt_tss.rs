@@ -254,6 +254,17 @@ pub fn verify_cpu_tss_and_canaries(cpu_idx: usize) {
     }
 }
 
+/// Update `TSS.RSP0` for `cpu_idx` when switching to a kernel thread with stack top `rsp0`.
+#[inline]
+pub fn set_cpu_tss_rsp0(cpu_idx: usize, rsp0: u64) {
+    debug_assert!(cpu_idx < MAX_CPUS && (rsp0 & 0xf) == 0);
+    // SAFETY: `cpu_idx` is the calling CPU (`IF = 0`); `TSS.RSP0` is CPU-private in `'static` `.bss`.
+    unsafe {
+        let block = &mut (*CPU_DESCS.0.get())[cpu_idx];
+        write_volatile(&raw mut block.tss.rsp[0], rsp0);
+    }
+}
+
 /// Lock-free `#DF` stack bottom canary check safe to invoke from inside `#DF` (`IST1`) handler.
 pub fn verify_df_canary_only(cpu_idx: usize) -> bool {
     if cpu_idx >= MAX_CPUS {

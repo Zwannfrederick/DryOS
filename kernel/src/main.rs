@@ -10,6 +10,7 @@ mod idt;
 mod limine;
 mod mem_verify;
 mod percpu;
+mod sched;
 mod security;
 mod serial;
 mod smp;
@@ -181,8 +182,23 @@ extern "C" fn bsp_kmain() -> ! {
         smp.total_work_ops
     );
 
+    let sched_fault = sched::tests::SchedFaultTest::from_cmdline(cmdline);
+    let sched_summary = sched::tests::verify_cooperative_scheduler(smp.cpu_count, sched_fault);
     serial_println!(
-        "[DRY-BOOT-OK] Milestone 1A-E UEFI boot + {}-vCPU SMP verified cleanly.",
+        "[DRY-SCHED] PASS: cpus={} spawned={} exited={} recycled_slots={} ctx_switches={} migrations={} park_rounds={} work_units={} stale_wakes_rejected={} orphan_ready=0",
+        sched_summary.cpus,
+        sched_summary.spawned,
+        sched_summary.exited,
+        sched_summary.recycled_slots,
+        sched_summary.ctx_switches,
+        sched_summary.migrations,
+        sched_summary.park_rounds,
+        sched_summary.work_units,
+        sched_summary.stale_wakes_rejected,
+    );
+
+    serial_println!(
+        "[DRY-BOOT-OK] Milestone 1A-F UEFI boot + {}-vCPU SMP + cooperative H1 scheduler verified cleanly.",
         smp.cpu_count
     );
     qemu_exit(QEMU_EXIT_SUCCESS);

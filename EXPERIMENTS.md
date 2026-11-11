@@ -330,3 +330,50 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
   1. `kernel/src/main.rs:199`: `enter_fatal_or_halt()` içinde kullanılan `if let Err(owner) = ... && owner != token` ifadesi `edition = "2021"` altında derleyici tarafından reddedildi (`let chains are only allowed in Rust 2024 or later`) -> `matches!(..., Err(owner) if owner != token)` olarak düzeltildi.
   2. `kernel/src/smp.rs:373`: `cpu_count >= 1 && cpu_count <= MAX_CPUS` ifadesi `cargo clippy -D warnings` altında `clippy::manual_range_contains` uyarısı verdi -> `(1..=MAX_CPUS).contains(&cpu_count)` olarak düzeltildi.
   3. Bu iki statik düzeltme sonrasında `1`, `2`, `4`, `20` vCPU ve tüm negatif testler ilk QEMU koşularında `0` yeniden deneme ile geçti.
+
+---
+
+## Bölüm D — Faz 1 `Milestone 1A-F` (Aşama 1): İşbirlikçi (`Cooperative`) `H1` Zamanlayıcı Entegrasyonu
+
+- **Tarih:** 11 Kasım 2026
+- **Kapsam:** `dry-kernel` içinde yalnızca işbirlikçi (*cooperative*) çekirdek iş parçacığı (*kernel-thread*) zamanlaması: `AtomicU32(exec_state, park_token, gen26)` `H1` protokolü, lock-free `PerCpuRunQueue` + CPU'lar arası *work stealing*, bağımsız 16 KiB çekirdek yığınları ve `Dead` sonrası yığın/TCB geri dönüşümü, x86-64 assembly `dry_switch_to` + `dry_thread_entry_trampoline`, `post_switch_*` el değiştirme kuralları, kademeli `1 -> 2 -> 4 -> 20 vCPU` doğrulaması ve 4 `H1` hata sınıfı denetimi.
+- **Tekrarlanabilir Komut:** `python3 tools/qemu_boot_test.py` (`15/15` senaryo; tekil koşu için `--smp-only {1|2|4|20}`).
+
+### D.1. x86-64 Assembly Bağlam Değişimi (`dry_switch_to`) ve Giriş Trampolini Sözleşmesi (`kernel/src/sched/context.rs`)
+
+1. **Yığın Hizalaması (`16`-Bayt System V AMD64 ABI & `-mno-red-zone`):**
+   - `x86_64-unknown-none` hedefi 128-bayt *red-zone* ve çekirdek içi SSE/FPU yazmaç kullanımını devre dışı bırakır (`disable-redzone: true`, `+soft-float,-mmx,-sse`).
+   - Çağıran fonksiyon `RSP % 16 == 0` iken `call dry_switch_to` çalıştırır (`RSP % 16 == 8`); `dry_switch_to` 7 adet 64-bit yazmacı (`56` bayt: `RFLAGS, RBP, RBX, R12, R13, R14, R15`) ittiğinde kaydedilen `saved_rsp % 16 == 0` olur.
+   - `mov rsp, rsi` (`% 16 == 0`) ile hedef yığına geçilip 7 yazmaç çekildiğinde (`+56` bayt) `RSP % 16 == 8` durumundadır. `sub rsp, 8` ile `RSP % 16 == 0` hizalanarak `call finish_post_switch` çağrılır (System V kuralı uyarınca Rust fonksiyonuna girişte `RSP % 16 == 8`); dönüşte `add rsp, 8; ret` yürütülür.
+   - Yeni oluşturulan iş parçacıklarında `init_new_thread_stack`, `[stack_top - 64]` adresine 64-baytlık başlangıç çerçevesi yazar (`[stack_top - 8] = dry_thread_entry_trampoline`). İlk `ret` sonrası `dry_thread_entry_trampoline` tam `RSP == stack_top` (`% 16 == 0`) ve `RBP == 0` ile başlar; `call thread_bootstrap` Rust girişine `RSP == stack_top - 8` (`% 16 == 8`) ile girer.
+2. **Callee-Saved Yazmaçlar ve `TSS.RSP0` Senkronizasyonu:**
+   - `RBX`, `RBP`, `R12`, `R13`, `R14`, `R15` giden yığında korunur; yeni thread'lerde `R12 = entry_fn`, `R13 = entry_arg`, `R14 = slot_idx`, `RBP = 0` tohumlanır.
+   - Her `switch_to_slot` geçişinde `set_cpu_tss_rsp0(cpu_idx, next_top)` ile CPU'nun özel `TSS.RSP0` alanı aktif çekirdek yığınının tavanına güncellenir (`#DF` `IST1` yığını münhasır kalır).
+3. **`RFLAGS` ve Kesme Durumu Sözleşmesi (`Aşama 1`):**
+   - `pushfq` / `popfq` + `cld` ile bayraklar korunur ve `DF = 0` zorlanır.
+   - Bu ilk aşamada yalnızca işbirlikçi zamanlama uygulandığından tüm çekirdek iş parçacıklarında `RFLAGS.IF == 0` (`CLI`, başlangıç değeri `0x0002`) değişmezdir; `Local APIC` zamanlayıcısı ve kesme güdümlü *preemption* **henüz etkinleştirilmemiştir**.
+4. **Açık Mimari Sınır (`CR3` / TLB ve Adres Alanı Değişimi Yok):**
+   - Tüm `Milestone 1A-F` çekirdek iş parçacıkları tekil çekirdek `VSpace` (`CR3`, `SecDomain::Kernel`) içinde çalışır; `dry_switch_to` `CR3` yazmacını değiştirmez ve TLB shootdown üretmez (`VSpace` + `active_cpus` TLB shootdown `Milestone 1B` kapsamındadır).
+
+### D.2. Dört `H1` Hata Sınıfının Çekirdek Üzerinde Önlenmesi ve Negatif Doğrulaması
+
+| `H1` Hata Sınıfı | Üretim Önleme Mekanizması (`sched/{state.rs,context.rs,mod.rs}`) | Negatif QEMU Testi (`-smp 2`) ve Yakalanan Kanıt (`exit=35`) |
+| :--- | :--- | :--- |
+| **1. Stack Ownership Violation** | `finish_post_switch` yalnızca `mov rsp, rsi` ile giden yığından **tamamen çıkıldıktan sonra** çalışır, donanım `RSP`'sinin giden `[prev_base, prev_top]` dışında olduğunu doğrular ve ancak ondan sonra `stack_owner.swap(NO_CPU, Release)` yapar. | `sched_stack_owner_conflict` (`sched_fault=stack_owner`): `[DRY-SCHED-FAIL] H1 Bug1 stack_owner violation on dispatch: slot=64 claimed by cpu=1 while owned by cpu=0` (`1.460 s`) |
+| **2. Orphaned Runnable Thread** | `post_switch_yield`, `post_switch_park` ve `finish_waking_and_push` önce `AcqRel` CAS ile `ExecState::Ready` yazar, hemen ardından kesmeler kapalıyken `PerCpuRunQueue::push` çağırır; durgunluk denetçisi tüm TCB'leri tarar. | `sched_orphan_ready_detected` (`sched_fault=orphan_ready`): `[DRY-SCHED-FAIL] H1 Bug2 orphaned Ready thread detected: slot=64 gen=2 missing from all PerCpuRunQueues` (`1.387 s`) |
+| **3. Lost Wakeup** | `prepare_park` ve `Notification::signal_raw` açık `fence(Ordering::SeqCst)` uygular; `commit_park` `Notified` jetonunu yerinde tüketir; `post_switch_park` `SwPark` sırasında gelen `Notified` jetonunu `Blocked` yerine doğrudan `Ready + push` yapar. | `sched_lost_wakeup_unarmed` (`sched_fault=lost_wakeup`): `[DRY-SCHED-FAIL] H1 Bug3 invalid park protocol state on slot=64: state=Running token=None` (`1.420 s`) |
+| **4. Exiting Thread Resurrection** | `AtomicU32` üst 26 bitinde `gen26` taşınır (`ThreadId = (gen26 << 8) \| slot`); `Exiting`/`Dead` görevler `wakeup` çağrılarını `WakeOutcome::Terminated` ile reddeder; yığın yeniden tahsisi `Exiting -> Dead` CAS sonrasında `gen26 + 1` ile yapılır. | `sched_exit_resurrection` (`sched_fault=exit_resurrect`): `[DRY-SCHED-FAIL] H1 Bug4 exiting/dead thread resurrection rejected: slot=64 ticket_gen=2 cur_gen=2 state=Dead` (`1.398 s`) |
+
+### D.3. Kademeli Pozitif QEMU KVM Sonuçları (`1 -> 2 -> 4 -> 20 vCPU`) ve Geliştirme Kayıtları
+
+| Senaryo | `-smp` | Spawn / Exit | Yeniden Kullanılan Yığın (`36` Havuzda) | Assembly `ctx_switches` | CPU Göçü (`migrations`) | `park/wake` Turu | Tamamlanan İş (`work_units`) | Reddedilen Bayat Wake | Süre / Çıkış |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `boot_1cpu_ok` | `1` | `64 / 64` | `28` | `1.088` | `0` | `128` | `896` | `48` | `1.223 s` / **`33`** |
+| `boot_2cpu_ok` | `2` | `64 / 64` | `28` | `1.154` | `808` | `128` | `896` | `48` | `1.375 s` / **`33`** |
+| `boot_4cpu_ok` | `4` | `64 / 64` | `28` | `1.249` | `669` | `128` | `896` | `48` | `1.374 s` / **`33`** |
+| `boot_20cpu_ok` | `20` | `96 / 96` | `65` | `3.507` | `497` | `384` | `1.920` | `48` | `1.865 s` / **`33`** |
+
+- **Doğrulanan Ek Değişmezler:** Her testte `current_thread_id()` (`slot + gen26`), `gs:[8]` (`cpu_idx`), callee-saved yerel değişken bütünlüğü, `sum(percpu.ctx_switches) == GLOBAL_CTX_SWITCHES` (tüm aktif vCPU'larda `ctx_switches > 0`), `orphan_ready == 0` ve tüm `boot_stack` / `df_ist1` / `36` worker yığın taban kanaryaları doğrulandı (*Not: 4C/8T konakta `-smp 20` fiziksel 20 çekirdek performans kanıtı değildir*).
+- **Gizlenmeyen Derleme / Düzenleme Kayıtları (`0` QEMU Başarısızlığı):**
+  1. `smp.rs` düzenlemesinde tek satırlık `halt_forever()` hedefi dosyada 4 yerde eşleştiği için 3 istenmeyen eşleşme anında geri alındı.
+  2. İlk `cargo clippy -D warnings` kontrolünde yakalanan 7 uyarı (`unused_imports` x2, `current_thread_id` kullanılmaması -> `yield_worker` kimlik doğrulamasına bağlandı, `needless_range_loop` x2, `manual_range_contains` x2) düzeltildi; tüm `15/15` QEMU senaryosu ilk koşuda geçti.

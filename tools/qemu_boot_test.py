@@ -211,29 +211,82 @@ def assert_boot_case(
     print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions verified in {elapsed:.3f}s).")
 
 
+def expected_sched_metrics(smp: int) -> tuple[int, int, int]:
+    n_yield = max(8, min(24, smp * 2))
+    n_pairs = max(4, min(12, smp))
+    n_recycle = 48
+    total_spawned = n_yield + (2 * n_pairs) + n_recycle
+    park_rounds = n_pairs * 32
+    work_units = (n_yield * 32) + (n_pairs * 64) + (n_recycle * 8)
+    return total_spawned, park_rounds, work_units
+
+
+def verify_sched_line(name: str, serial_out: str, smp: int) -> None:
+    sched_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-SCHED] PASS:" in ln]
+    if len(sched_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected exactly 1 [DRY-SCHED] PASS line, got {len(sched_lines)}")
+    fields: dict[str, int] = {}
+    for tok in sched_lines[0].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            if v.isdigit():
+                fields[k] = int(v)
+    if fields.get("recycled_slots", 0) < 28:
+        raise RuntimeError(f"[{name}] Expected recycled_slots >= 28, got {fields}")
+    if fields.get("ctx_switches", 0) < 400:
+        raise RuntimeError(f"[{name}] Expected ctx_switches >= 400, got {fields}")
+    if smp >= 2 and fields.get("migrations", 0) < 1:
+        raise RuntimeError(f"[{name}] Expected cross-CPU migrations >= 1 on smp={smp}, got {fields}")
+
+
 def assert_positive_smp_boot(name: str, kernel_elf: pathlib.Path, smp: int) -> None:
     expected_mask = hex((1 << smp) - 1)
     expected_ops = smp * 4096
-    assert_boot_case(
-        name=name,
-        kernel_elf=kernel_elf,
-        cmdline="console=com1",
-        smp=smp,
-        expected_rc=EXIT_CODE_SUCCESS,
-        must_contain=[
-            "[DRY-BOOT] DRY Kernel v0.1.0",
-            "Firmware: EFI64",
-            "[DRY-CPU] PASS: BSP(cpu=0,",
-            "GDT(CS=0x08,TR=0x28,Busy=0x8b)",
-            "#BP(hits=1,",
-            "[DRY-HHDM] PASS:",
-            "[DRY-MEMMAP] PASS:",
-            "[DRY-SEC] PASS:",
-            f"[DRY-SMP] PASS: cpus_online={smp} mask={expected_mask} total_bp_traps={smp} symmetric_ops={expected_ops} stacks_disjoint=true",
-            f"[DRY-BOOT-OK] Milestone 1A-E UEFI boot + {smp}-vCPU SMP verified cleanly.",
-        ],
-        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]", "[DRY-SMP-FAIL]", "[DRY-DF-IST1] FAIL"],
-    )
+    spawned, park_rounds, work_units = expected_sched_metrics(smp)
+    img_path = BUILD_DIR / f"esp_{name}.img"
+    write_mbr_esp_image(img_path, kernel_elf, "console=com1")
+    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp)
+
+    print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
+    for line in serial_out.splitlines():
+        if "[DRY-" in line or "Limine" in line or "PANIC" in line:
+            print(f"  {line}")
+
+    must_contain = [
+        "[DRY-BOOT] DRY Kernel v0.1.0",
+        "Firmware: EFI64",
+        "[DRY-CPU] PASS: BSP(cpu=0,",
+        "GDT(CS=0x08,TR=0x28,Busy=0x8b)",
+        "#BP(hits=1,",
+        "[DRY-HHDM] PASS:",
+        "[DRY-MEMMAP] PASS:",
+        "[DRY-SEC] PASS:",
+        f"[DRY-SMP] PASS: cpus_online={smp} mask={expected_mask} total_bp_traps={smp} symmetric_ops={expected_ops} stacks_disjoint=true",
+        f"[DRY-SCHED] PASS: cpus={smp} spawned={spawned} exited={spawned}",
+        f"park_rounds={park_rounds} work_units={work_units} stale_wakes_rejected=48 orphan_ready=0",
+        f"[DRY-BOOT-OK] Milestone 1A-F UEFI boot + {smp}-vCPU SMP + cooperative H1 scheduler verified cleanly.",
+    ]
+    must_not_contain = [
+        "[DRY-PANIC]",
+        "[DRY-EXCEPTION]",
+        "[DRY-SMP-FAIL]",
+        "[DRY-SCHED-FAIL]",
+        "[DRY-DF-IST1] FAIL",
+    ]
+
+    if rc != EXIT_CODE_SUCCESS:
+        print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
+        raise RuntimeError(f"[{name}] Unexpected QEMU exit code {rc} != {EXIT_CODE_SUCCESS}")
+    for token in must_contain:
+        if token not in serial_out:
+            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
+            raise RuntimeError(f"[{name}] Missing required serial marker: {token!r}")
+    for token in must_not_contain:
+        if token in serial_out:
+            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
+            raise RuntimeError(f"[{name}] Forbidden serial marker found: {token!r}")
+    verify_sched_line(name, serial_out, smp)
+    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched invariants verified in {elapsed:.3f}s).")
 
 
 def main() -> None:
@@ -314,6 +367,59 @@ def main() -> None:
         must_not_contain=["[DRY-BOOT-OK]", "[DRY-DF-IST1] FAIL"],
     )
 
+    # Negative H1 Scheduler Bug-Class Detection Tests (must fail deterministically with exit=35).
+    assert_boot_case(
+        name="sched_stack_owner_conflict",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 sched_fault=stack_owner",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SCHED-FAIL] H1 Bug1 stack_owner violation",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="sched_orphan_ready_detected",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 sched_fault=orphan_ready",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SCHED-FAIL] H1 Bug2 orphaned Ready thread detected",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="sched_lost_wakeup_unarmed",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 sched_fault=lost_wakeup",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SCHED-FAIL] H1 Bug3 invalid park protocol state",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
+    assert_boot_case(
+        name="sched_exit_resurrection",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 sched_fault=exit_resurrect",
+        smp=2,
+        expected_rc=EXIT_CODE_PANIC,
+        must_contain=[
+            "[DRY-SCHED-FAIL] H1 Bug4 exiting/dead thread resurrection rejected",
+            "[DRY-PANIC]",
+        ],
+        must_not_contain=["[DRY-BOOT-OK]"],
+    )
+
     # Milestone 1A-D 1-CPU exception & panic regression suite.
     assert_boot_case(
         name="panic_handler_deterministic",
@@ -356,7 +462,7 @@ def main() -> None:
         must_not_contain=["[DRY-BOOT-OK]"],
     )
 
-    print("\n[QEMU-TEST] ALL 11 MILESTONE 1A-E SMP & FAULT CHECKS PASSED.")
+    print("\n[QEMU-TEST] ALL 15 MILESTONE 1A-F SMP, SCHEDULER & FAULT CHECKS PASSED.")
 
 
 if __name__ == "__main__":
