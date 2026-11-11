@@ -35,11 +35,15 @@
 
 ## ADR-003: Capability Tablosu (`CSpace`) — Önce Düz Tablo, Sonra İki Seviyeli Radiks
 
-- **Durum:** Kabul Edildi (10 Kasım 2026)
+- **Durum:** Kabul Edildi (10 Kasım 2026) — `Milestone 1B-C` ile Faz 1 Düz Korumalı `CNode` + CDT Uygulandı (11 Kasım 2026)
 - **Bağlam:** Tam 2 seviyeli dinamik radiks `CSpace` ve karmaşık türetme ağacı (*Capability Derivation Tree - CDT*), Faz 1'de önyükleme ve ilk IPC doğrulamasını geciktirir.
 - **Karar:**
-  - **Faz 1–2 (Başlangıç):** Süreç başına sabit boyutlu tek seviyeli korumalı dizi (*Flat Guarded CNode*, ör. 4 KiB veya 16 KiB sabit çerçeve içinde 128–512 adet 32-baytlık slot) + nesne başına atomik `generation: AtomicU32` ve `iommu_pin_count: AtomicU32`.
-  - **Faz 3+:** `CapPtr` 64-bit formatı şimdiden radiks genişlemesine uyumlu tanımlanır (`[63:56] guard_bits | [31:0] slot_addr`), böylece kullanıcı ABI'sini kırmadan 2 seviyeli radiks ağacına ve alt-ağaç epoch `Revoke` yapısına geçilir.
+  - **Faz 1–2 (Başlangıç):** Süreç başına sabit boyutlu tek seviyeli korumalı dizi (*Flat Guarded CNode*, ör. 4 KiB veya 16 KiB sabit çerçeve içinde 128–512 adet slot) + nesne başına atomik `generation: AtomicU32` ve `iommu_pin_count: AtomicU32`.
+  - **Faz 3+:** `CapPtr` 64-bit formatı şimdiden radiks genişlemesine uyumlu tanımlanır (`[63:56] guard_bits | [55:48] radix_bits | [47:16] slot_gen | [15:0] slot_idx`), böylece kullanıcı ABI'sini kırmadan 2 seviyeli radiks ağacına ve alt-ağaç epoch `Revoke` yapısına geçilir.
+- **`Milestone 1B-C` Uygulama Kaydı (`kernel/src/cspace/`):**
+  - `MAX_CSPACES = 16`, `CNODE_SLOTS = 256` (`CNODE_RADIX_BITS = 8`), önbellek satırı hizalı `64 B` `CapSlot` (`CNode` başına `16 KiB`, toplam `257 KiB` `CapSlot + CapMapRecord` havuzu; slot `0 = CAP_NULL`).
+  - Kilitsiz (`lock-free`) seqlock `cspace_lookup_fast` (`slot_gen` + canlı nesne `generation` çift ABA kalkanı, `1 vCPU p50 = 99 cyc`, `20 vCPU p50 = 113 cyc`), `slot.in_flight_ops` aktif işlem pini ve `CSpace`'ler arası intrüzif $O(k)$ ebeveyn-çocuk CDT bağlantısı.
+  - Deterministik `revoke` sıralaması: **`Live -> Revoking` (`slot_gen + 1`) -> `in_flight_ops == 0` süzme -> `CapMapRecord` otomatik `VSpace` `unmap_4k` + senkron SMP TLB shootdown -> `EmptyRevoked` / geri kazanım**. `map_ref_count > 0`, `iommu_pin_count > 0`, `VSpace.active_cpus != 0` veya `TCB` `ExecState != Dead || stack_owner != NO_CPU` iken erken nesne yıkımı `Err(BusyActiveObject)` ile reddedilir.
 
 ---
 
@@ -119,4 +123,14 @@
 6. **`INV-SEC-06 (UnforgeableCallerLabel)`:** `dry_ipc_reply_recv` alıcısına iletilen `(badge, sender_label)` çifti doğrudan çekirdek `TCB`/`Endpoint` durumundan okunur; kullanıcı alanı bu alanları sahteleyemez.
 7. **`INV-SEC-07 (DeterministicRevokeAndExpiry)`:** `Revoke` tamamlandığı veya `lease_epoch` süresi dolduğu andan itibaren türetilmiş tüm yetkiler `EREVOKED` (`-6`) döner; aktif eşlemeler TLB shootdown ile sökülür.
 8. **`INV-SEC-08 (NonBypassablePolicy)`:** Çekirdek ve `Policy Broker` içinde `SecLabel` veya capability doğrulamasını devre dışı bırakan hiçbir çalışma zamanı bayrağı (`permissive mode` vb.) bulunmaz.
+
+### `Milestone 1B-C` Çekirdek Uygulama Kaydı ve Açık Kalan Faz Sınırları (11 Kasım 2026)
+
+- **Doğrulanan Çekirdek Zorlamaları (`kernel/src/{security.rs,cspace/,vspace/,pmm/}`):**
+  - Her `CSpace` ve nesne işleminde ortak `CapRights + SecDomain/SecLabel + lease_epoch` değerlendirmesi (`authorize_cspace_fast`, `p50 = 53..59 cyc`); `encode_compartment(user_ns, app_id)` ile kullanıcı/uygulama kompartman kodlaması; `Untyped::retype` ebeveyn etiket mirası.
+  - `USERSPACE` / `ROOT_SYSTEM` / `KERNEL` duvarları (`ROOT_SYSTEM` özneleri dahi `KERNEL` nesnelerine erişemez ve eşleyemez); `NO_DELEGATE` ve `CapRights::GRANT` çapraz-kompartman aktarım kapıları (`cspace_transfer`).
+  - `DEV_WORKSPACE` süreli/kapsamlı `DRY Vault` kiralaması (`lease_epoch > 0 && !NO_DELEGATE` zorunlu; `now_epoch > lease_epoch` olduğunda anında `Err(LeaseExpired)`).
+  - `SecFlags::READ_ONLY_EXPORT` için 3-katmanlı savunma (`CSpace` türetme/aktarım + `VSpace::protect_4k` yazma yükseltme engeli + `PMM` `map_ref_inc_data_frame` donanım sınırı: yalnızca `!writable && expected_owner.domain != Kernel` kabul edilir).
+- **Henüz Uygulanmayan Gelecek Faz Sınırları (Dürüst Kapsam Beyanı):**
+  - VFS dosya/dizin ad alanı kuralları (`INV-SEC-05`: `rename`, `symlink`, `hardlink`, `mount`, dosya tabanlı `mmap`) ve izole Ring 3 userspace `DRY Vault` / `Policy Broker` servis süreçleri Faz 2 kapsamındadır; `Milestone 1B-C` yalnızca çekirdek içi (`Ring 0`) `CSpace`, `SecLabel` ve `lease_epoch` mekanizmalarını uygular.
 

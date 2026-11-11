@@ -7,6 +7,7 @@ pub mod kernel_handover;
 pub mod pte;
 pub mod tests;
 pub mod tlb;
+pub mod tlb_debt;
 
 pub use kernel_handover::{
     activate_kernel_vspace_on_ap, init_and_activate_kernel_vspace, KernelVSpaceSummary,
@@ -422,7 +423,12 @@ pub fn map_4k(
                 return Err(VSpaceError::AlreadyMapped);
             }
 
-            map_ref_inc_data_frame(frame, PageOrder::Order4KiB, owner_label);
+            map_ref_inc_data_frame(
+                frame,
+                PageOrder::Order4KiB,
+                owner_label,
+                prot.contains(VmProt::WRITE),
+            );
             let _ = pt_frame_adjust_entries(pt_pfn, 1);
             write_volatile(pt.add(i1), frame.phys_addr() | leaf_flags);
             slot.mapped_4k_equiv_pages.fetch_add(1, Ordering::Relaxed);
@@ -563,6 +569,15 @@ pub fn protect_4k(handle: VSpaceHandle, vaddr: u64, new_prot: VmProt) -> Result<
             if (old & PTE_PRESENT) == 0 {
                 return Err(VSpaceError::NotMapped);
             }
+            if new_prot.contains(VmProt::WRITE) {
+                let data_pfn = ((old & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+                if matches!(
+                    crate::pmm::inspect_frame_live(data_pfn),
+                    Some((_, _, _, _, owner)) if owner.flags.contains(SecFlags::READ_ONLY_EXPORT)
+                ) {
+                    return Err(VSpaceError::PermissionViolation);
+                }
+            }
             write_volatile(pt.add(i1), (old & PTE_PHYS_MASK_4K) | new_flags);
             fence(Ordering::SeqCst);
             let _ = tlb::shootdown_tlb(handle.id, &slot.active_cpus, vaddr, 1);
@@ -603,6 +618,23 @@ pub fn enforce_user_access_or_panic(vspace_id: VSpaceId, vaddr: u64, write: bool
 /// Query owned intermediate page-table frame count (`PDPT + PD + PT`) for `handle`.
 pub fn vspace_owned_pt_frames(handle: VSpaceHandle) -> Result<u64, VSpaceError> {
     with_vspace_locked(handle, |slot, _| Ok(slot.pt_frames_owned.load(Ordering::Relaxed)))
+}
+
+/// Lock-free inspection of `(generation, active_cpus_mask, owner_label)` for `CSpace` `VSpace` gates.
+#[inline(always)]
+pub fn inspect_vspace_live(vspace_id: VSpaceId) -> Option<(u32, u64, SecLabel)> {
+    if vspace_id == KERNEL_VSPACE_ID || (vspace_id as usize) >= MAX_VSPACES {
+        return None;
+    }
+    let slot = &VSPACE_TABLE[vspace_id as usize];
+    if !slot.allocated.load(Ordering::Acquire) {
+        return None;
+    }
+    let gen = slot.generation.load(Ordering::Acquire);
+    let active = slot.active_cpus.load(Ordering::Acquire);
+    // SAFETY: `owner_label` is written prior to setting `allocated = true` and immutable while allocated.
+    let lbl = unsafe { *slot.owner_label.get() };
+    Some((gen, active, lbl))
 }
 
 /// Walk `vspace_id` (`0` = `KERNEL_VSPACE`) for any canonical `vaddr` and return effective permissions.

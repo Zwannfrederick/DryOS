@@ -67,7 +67,12 @@ pub fn map_2m(
                 return Err(VSpaceError::AlreadyMapped);
             }
 
-            map_ref_inc_data_frame(frame, PageOrder::Order2MiB, owner_label);
+            map_ref_inc_data_frame(
+                frame,
+                PageOrder::Order2MiB,
+                owner_label,
+                prot.contains(VmProt::WRITE),
+            );
             let _ = pt_frame_adjust_entries(pd_pfn, 1);
             write_volatile(pd.add(i2), (frame.phys_addr() & PTE_PHYS_MASK_2M) | leaf_flags);
             slot.mapped_4k_equiv_pages.fetch_add(512, Ordering::Relaxed);

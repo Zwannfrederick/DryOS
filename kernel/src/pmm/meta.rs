@@ -371,6 +371,38 @@ pub fn query_frame_state(phys_addr: u64) -> FrameState {
     state
 }
 
+/// Lock-free inspection of `(FrameState, iommu_pin_count, map_ref_count, generation, SecLabel)` for `CSpace` gates.
+#[inline(always)]
+pub fn inspect_frame_live(pfn: u32) -> Option<(FrameState, u16, u16, u32, SecLabel)> {
+    let m = frame_meta(pfn)?;
+    let (state, _, _, _, pins, maps, gen) = unpack_word0(m.word0.load(Ordering::Acquire));
+    let label = unpack_seclabel(m.word1.load(Ordering::Acquire));
+    Some((state, pins, maps, gen, label))
+}
+
+/// Adjust `iommu_pin_count` on an allocated physical frame (`ADR-003` & `Stage B.4` pin gate).
+pub fn adjust_frame_iommu_pin(handle: FrameHandle, delta: i16) -> Result<u16, PmmError> {
+    let m = frame_meta(handle.pfn).ok_or(PmmError::OutOfMemory)?;
+    loop {
+        let old = m.word0.load(Ordering::Acquire);
+        let (st, z, ord, dom, pins, maps, gen) = unpack_word0(old);
+        if (st != FrameState::AllocatedFrame && st != FrameState::UntypedRetypedObj)
+            || gen != handle.generation
+        {
+            return Err(PmmError::OutOfMemory);
+        }
+        let next_pins = (pins as i32) + (delta as i32);
+        assert!((0..=0x3ff).contains(&next_pins), "IOMMU pin_count overflow/underflow");
+        let nw = pack_word0(st, z, ord, dom, next_pins as u16, maps, gen);
+        if m.word0
+            .compare_exchange_weak(old, nw, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(next_pins as u16);
+        }
+    }
+}
+
 #[inline]
 pub fn inventory() -> PmmInventory {
     assert!(PMM_META.initialized.load(Ordering::Acquire), "PMM not initialized");

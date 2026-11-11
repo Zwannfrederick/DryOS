@@ -562,3 +562,87 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 4. **`20-vCPU` Stres Koşusu — Gerçek Donanım Intel SDM §4.10.2.3 `PDE` Sayfalama-Yapısı Önbelleği Yarışı (`cr2=0xc14000, err=0x2`):**
    - İlk `-smp 20` koşusunda `cpu=9` üzerinde `map_4k(0xc14000)` hemen sonrasında `err=0x2` (`P=0` yazma) donanım `#PF` yakalandı. Kök neden analizinde: `CPU A`'nın boşalan `PT` çerçevesini `pd[i2] = 0` ile ayırıp `shootdown_tlb` öncesinde `VSpace::lock` kilidini bıraktığı; `CPU 9`'un ise `shootdown` IPI'ı ulaşmadan kilidi alıp yeni bir `PT` tahsis ederek `0xc14000`'a yazdığı, ancak `CPU 9` donanım `PDE` önbelleğinin hâlâ eski sıfırlanmış `PT`'yi gösterdiği kanıtlandı.
    - `shootdown_tlb` çağrısı tek yönlü `VSpace::lock -> TLB_REQ_LOCK` DAG'ı altında `VSpace::lock` içine alındı ve dizin koparmalarında (`pt_len > 0`) `FULL_FLUSH_SENTINEL` (`mov cr3`) zorunlu kılındı; düzeltme sonrasında art arda tüm `-smp 20` ve tam `35/35` paket koşuları `0` hata ile geçti.
+
+
+---
+
+## Bölüm H — Faz 1 `Milestone 1B-C`: Sabit Korumalı `CSpace`, CDT İptal Yaşam Döngüsü, `ADR-007` Çekirdek Zorlaması ve `TLB` Performans Borcu Analizi
+
+- **Tarih:** 11 Kasım 2026
+- **Kapsam:** `6445641` (`Milestone 1B-B` ve `35` regresyon senaryosu) korunarak; radiks-genişleyebilir `CapPtr` + `64 B/slot` sabit korumalı `CNode` (`256` slot, `MAX_CSPACES = 16`), kilitsiz seqlock `cspace_lookup_fast` (`slot_gen` + canlı nesne `generation` çift ABA kalkanı), monotonik `derive / copy / mint` + IPC-hazır `cspace_transfer` (`IpcCapTransferReceipt`), `TCB` / `VSpace` / `Frame4K` / `Frame2M` / `Untyped` nesnelerinin `CSpace`'e bağlanması, çapraz-`CSpace` intrüzif $O(k)$ CDT geçişli `revoke` + otomatik `CapMapRecord` `VSpace` `unmap` + senkron SMP TLB shootdown, `ADR-007` 3-alan duvarları + `READ_ONLY_EXPORT` + `DEV_WORKSPACE` `lease_epoch` kiralaması, `1/2/4/8/20` vCPU kademeli doğrulaması, 10 yeni negatif `cspace_*` arıza testi (`46/46` toplam QEMU senaryosu) ve `Stage F` bağımsız `TLB` performans borcu incelemesi.
+- **Tekrarlanabilir Komutlar:**
+  - Tekil SMP doğrulaması: `python3 tools/qemu_boot_test.py --smp-only {1|2|4|8|20}`
+  - Tam paket (`46/46` senaryo): `python3 tools/qemu_boot_test.py`
+
+### H.1. Tehdit Modeli (`T-CAP-01..06`), Biçimsel Değişmezler (`INV-CAP-01..08`) ve Yaşam Döngüsü Protokolü
+
+1. **Tehdit Modeli (`T-CAP-01..06`):**
+   - `T-CAP-01` (*Sahte/Tahmin Edilmiş Handle*): Yanlış `guard`, `radix_bits`, `slot_idx == 0` veya sınır dışı indeks -> `Err(InvalidHandle)`.
+   - `T-CAP-02` (*Slot/Nesne Yeniden Kullanımı & ABA*): Silinmiş veya iptal edilmiş yuva/nesneye eski `CapPtr` ile erişim -> 32-bit `slot_gen` **ve** canlı nesne `generation` çift doğrulaması (`Err(StaleGenerationAba)`).
+   - `T-CAP-03` (*Hak/Süre Yükseltme & `W^X` Delme*): `derive/mint/transfer/map/protect` adımlarında üst küme hak talebi, `W+X` birleşimi veya `lease_epoch` uzatma -> `Err(RightsAmplification | InsufficientRights)`.
+   - `T-CAP-04` (*Çapraz Alan / Kompartman Sızıntısı*): `Userspace -> RootSystem/Kernel`, `RootSystem -> Kernel`, `GRANT` veya kiralama olmadan kompartmanlar arası devir, ya da `READ_ONLY_EXPORT` çerçeveyi `RW` eşleme -> `Err(DomainViolation | TransferEscalation)`.
+   - `T-CAP-05` (*SMP Eşzamanlı `revoke` Yarışı & Bayat Eşleme*): `CPU A` `lookup/derive/transfer/map` yürütürken `CPU B`'nin `revoke` çalıştırması veya iptal sonrası TLB'de kalan sanal eşleme -> `slot.in_flight_ops` pini + seqlock yeniden doğrulaması + `EmptyRevoked` öncesi zorunlu `unmap_4k` & SMP TLB shootdown.
+   - `T-CAP-06` (*Aktif Nesnenin Erken Geri Kazanımı*): `map_ref_count > 0`, `iommu_pin_count > 0`, `VSpace.active_cpus != 0` veya çalışan `TCB` (`ExecState != Dead || stack_owner != NO_CPU`) üzerinde `destroy` -> `Err(BusyActiveObject)`.
+2. **Biçimsel Değişmezler (`INV-CAP-01..08`):**
+   - `INV-CAP-01 (GuardRadixExact)`: Yalnızca `guard == cnode.guard && radix_bits == 8 && 1 <= slot_idx < 256` olan `CapPtr` çözümlenir (`slot 0 = CAP_NULL`).
+   - `INV-CAP-02 (DualGenNoAba)`: Çözümleme hem `slot_gen == ptr.slot_gen()` hem de alt katmandaki canlı nesne (`PMM`, `VSpace`, `TCB`, `Untyped`, `CNode`) nesil sayacının eşleşmesini zorunlu tutar.
+   - `INV-CAP-03 (MonotonicNarrowing)`: Her `derive / copy / mint / transfer` adımında `child.rights ⊆ parent.rights`, `!(W && X)` ve `(parent.lease == 0 || (0 < child.lease <= parent.lease))` korunur.
+   - `INV-CAP-04 (JointSecEnforcement)`: Hiçbir işlem tek başına `CapRights` veya tek başına `SecLabel` ile geçmez; `authorize_cspace_fast` her ikisini ve `now_epoch <= lease_epoch` sınırını birlikte denetler.
+   - `INV-CAP-05 (TransitiveRevokeBeforeReclaim)`: İptal kesin olarak **`Live -> Revoking` (`slot_gen + 1`, `SeqCst`) -> `in_flight_ops == 0` süzme -> `CapMapRecord` `VSpace` `unmap` + senkron SMP TLB shootdown -> `EmptyRevoked` / geri kazanım** sırasını izler.
+   - `INV-CAP-06 (NoOrphanDescendant)`: Çapraz-`CSpace` intrüzif CDT listesi (`cdt_parent`, `cdt_first_child`, `cdt_next_sibling`, `cdt_prev_sibling`) sayesinde ata yetki iptal edildiğinde farklı `CSpace`'lere aktarılmış torunlar dahil hiçbir türetilmiş yetki canlı kalamaz.
+   - `INV-CAP-07 (ImmutableRoExport)`: `READ_ONLY_EXPORT` çerçeveler `CSpace`, `VSpace::protect_4k` ve `PMM` `map_ref_inc_data_frame` katmanlarının üçünde de yalnızca `!writable && expected_owner.domain != Kernel` koşuluyla kabul edilir.
+   - `INV-CAP-08 (ActivePinGuard)`: Donanım/CPU kullanımı sıfırlanmadan hiçbir `Frame`, `VSpace`, `TCB` veya `Untyped` nesnesi serbest bırakılamaz.
+
+### H.2. `Stage E` — `CSpace` & `ADR-007` Sentetik Mikro-Ölçütleri (`samples = 512`, `64 B/slot`, `257 KiB` Havuz)
+
+| Senaryo | `-smp` | `lookup` `p50/p95/p99` (`cyc`) | `sec` `p50/p95/p99` (`cyc`) | `derive` `p50/p95/p99` | `mint` `p50/p95/p99` | `revoke1` `p50/p95/p99` | CDT Çocuk Ölçekleme `1 / 8 / 32 / 64` (`cyc`) | Çekişmeli `lookup` `p50/p99` (`cyc`) | SMP Stres (`revoke` / `stale_rej` / `leak`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `boot_1cpu_ok` | `1` | `99 / 103 / 103` | `53 / 56 / 57` | `283 / 287 / 289` | `233 / 237 / 237` | `237 / 241 / 243` | `243 / 964 / 3.501 / 6.816` | `102 / 112` | `64 / 128 / 0` |
+| `boot_2cpu_ok` | `2` | `103 / 106 / 107` | `53 / 56 / 57` | `281 / 285 / 287` | `233 / 237 / 245` | `237 / 241 / 249` | `241 / 964 / 3.496 / 6.829` | `100 / 286` | `64 / 177 / 0` |
+| `boot_2cpu_xapic` | `2` | `132 / 142 / 184` | `65 / 77 / 110` | `350 / 436 / 640` | `280 / 367 / 559` | `289 / 361 / 549` | `343 / 1.244 / 4.613 / 8.633` | `114 / 362` | `64 / 203 / 0` |
+| `boot_4cpu_ok` | `4` | `130 / 152 / 184` | `67 / 77 / 112` | `381 / 417 / 537` | `309 / 352 / 599` | `306 / 334 / 375` | `328 / 1.215 / 4.183 / 8.495` | `125 / 470` | `64 / 328 / 0` |
+| `boot_8cpu_ok` | `8` | `113 / 119 / 122` | `59 / 65 / 67` | `330 / 348 / 375` | `273 / 289 / 300` | `280 / 298 / 322` | `288 / 1.140 / 4.182 / 8.208` | `120 / 400` | `128 / 599 / 0` |
+| `boot_20cpu_ok` | `20` | `113 / 121 / 121` | `59 / 65 / 67` | `330 / 353 / 435` | `273 / 291 / 324` | `277 / 300 / 338` | `288 / 1.150 / 4.281 / 8.175` | `124 / 353` | `192 / 918 / 0` |
+
+- **Bellek Ayak İzi ve Ölçekleme Yorumu:** Her `CapSlot` tam `64 B` (tek CPU önbellek satırı; komşu slotlar arası *false sharing* yok), `CNode` başına `256 * 64 B = 16 KiB` (`16` `CSpace` = `256 KiB` + `1 KiB` `CapMapRecord` = toplam **`257 KiB`** statik `.bss` havuzu). CDT iptal maliyeti çocuk sayısıyla tam doğrusal $O(k)$ ölçeklenmektedir (`6.816 / 64 ≈ 106.5 cyc/çocuk` `1 vCPU`'da; `8.175 / 64 ≈ 127.7 cyc/çocuk` `20 vCPU`'da). Kilitsiz okuma yolu `1..20 vCPU` çekişmesi altında dahi `p50 = 100..125 cyc` bandında kalmaktadır.
+
+### H.3. `Stage F` — Ayrı `TLB` Performans Borcu, Konak Aşırı-Abonelik Ayrımı ve Toplu (`Batch`) Shootdown Analizi
+
+| Senaryo | `-smp` (`Konak Oranı`) | `non_member_ipis` | Sayaç Bölüntüsü (`handled + coop == sent`) | `ipi_send` `p50 / p99` (`cyc`) | `remote_sched` `p50 / p99` (`cyc`) | `flush_exec` `p50 / p99` (`cyc`) | `ack_wait` `p50 / p99` (`cyc`) | `16x unmap_4k` vs `unmap_4k_batch` (`cyc`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `boot_1cpu_ok` | `1` (`0.125x`) | **`0`** | `0 + 0 == 0` (`true`) | `0 / 0` | `0 / 0` | `231 / 531` | `0 / 0` | Yerel (IPI yok) |
+| `boot_2cpu_ok` | `2` (`0.25x`) | **`0`** | `57 + 193 == 250` (`true`) | `4.088 / 10.807` | `4.650 / 12.567` | `233 / 300` | `1.097 / 7.634` | `92.759` -> `10.321` (**`8.99x`**) |
+| `boot_2cpu_xapic` | `2` (`0.25x`, MMIO) | **`0`** | `48 + 201 == 249` (`true`) | `6.308 / 9.032` | `6.040 / 6.804` | `233 / 377` | `170 / 1.401` | `124.636` -> `12.970` (**`9.61x`**) |
+| `boot_4cpu_ok` | `4` (`0.50x`) | **`0`** | `23 + 81 == 104` (`true`) | `11.889 / 14.203` | `12.535 / 15.074` | `257 / 312` | `1.233 / 1.379` | `221.410` -> `18.717` (**`11.83x`**) |
+| `boot_8cpu_ok` | **`8` (`1.00x` tam sığma)** | **`0`** | `71 + 357 == 428` (`true`) | **`31.144` / `40.887`** | **`31.536` / `160.815`** | **`261` / `365`** | **`996` / `120.619`** | `528.452` -> `38.186` (**`13.84x`**) |
+| `boot_20cpu_ok` | **`20` (`2.50x` aşırı-abone)** | **`0`** | `169 + 1.224 == 1.393` (`true`) | `99.721 / 189.426` | **`24.901.927` / `59.811.581`** | **`644` / `11.142`** | `36.846.509 / 74.898.278` | `559.793.636` -> `33.192.000` (**`16.87x`**) |
+
+1. **`Milestone 1B-B` `538` vs `155 + 1.301 = 1.456` (`ipis_sent = 1.454`) Sayaç Farkının Kök Nedeni ve Kanıtlı Onarımı:**
+   - **(a) Birim ayrımı:** `shootdowns` (`538`) çoklu-hedef yayın turlarını, `ipis_sent` (`1.454`) ise hedef CPU başına gönderilen tekil IPI adedini sayar (`19` hedefe giden tek tur `shootdowns += 1`, `ipis_sent += 19` üretir).
+   - **(b) `+2` fazlalığın gerçek kök nedeni:** `1B-B`'deki `service_pending_shootdown_on_cpu`, `REQ_GEN` (`G`) okuduktan sonra KVM tarafından kesilip `REQ_TARGET_MASK`'ı bir sonraki `G + 1` turundan okuduğunda (yırtık okuma / *torn read*), `G` turunda hedef olmayan bir CPU'nun kendisini hedef sanıp `coop_acks` sayacını fazladan artırmasına yol açıyordu (`1.454` yerine `1.456`).
+   - **(c) Onarım (`vspace/tlb.rs`):** Monotonik `REQ_GEN` seqlock yeniden doğrulaması, 64-bayt önbellek hizalı `CpuTlbSlot` (`CPU_TLB`) ve başlatıcı-tarafı ayrık bit sayımı eklendi; tüm `2, 4, 8, 20` vCPU koşularında **`ipis_handled + coop_acks == ipis_sent`** eşitliği bire bir doğrulandı.
+2. **Konak KVM Aşırı-Aboneliği (`8` vs `20` vCPU) ve Alt-Küme (`active_cpus`) Kanıtı:**
+   - `4C/8T` (`8` donanım izleği) konakta `8 vCPU` (`1.0x`) tam sığma noktasında `7` uzak çekirdeğin tamamına yayın yapan `shootdown_all p50` yalnızca **`33.103 cyc` (`~10.6 µs`)** ve `flush_exec p50 = 261 cyc` iken; `20 vCPU` (`2.5x` aşırı-abonelik) koşusunda `flush_exec p50` hâlâ **`644 cyc`** kaldığı hâlde `remote_sched p50` **`24.90M cyc` (`~8.0 ms`)** olmaktadır. Yani `20-vCPU` gecikmesinin **`>%99.7`'si** misafir çekirdekten değil, Linux konak CFS zamanlayıcısının uyuyan vCPU izleklerini sıra bekletmesinden kaynaklanmaktadır.
+   - `vs_other` çalıştıran üye-olmayan çekirdeklerin tek bir IPI bile almadığı (`non_member_ipis = 0`) tüm SMP topolojilerinde doğrulandı.
+3. **Toplu (`unmap_4k_batch`) vs Tembel (*Lazy*) Geçersiz Kılma Değerlendirmesi:**
+   - `unmap_4k_batch` tek kilit ve tek `shootdown_tlb` bariyeriyle 16 sayfayı sökerek `2..20` vCPU genelinde **`8.99x .. 16.87x`** hızlanma sağladı (`MAX_SINGLE_INVLPG_PAGES = 16` eşiği üstünde otomatik tam `CR3` tazelemesine geçer).
+   - Buna karşılık çerçeve geri kazanımı veya izin daraltma öncesinde *lazy* (ACK beklemeden geciktirilmiş) TLB geçersiz kılma, bayat TLB üzerinden *use-after-free* açacağı için (`INV-CAP-05`, `cspace_stale_mapping_after_revoke`) güvenlik gerekçesiyle **reddedilmiştir**; tembel nesil birleştirme yalnızca Faz 3 `PCID` bağlam değişimlerinde ve çerçeveler `PendingReclaim` kuyruğunda tutulduğu sürece uygulanabilir.
+
+### H.4. 10 Negatif `CSpace` & `ADR-007` Arıza Testi ve Geliştirme Sırasında Çözülen Gerçek Bulgular
+
+- **10 Negatif `cspace_*` Senaryosu (`-smp 2`, tamamı `exit=35` ile deterministik yakalandı, `0` gizlenen hata):**
+  1. `cspace_forged_handle`: Sahte `guard` (`0x33 != 0x5a`) ile `CapPtr` kullanımında `[DRY-CSPACE-FAIL] Forged capability handle rejected` (`1.569 s`).
+  2. `cspace_stale_aba`: Silinip aynı `slot_idx` üzerinde yeni çerçeveye tahsis edilen yuvaya eski `CapPtr` (`slot_gen` uyuşmazlığı) ile erişimde `[DRY-CSPACE-FAIL] Stale generation / ABA capability access rejected` (`1.573 s`).
+  3. `cspace_rights_amp`: `RO` türetilmiş yetkiyle `RW` türetme (`Err(RightsAmplification)`) ve `USER_RW` eşleme denemesinde `[DRY-CSPACE-FAIL] Rights amplification rejected` (`1.598 s`).
+  4. `cspace_cross_domain`: `Userspace` öznesinin özel `RootSystem` nesnesine erişiminde `[DRY-CSPACE-FAIL] Cross-domain unauthorized access rejected` (`1.647 s`).
+  5. `cspace_concurrent_revoke`: `CPU 0` `cspace_revoke_children` yürütürken `CPU 1`'de eşzamanlı `cspace_lookup_fast` yarışında `[DRY-CSPACE-FAIL] Concurrent lookup on revoked capability rejected` (`1.728 s`).
+  6. `cspace_stale_mapping_after_revoke`: Uzak CPU TLB'si ısıtıldıktan sonra `revoke` -> otomatik `unmap` + SMP shootdown sonrası `0x700000` okumasında gerçek donanım `#PF` (`vec=14, err=0x0, cr2=0x700000`, `1.618 s`).
+  7. `cspace_parent_child_lifetime`: `CSpace A -> CSpace B` aktarılmış yetkiden türetilen torun (`grandchild`) yetkinin, ata iptal edildiğinde geçersizleşmesi (`rev_cnt=3`, `1.639 s`).
+  8. `cspace_transfer_escalation`: `CapRights::GRANT` olmayan yetkiyle kompartmanlar arası `cspace_transfer` denemesinde `[DRY-CSPACE-FAIL] Capability transfer privilege escalation rejected` (`1.634 s`).
+  9. `cspace_double_destroy_revoke`: Yıkılmış nesne üzerinde ikinci `cspace_destroy_object` çağrısında `[DRY-CSPACE-FAIL] Double destroy / double revoke detected` (`1.599 s`).
+  10. `cspace_premature_active_reclaim`: AP 1 üzerinde aktif çalışan `TCB` için `cspace_destroy_object` çağrısında `[DRY-CSPACE-FAIL] Premature reclamation of active TCB/Frame blocked` (`1.613 s`).
+- **Geliştirme Sırasında Yakalanıp Çözülen Gerçek Bulgular:**
+  1. **`READ_ONLY_EXPORT` Donanım Sınırı (`pmm/huge_reclaim.rs`, `vspace/mod.rs`):** İlk `1-vCPU` koşusunda `RootSystem` `READ_ONLY_EXPORT` kütüphane çerçevesinin `Userspace` `VSpace` içine `USER_RX` eşlenmesi `PMM` sahiplik denetiminde takıldı; `PMM` ve `protect_4k` sınırları yalnızca `!writable && owner == RootSystem(READ_ONLY_EXPORT) && target != Kernel` geçişine izin verecek, her türlü `RW` eşleme/yükseltmeyi donanım katmanında da reddedecek şekilde sıkılaştırıldı.
+  2. **`DEV_WORKSPACE` Kiralama Yetkilendirmesi ve Tekil Kaynak (`security.rs`):** `cspace/mod.rs` içindeki mükerrer alan kontrolü kaldırılıp tüm kiralama (`lease_epoch > 0 && !NO_DELEGATE`) kuralları tek `authorize_cspace_fast` fonksiyonunda birleştirildi.
+  3. **`20-vCPU` Alt-Küme Testinde Zamanlayıcı İş-Çalma Göçü (`vspace/tlb_debt.rs`) ve Aşırı-Abonelik Epoch Bütçesi (`sched/preempt_tests.rs`):** Preemptive zamanlayıcının `vs_other` işçisini göç ettirip aynı çekirdeğe `vs_target` işçisini alması nedeniyle oluşan meşru IPI'lar `preempt_disable` ile izole edilerek saf alt-küme hedeflemesi (`non_member_ipis = 0`) kanıtlandı; ayrıca `online_cpus > 8` (`2.5x` konak aşırı-aboneliği) altında 500+ senkron shootdown içeren stres epoch'ları için `PREEMPT_TIMEOUT_TSC` / `EPOCH_WATCHDOG_TSC` `3x` ölçeklenirken `smp <= 8` negatif test süreleri (`3.85 s`) korundu.
+  4. **Negatif Test Kurulumunda `W^X` Yakalaması (`cspace/fault_tests.rs`):** İlk tam paket koşusunda `cspace_stale_aba` testinin `executable=false` çerçeveden `FRAME_SHARED_RO` (`EXEC` bitli) türetmeye çalışması bizzat yeni `W^X` türetme kalkanı tarafından `Err(RightsAmplification)` ile yakalandı; test kurulumu `READ | MAP` maskesine çekilerek `46/46` senaryonun tamamı doğrulandı.

@@ -6,6 +6,7 @@
 
 mod apic;
 mod arch;
+mod cspace;
 mod gdt_tss;
 mod idt;
 mod limine;
@@ -225,18 +226,22 @@ extern "C" fn bsp_kmain() -> ! {
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        if cmdline.contains("cspace_fault=") {
+            cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        }
         vspace::tests::verify_vspace_and_tlb(
             &vspace_summary,
             smp.cpu_count,
             apic_cal.tsc_mhz,
             cmdline,
         );
+        cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
     }
     sched::shutdown_ap_scheduler_service();
 
     if !irq_only_stage {
         serial_println!(
-            "[DRY-BOOT-OK] Milestone 1B-B UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace & TLB coherence verified cleanly.",
+            "[DRY-BOOT-OK] Milestone 1B-C UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace & ADR-007 verified cleanly.",
             smp.cpu_count
         );
     }

@@ -275,6 +275,7 @@ fn spawn_preemptible_with_assist(
 ) -> ThreadId {
     let start = rdtsc();
     let online = crate::sched::ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
+    let timeout_tsc = if online > 8 { PREEMPT_TIMEOUT_TSC * 3 } else { PREEMPT_TIMEOUT_TSC };
     let bsp_pcpu = get_percpu_by_idx(0);
     loop {
         if let Some(tid) = try_spawn_kernel_thread_ex(prio, target_cpu, entry, arg, true) {
@@ -289,7 +290,7 @@ fn spawn_preemptible_with_assist(
             let _ = idle_dispatch_once(0);
             stop_cpu_timer_for_phase(bsp_pcpu);
         }
-        if rdtsc().wrapping_sub(start) >= PREEMPT_TIMEOUT_TSC {
+        if rdtsc().wrapping_sub(start) >= timeout_tsc {
             preempt_invariant_panic(format_args!(
                 "Timed out waiting for Dead worker slot reclamation during preemptive spawn"
             ));
@@ -300,6 +301,7 @@ fn spawn_preemptible_with_assist(
 
 pub(crate) fn drain_preemptive_epoch_and_audit(online_cpus: usize) {
     let start = rdtsc();
+    let timeout_tsc = if online_cpus > 8 { PREEMPT_TIMEOUT_TSC * 3 } else { PREEMPT_TIMEOUT_TSC };
     let bsp_pcpu = get_percpu_by_idx(0);
     start_cpu_timer_for_phase(bsp_pcpu);
     sti();
@@ -307,7 +309,7 @@ pub(crate) fn drain_preemptive_epoch_and_audit(online_cpus: usize) {
         if !idle_dispatch_once(0) {
             core::hint::spin_loop();
         }
-        if rdtsc().wrapping_sub(start) >= PREEMPT_TIMEOUT_TSC {
+        if rdtsc().wrapping_sub(start) >= timeout_tsc {
             stop_cpu_timer_for_phase(bsp_pcpu);
             preempt_invariant_panic(format_args!(
                 "Preemptive phase timeout: pending_threads={} preemptions={} timer_irqs={}",
@@ -323,7 +325,7 @@ pub(crate) fn drain_preemptive_epoch_and_audit(online_cpus: usize) {
     let ap_target = online_cpus - 1;
     while AP_PHASE_DONE_CPUS.load(Ordering::Acquire) < ap_target {
         assert!(
-            rdtsc().wrapping_sub(start) < PREEMPT_TIMEOUT_TSC,
+            rdtsc().wrapping_sub(start) < timeout_tsc,
             "Timed out waiting for AP preemptive idle convergence"
         );
         core::hint::spin_loop();

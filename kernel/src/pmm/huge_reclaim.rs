@@ -11,7 +11,7 @@ use crate::pmm::meta::{
     LOW_MEM_GUARD_END_PFN, NO_CPU_OWNER, PAGE_SHIFT, PFN_NONE, PMM_META,
 };
 use crate::pmm::{lock_global_pool_with_cli, record_zero_accounting};
-use crate::security::{SecDomain, SecLabel};
+use crate::security::{SecDomain, SecFlags, SecLabel};
 
 /// Allocate one 2 MiB-aligned contiguous block (`512` x 4 KiB frames) bound to `label`.
 pub(crate) fn alloc_order_2m(label: SecLabel, flags: AllocFlags) -> Result<FrameHandle, PmmError> {
@@ -307,6 +307,7 @@ pub(crate) fn map_ref_inc_data_frame(
     handle: FrameHandle,
     order: PageOrder,
     expected_owner: SecLabel,
+    writable: bool,
 ) {
     let count = order.frame_count();
     for off in 0..count {
@@ -318,9 +319,13 @@ pub(crate) fn map_ref_inc_data_frame(
             ));
         };
         let owner = unpack_seclabel(meta.word1.load(Ordering::Acquire));
-        if owner.domain != expected_owner.domain
-            || owner.compartment_id != expected_owner.compartment_id
-        {
+        let same_owner = owner.domain == expected_owner.domain
+            && owner.compartment_id == expected_owner.compartment_id;
+        let ro_system_export = !writable
+            && owner.domain == SecDomain::RootSystem
+            && owner.flags.contains(SecFlags::READ_ONLY_EXPORT)
+            && expected_owner.domain != SecDomain::Kernel;
+        if !same_owner && !ro_system_export {
             pmm_invariant_panic(format_args!(
                 "Frame ownership / domain / pin violation: map pfn={:#x} owner=({:?},{}) expected=({:?},{})",
                 pfn, owner.domain, owner.compartment_id, expected_owner.domain, expected_owner.compartment_id

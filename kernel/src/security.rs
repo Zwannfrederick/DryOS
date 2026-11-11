@@ -70,7 +70,7 @@ impl SecLabel {
     }
 }
 
-/// Capability operation rights bitmask (`ADR-002` & `ADR-007`).
+/// Capability operation rights bitmask (`ADR-002`, `ADR-003` & `ADR-007`).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapRights(pub u16);
@@ -83,11 +83,146 @@ impl CapRights {
     pub const GRANT: Self = Self(1 << 3);
     pub const SIGNAL: Self = Self(1 << 4);
     pub const RETYPE: Self = Self(1 << 5);
+    pub const MAP: Self = Self(1 << 6);
+    pub const MANAGE: Self = Self(1 << 7);
+    pub const REVOKE: Self = Self(1 << 8);
 
-    #[inline]
+    pub const FRAME_DATA_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const FRAME_CODE_ROOT: Self = Self(
+        Self::READ.0 | Self::EXEC.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const FRAME_SHARED_RO: Self = Self(Self::READ.0 | Self::EXEC.0 | Self::MAP.0);
+    pub const VSPACE_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const TCB_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::SIGNAL.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const UNTYPED_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::RETYPE.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const CNODE_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+
+    #[inline(always)]
     pub const fn contains(self, rhs: Self) -> bool {
         (self.0 & rhs.0) == rhs.0
     }
+}
+
+/// Encode per-user (`user_ns`) and per-application (`app_id`) isolation into `SecLabel.compartment_id` (`Stage C.6`).
+#[inline(always)]
+pub const fn encode_compartment(user_ns: u8, app_id: u8) -> u16 {
+    ((user_ns as u16) << 8) | (app_id as u16)
+}
+
+#[inline(always)]
+pub const fn decode_compartment(compartment_id: u16) -> (u8, u8) {
+    (((compartment_id >> 8) & 0xff) as u8, (compartment_id & 0xff) as u8)
+}
+
+#[inline(always)]
+pub const fn pack_seclabel_u64(label: SecLabel) -> u64 {
+    (label.domain as u64)
+        | ((label.flags.0 as u64) << 8)
+        | ((label.compartment_id as u64) << 16)
+        | ((label.policy_tag as u64) << 32)
+}
+
+#[inline(always)]
+pub const fn unpack_seclabel_u64(raw: u64) -> SecLabel {
+    let domain = match (raw & 0xff) as u8 {
+        0 => SecDomain::Kernel,
+        1 => SecDomain::RootSystem,
+        _ => SecDomain::Userspace,
+    };
+    SecLabel::new(
+        domain,
+        SecFlags(((raw >> 8) & 0xff) as u8),
+        ((raw >> 16) & 0xffff) as u16,
+        (raw >> 32) as u32,
+    )
+}
+
+static GLOBAL_LEASE_EPOCH: AtomicU32 = AtomicU32::new(1);
+
+#[inline(always)]
+pub fn current_lease_epoch() -> u32 {
+    GLOBAL_LEASE_EPOCH.load(Ordering::Acquire)
+}
+
+pub fn set_lease_epoch(epoch: u32) {
+    GLOBAL_LEASE_EPOCH.store(epoch.max(1), Ordering::Release);
+}
+
+/// Register-only fast-path `ADR-007` + `CapRights` + `DRY Vault` lease evaluator (`INV-SEC-01..04, 07, 08`).
+#[inline(always)]
+pub fn authorize_cspace_fast(
+    subject_label: SecLabel,
+    obj_label: SecLabel,
+    cap_rights: CapRights,
+    requested: CapRights,
+    lease_epoch: u32,
+    now_epoch: u32,
+) -> Result<(), SecError> {
+    if requested.0 == 0 || !cap_rights.contains(requested) {
+        return Err(SecError::PermCap);
+    }
+    if requested.contains(CapRights::WRITE) && requested.contains(CapRights::EXEC) {
+        return Err(SecError::Inval);
+    }
+    if lease_epoch != 0 && now_epoch > lease_epoch {
+        return Err(SecError::Revoked);
+    }
+
+    // ADR-007 Rules 2 & 8 (`INV-SEC-01`): `KERNEL` objects are managed exclusively by `SecDomain::Kernel`.
+    if obj_label.domain == SecDomain::Kernel && subject_label.domain != SecDomain::Kernel {
+        return Err(SecError::PermCap);
+    }
+
+    // INV-SEC-03: Controlled read-only shared objects never permit `WRITE`, `RETYPE`, or `MANAGE` mutation.
+    if obj_label.flags.contains(SecFlags::READ_ONLY_EXPORT)
+        && (requested.0 & (CapRights::WRITE.0 | CapRights::RETYPE.0)) != 0
+    {
+        return Err(SecError::PermCap);
+    }
+
+    match subject_label.domain {
+        SecDomain::Userspace => match obj_label.domain {
+            SecDomain::Kernel => return Err(SecError::PermCap),
+            SecDomain::RootSystem => {
+                let allowed_ro = CapRights::READ.0 | CapRights::EXEC.0 | CapRights::MAP.0;
+                if !obj_label.flags.contains(SecFlags::READ_ONLY_EXPORT)
+                    || (requested.0 & !allowed_ro) != 0
+                {
+                    return Err(SecError::PermCap);
+                }
+            }
+            SecDomain::Userspace => {
+                if subject_label.compartment_id != obj_label.compartment_id
+                    && obj_label.flags.contains(SecFlags::NO_DELEGATE)
+                {
+                    return Err(SecError::PermCap);
+                }
+            }
+        },
+        SecDomain::RootSystem => {
+            if subject_label.flags.contains(SecFlags::DEV_WORKSPACE)
+                && subject_label.compartment_id != obj_label.compartment_id
+                && obj_label.domain == SecDomain::RootSystem
+                && !obj_label.flags.contains(SecFlags::READ_ONLY_EXPORT)
+                && (lease_epoch == 0 || obj_label.flags.contains(SecFlags::NO_DELEGATE))
+            {
+                return Err(SecError::PermCap);
+            }
+        }
+        SecDomain::Kernel => {}
+    }
+
+    Ok(())
 }
 
 /// Common header embedded at offset 0 of every kernel object (`TCB`, `VSpace`, `Endpoint`, `Frame`).
@@ -193,6 +328,7 @@ pub fn authorize_object_access(
         && subject_label.compartment_id != obj.label.compartment_id
         && obj.label.domain == SecDomain::RootSystem
         && !obj.label.flags.contains(SecFlags::READ_ONLY_EXPORT)
+        && (cap.lease_epoch == 0 || obj.label.flags.contains(SecFlags::NO_DELEGATE))
     {
         // ADR-007 Rule 6 & 12: Scoped Developer Workspace cannot mutate outside its compartment
         // (e.g., cannot read/write DRY Vault private state).

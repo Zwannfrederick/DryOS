@@ -14,6 +14,7 @@ import time
 from qemu_log_validators import (
     expected_sched_metrics,
     verify_apic_and_irq_lines,
+    verify_cspace_and_tlb_debt_lines,
     verify_pmm_and_untyped_lines,
     verify_preempt_line,
     verify_sched_line,
@@ -245,7 +246,7 @@ def assert_positive_smp_boot(
     spawned, park_rounds, work_units = expected_sched_metrics(smp)
     img_path = BUILD_DIR / f"esp_{name}.img"
     write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=40)
+    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=60 if smp > 8 else 40)
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
@@ -279,7 +280,11 @@ def assert_positive_smp_boot(
                 "[DRY-HUGEPAGE] PASS:",
                 f"[DRY-VSPACE-BENCH] PASS: cpus={smp}",
                 f"[DRY-VSPACE-SMP] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1B-B UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace & TLB coherence verified cleanly.",
+                f"[DRY-TLB-DEBT] PASS: cpus={smp}",
+                f"[DRY-CSPACE] PASS: cpus={smp}",
+                f"[DRY-CSPACE-BENCH] PASS: cpus={smp}",
+                f"[DRY-CSPACE-SMP] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1B-C UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace & ADR-007 verified cleanly.",
             ]
         )
     must_not_contain = [
@@ -291,6 +296,7 @@ def assert_positive_smp_boot(
         "[DRY-PMM-FAIL]",
         "[DRY-VSPACE-FAIL]",
         "[DRY-TLB-FAIL]",
+        "[DRY-CSPACE-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -312,8 +318,9 @@ def assert_positive_smp_boot(
         verify_preempt_line(name, serial_out, smp)
         verify_pmm_and_untyped_lines(name, serial_out, smp)
         verify_vspace_lines(name, serial_out, smp)
+        verify_cspace_and_tlb_debt_lines(name, serial_out, smp)
     print(
-        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace invariants verified in {elapsed:.3f}s)."
+        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace invariants verified in {elapsed:.3f}s)."
     )
 
 
@@ -341,10 +348,11 @@ def main() -> None:
         )
         return
 
-    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E..1B-B): 1 -> 2 -> 4 -> 20 vCPUs.
+    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E..1B-C): 1 -> 2 -> 4 -> 8 -> 20 vCPUs.
     assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1)
     assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2)
     assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4)
+    assert_positive_smp_boot("boot_8cpu_ok", kernel_elf, smp=8)
     assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20)
 
     # Explicit hardware fallback verification: force xAPIC MMIO fallback (`0xFEE0_0000` UC via HHDM) on 2 vCPUs.
@@ -587,7 +595,77 @@ def main() -> None:
             must_not_contain=["[DRY-BOOT-OK]"],
         )
 
-    print("\n[QEMU-TEST] ALL 35 MILESTONE 1B-B SMP, H1 SCHEDULER, PMM, VSPACE & TLB COHERENCE CHECKS PASSED.")
+    # Milestone 1B-C Negative CSpace, Capability Lifecycle & ADR-007 Security Fault Tests (exit=35).
+    cspace_negative_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "cspace_forged_handle",
+            "forged_handle",
+            ["[DRY-CSPACE-FAIL] Forged capability handle rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_stale_aba",
+            "stale_aba",
+            ["[DRY-CSPACE-FAIL] Stale generation / ABA capability access rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_rights_amp",
+            "rights_amp",
+            ["[DRY-CSPACE-FAIL] Rights amplification rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_cross_domain",
+            "cross_domain",
+            ["[DRY-CSPACE-FAIL] Cross-domain unauthorized access rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_concurrent_revoke",
+            "concurrent_revoke",
+            ["[DRY-CSPACE-FAIL] Concurrent lookup on revoked capability rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_stale_mapping_after_revoke",
+            "stale_mapping",
+            [
+                "[DRY-CSPACE-INFO] Testing post-revoke stale VSpace mapping hardware #PF",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cr2=0x700000",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "cspace_parent_child_lifetime",
+            "parent_child_lifetime",
+            ["[DRY-CSPACE-FAIL] Parent-child capability lifetime violation rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_transfer_escalation",
+            "transfer_escalation",
+            ["[DRY-CSPACE-FAIL] Capability transfer privilege escalation rejected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_double_destroy_revoke",
+            "double_destroy",
+            ["[DRY-CSPACE-FAIL] Double destroy / double revoke detected", "[DRY-PANIC]"],
+        ),
+        (
+            "cspace_premature_active_reclaim",
+            "active_reclaim",
+            ["[DRY-CSPACE-FAIL] Premature reclamation of active TCB/Frame blocked", "[DRY-PANIC]"],
+        ),
+    ]
+    for case_name, fault_arg, expected_tokens in cspace_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 cspace_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=expected_tokens,
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
+
+    print("\n[QEMU-TEST] ALL 46 MILESTONE 1B-C SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE & ADR-007 CHECKS PASSED.")
 
 
 if __name__ == "__main__":

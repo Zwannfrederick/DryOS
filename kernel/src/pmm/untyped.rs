@@ -8,7 +8,7 @@
 //! - Intentionally omits a full `CSpace` radix capability table (scheduled for `Milestone 1B-C`).
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::arch::{irq_restore, irq_save_cli};
 use crate::pmm::meta::{
@@ -105,6 +105,17 @@ static UNTYPED_TABLE: UntypedTable = UntypedTable {
     locked: AtomicBool::new(false),
     slots: UnsafeCell::new([EMPTY_UNTYPED; MAX_UNTYPED_REGIONS]),
 };
+static UNTYPED_LIVE_GEN: [AtomicU32; MAX_UNTYPED_REGIONS] =
+    [const { AtomicU32::new(0) }; MAX_UNTYPED_REGIONS];
+
+/// Lock-free active generation query (`0` = inactive, `>= 1` = active generation) for `CSpace` fast-path.
+#[inline(always)]
+pub fn inspect_untyped_live_gen(idx: u16) -> u32 {
+    if (idx as usize) >= MAX_UNTYPED_REGIONS {
+        return 0;
+    }
+    UNTYPED_LIVE_GEN[idx as usize].load(Ordering::Acquire)
+}
 
 #[inline]
 fn with_untyped_table<R>(f: impl FnOnce(&mut [UntypedRegion; MAX_UNTYPED_REGIONS]) -> R) -> R {
@@ -144,6 +155,7 @@ fn alloc_free_region_slot(
             slot.header.generation.store(next_gen, Ordering::Release);
             slot.header.iommu_pin_count.store(0, Ordering::Release);
             slot.header.map_ref_count.store(0, Ordering::Release);
+            UNTYPED_LIVE_GEN[idx].store(next_gen, Ordering::Release);
             return Some((idx as u16, next_gen));
         }
     }
@@ -228,6 +240,7 @@ pub fn untyped_split(
             alloc_free_region_slot(slots, child_label, base1, half, parent_cap.slot_idx)
         else {
             slots[c0_idx as usize].active = false;
+            UNTYPED_LIVE_GEN[c0_idx as usize].store(0, Ordering::Release);
             return Err(SecError::Inval);
         };
         slots[idx].has_children = true;
@@ -418,6 +431,7 @@ pub fn untyped_revoke(
                 slots[idx].active = false;
                 slots[idx].has_children = false;
                 slots[idx].watermark_bytes = 0;
+                UNTYPED_LIVE_GEN[idx].store(0, Ordering::Release);
                 reclaimed_items += 1;
             }
         }
@@ -487,6 +501,7 @@ pub fn release_untyped_to_pmm(
             .generation
             .store(next_generation(g), Ordering::Release);
         slots[idx].active = false;
+        UNTYPED_LIVE_GEN[idx].store(0, Ordering::Release);
         Ok((slots[idx].base_pfn, slots[idx].frame_count as usize, slots[idx].header.label))
     })?;
 

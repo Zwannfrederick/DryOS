@@ -15,10 +15,10 @@ pub(crate) use huge_reclaim::{
 };
 
 pub use meta::{
-    bootstrap_alloc_pages, bootstrap_state, inventory, phys_to_hhdm, pmm_invariant_panic,
-    query_frame_state, zero_frame_4k, AllocFlags, BootstrapState, FrameHandle, FrameState,
-    PageOrder, PmmError, PmmInventory, ZeroState, HUGE_2M_FRAMES, LAPIC_MMIO_PHYS_BASE,
-    LOW_MEM_GUARD_END_PFN, PAGE_SHIFT, PAGE_SIZE,
+    adjust_frame_iommu_pin, bootstrap_alloc_pages, bootstrap_state, inspect_frame_live, inventory,
+    phys_to_hhdm, pmm_invariant_panic, query_frame_state, zero_frame_4k, AllocFlags,
+    BootstrapState, FrameHandle, FrameState, PageOrder, PmmError, PmmInventory, ZeroState,
+    HUGE_2M_FRAMES, LAPIC_MMIO_PHYS_BASE, LOW_MEM_GUARD_END_PFN, PAGE_SHIFT, PAGE_SIZE,
 };
 
 use core::cell::UnsafeCell;

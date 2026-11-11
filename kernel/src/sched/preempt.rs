@@ -213,7 +213,12 @@ pub fn on_lapic_timer_irq(frame: &mut TrapFrame) {
 
     if cpu_idx == 0 {
         let ep_start = EPOCH_START_TSC.load(Ordering::Relaxed);
-        if ep_start != 0 && rdtsc().wrapping_sub(ep_start) >= EPOCH_WATCHDOG_TSC {
+        let wd_limit = if ONLINE_SCHED_CPUS.load(Ordering::Relaxed) > 8 {
+            EPOCH_WATCHDOG_TSC * 3
+        } else {
+            EPOCH_WATCHDOG_TSC
+        };
+        if ep_start != 0 && rdtsc().wrapping_sub(ep_start) >= wd_limit {
             crate::enter_fatal_or_halt();
             crate::serial::emergency_print(format_args!(
                 "\r\n[DRY-PREEMPT-WATCHDOG] substage=G{} pending={} preempts={} irqs={} cpu0_slot={}\r\n",

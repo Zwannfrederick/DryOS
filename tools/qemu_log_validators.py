@@ -227,3 +227,93 @@ def verify_vspace_lines(name: str, serial_out: str, smp: int) -> None:
         raise RuntimeError(f"[{name}] VSpace SMP stress invariant mismatch: {smp_lines[0]!r}")
     if smp >= 2 and vs_kv.get("shootdowns", 0) < 16:
         raise RuntimeError(f"[{name}] Expected shootdowns >= 16 on smp={smp}: {smp_lines[0]!r}")
+    if vs_kv.get("ipis_handled", 0) + vs_kv.get("coop_acks", 0) != vs_kv.get("ipis_sent", -1):
+        raise RuntimeError(
+            f"[{name}] TLB counter partition mismatch (ipis_handled + coop_acks != ipis_sent): {smp_lines[0]!r}"
+        )
+
+
+def verify_cspace_and_tlb_debt_lines(name: str, serial_out: str, smp: int) -> None:
+    cs_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-CSPACE] PASS:" in ln]
+    if len(cs_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-CSPACE] PASS line, got {len(cs_lines)}")
+    cs_kv = _parse_kv_ints(cs_lines[0])
+    for flag in (
+        "cspaces_ok=true",
+        "radix_ready_capptr=true",
+        "objects_bound_ok=true",
+        "transfer_ipc_ok=true",
+        "revoke_unmap_ok=true",
+        "sec_domains_ok=true",
+        "ro_export_ok=true",
+        "vault_lease_ok=true",
+    ):
+        if flag not in cs_lines[0]:
+            raise RuntimeError(f"[{name}] Missing {flag} in {cs_lines[0]!r}")
+    if cs_kv.get("cpus") != smp or cs_kv.get("leaked_frames", 1) != 0:
+        raise RuntimeError(f"[{name}] CSpace header/leak mismatch: {cs_lines[0]!r}")
+
+    cb_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-CSPACE-BENCH] PASS:" in ln]
+    if len(cb_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-CSPACE-BENCH] PASS line, got {len(cb_lines)}")
+    cb_kv = _parse_kv_ints(cb_lines[0])
+    if (
+        cb_kv.get("cpus") != smp
+        or cb_kv.get("samples", 0) < 512
+        or cb_kv.get("bytes_per_slot") != 64
+        or cb_kv.get("cnode_slots") != 256
+    ):
+        raise RuntimeError(f"[{name}] Invalid CSpace bench metadata: {cb_lines[0]!r}")
+    for metric in ("lookup", "sec", "derive", "mint", "revoke1"):
+        p50 = cb_kv.get(f"{metric}_p50_cyc", 0)
+        p99 = cb_kv.get(f"{metric}_p99_cyc", 0)
+        if p50 == 0 or p99 < p50:
+            raise RuntimeError(f"[{name}] Invalid {metric} latency percentiles: {cb_lines[0]!r}")
+    if not (
+        0 < cb_kv.get("revoke_1_cyc", 0)
+        < cb_kv.get("revoke_8_cyc", 0)
+        < cb_kv.get("revoke_64_cyc", 0)
+    ):
+        raise RuntimeError(f"[{name}] Expected monotonic O(k) revoke child scaling: {cb_lines[0]!r}")
+    if cb_kv.get("contend_lookup_p50_cyc", 0) == 0 or cb_kv.get("contend_mops_x100", 0) == 0:
+        raise RuntimeError(f"[{name}] Missing per-CPU CSpace contention metrics: {cb_lines[0]!r}")
+
+    csmp_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-CSPACE-SMP] PASS:" in ln]
+    if len(csmp_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-CSPACE-SMP] PASS line, got {len(csmp_lines)}")
+    csmp_kv = _parse_kv_ints(csmp_lines[0])
+    if (
+        csmp_kv.get("cpus") != smp
+        or csmp_kv.get("workers", 0) < 4
+        or csmp_kv.get("lookups", 0) < 512
+        or csmp_kv.get("derives", 0) < 64
+        or csmp_kv.get("transfers", 0) < 32
+        or csmp_kv.get("maps", 0) < 32
+        or csmp_kv.get("revokes", 0) < 32
+        or csmp_kv.get("stale_rejected", 0) < 32
+        or csmp_kv.get("uaf_errors", 1) != 0
+        or csmp_kv.get("leaked_frames", 1) != 0
+    ):
+        raise RuntimeError(f"[{name}] CSpace SMP stress invariant mismatch: {csmp_lines[0]!r}")
+
+    td_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-TLB-DEBT] PASS:" in ln]
+    if len(td_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-TLB-DEBT] PASS line, got {len(td_lines)}")
+    td_kv = _parse_kv_ints(td_lines[0])
+    for flag in ("subset_target_only_ok=true", "counter_partition_exact=true"):
+        if flag not in td_lines[0]:
+            raise RuntimeError(f"[{name}] Missing {flag} in {td_lines[0]!r}")
+    if td_kv.get("cpus") != smp or td_kv.get("non_member_ipis", 1) != 0:
+        raise RuntimeError(f"[{name}] TLB debt target isolation mismatch: {td_lines[0]!r}")
+    if td_kv.get("flush_exec_p50_cyc", 0) == 0:
+        raise RuntimeError(f"[{name}] Missing flush_exec_p50_cyc in {td_lines[0]!r}")
+    if smp >= 2:
+        if (
+            td_kv.get("ipi_send_p50_cyc", 0) == 0
+            or td_kv.get("remote_sched_p50_cyc", 0) == 0
+            or td_kv.get("ack_wait_p50_cyc", 0) == 0
+            or td_kv.get("unmap16_batched_cyc", 0) == 0
+            or td_kv.get("unmap16_unbatched_cyc", 0) <= td_kv.get("unmap16_batched_cyc", 0)
+        ):
+            raise RuntimeError(f"[{name}] Invalid SMP TLB debt breakdown/batching metrics: {td_lines[0]!r}")
+

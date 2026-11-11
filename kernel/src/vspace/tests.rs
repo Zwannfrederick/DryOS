@@ -710,4 +710,5 @@ pub fn verify_vspace_and_tlb(
     verify_hugepage_2m_substage(online_cpus);
     measure_vspace_and_shootdown_benchmarks(online_cpus);
     run_smp_concurrent_vspace_stress(online_cpus);
+    crate::vspace::tlb_debt::verify_tlb_debt_and_oversubscription(online_cpus);
 }

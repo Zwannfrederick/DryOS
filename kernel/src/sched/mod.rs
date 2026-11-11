@@ -40,11 +40,15 @@ use crate::sched::state::{
     preempt_invariant_panic, sched_invariant_panic, CommitParkOutcome, ExecState, Notification,
     TaskSchedState, ThreadId, WakeOutcome, GEN_MAX, NO_CPU,
 };
+use crate::security::{pack_seclabel_u64, SecDomain, SecFlags, SecLabel};
 use crate::vspace::{switch_cpu_vspace_if_needed, VSpaceId, KERNEL_VSPACE_ID};
 
 pub const THREAD_STACK_BYTES: usize = 16 * 1024;
 pub const WORKER_POOL_CAP: usize = 36;
 pub const TOTAL_TCB_SLOTS: usize = MAX_CPUS + WORKER_POOL_CAP;
+pub const KERNEL_NO_CSPACE: u16 = u16::MAX;
+const KERNEL_THREAD_LABEL_RAW: u64 =
+    pack_seclabel_u64(SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0));
 
 const WORKER_CANARY_MAGIC: u64 = 0x4452_595f_5448_5354; // "DRY_THST"
 
@@ -92,6 +96,8 @@ pub struct KernelTcb {
     pub progress_seq: AtomicU64,
     pub preempted_count: AtomicU64,
     pub vspace_id: AtomicU16,
+    pub cspace_id: AtomicU16,
+    pub subj_label_raw: AtomicU64,
     pub slot_free: AtomicBool,
     pub notif: Notification,
 }
@@ -112,6 +118,8 @@ impl KernelTcb {
             progress_seq: AtomicU64::new(0),
             preempted_count: AtomicU64::new(0),
             vspace_id: AtomicU16::new(KERNEL_VSPACE_ID),
+            cspace_id: AtomicU16::new(KERNEL_NO_CSPACE),
+            subj_label_raw: AtomicU64::new(KERNEL_THREAD_LABEL_RAW),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
         }
@@ -224,6 +232,9 @@ pub fn init_scheduler(online_cpus: usize) {
         idle.prio.store(3, Ordering::Release);
         idle.last_cpu.store(cpu, Ordering::Release);
         idle.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
+        idle.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
+        idle.subj_label_raw
+            .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         idle.slot_free.store(false, Ordering::Release);
         idle.sched.init_idle_running(cpu);
     }
@@ -248,9 +259,24 @@ pub fn init_scheduler(online_cpus: usize) {
         w.progress_seq.store(0, Ordering::Release);
         w.preempted_count.store(0, Ordering::Release);
         w.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
+        w.cspace_id.store(KERNEL_NO_CSPACE, Ordering::Release);
+        w.subj_label_raw
+            .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
     }
+}
+
+/// Inspect `(ExecState, gen26, stack_owner_active)` for `CSpace` `TCB` lifecycle & active-reclaim gates.
+#[inline(always)]
+pub fn inspect_tcb_live(slot: usize) -> Option<(ExecState, u32, bool)> {
+    if slot >= TOTAL_TCB_SLOTS {
+        return None;
+    }
+    let w = tcb(slot);
+    let (state, _, gen26) = w.sched.snapshot();
+    let stack_active = w.sched.stack_owner() != NO_CPU;
+    Some((state, gen26, stack_active))
 }
 
 pub fn try_spawn_kernel_thread(
@@ -280,6 +306,30 @@ pub fn try_spawn_thread_in_vspace(
     prio: usize,
     target_cpu: usize,
     vspace_id: VSpaceId,
+    entry: KernelThreadFn,
+    arg: u64,
+    preemptible: bool,
+) -> Option<ThreadId> {
+    try_spawn_thread_bound(
+        prio,
+        target_cpu,
+        vspace_id,
+        KERNEL_NO_CSPACE,
+        SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0),
+        entry,
+        arg,
+        preemptible,
+    )
+}
+
+/// Spawn a worker `TCB` explicitly bound to `(vspace_id, cspace_id, subj_label)` (`Stage A.7`).
+#[allow(clippy::too_many_arguments)]
+pub fn try_spawn_thread_bound(
+    prio: usize,
+    target_cpu: usize,
+    vspace_id: VSpaceId,
+    cspace_id: u16,
+    subj_label: SecLabel,
     entry: KernelThreadFn,
     arg: u64,
     preemptible: bool,
@@ -315,6 +365,9 @@ pub fn try_spawn_thread_in_vspace(
         w.progress_seq.store(0, Ordering::Release);
         w.preempted_count.store(0, Ordering::Release);
         w.vspace_id.store(vspace_id, Ordering::Release);
+        w.cspace_id.store(cspace_id, Ordering::Release);
+        w.subj_label_raw
+            .store(pack_seclabel_u64(subj_label), Ordering::Release);
         w.notif.reset();
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
