@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "experiments/h1-sched",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR GPL-2.0-only"
+
