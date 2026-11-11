@@ -11,6 +11,15 @@ import subprocess
 import sys
 import time
 
+from qemu_log_validators import (
+    expected_sched_metrics,
+    verify_apic_and_irq_lines,
+    verify_pmm_and_untyped_lines,
+    verify_preempt_line,
+    verify_sched_line,
+    verify_vspace_lines,
+)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
 BUILD_DIR = KERNEL_DIR / "build"
@@ -223,174 +232,6 @@ def assert_boot_case(
     print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions verified in {elapsed:.3f}s).")
 
 
-def expected_sched_metrics(smp: int) -> tuple[int, int, int]:
-    n_yield = max(8, min(24, smp * 2))
-    n_pairs = max(4, min(12, smp))
-    n_recycle = 48
-    total_spawned = n_yield + (2 * n_pairs) + n_recycle
-    park_rounds = n_pairs * 32
-    work_units = (n_yield * 32) + (n_pairs * 64) + (n_recycle * 8)
-    return total_spawned, park_rounds, work_units
-
-
-def verify_sched_line(name: str, serial_out: str, smp: int) -> None:
-    sched_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-SCHED] PASS:" in ln]
-    if len(sched_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected exactly 1 [DRY-SCHED] PASS line, got {len(sched_lines)}")
-    fields: dict[str, int] = {}
-    for tok in sched_lines[0].split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            if v.isdigit():
-                fields[k] = int(v)
-    if fields.get("recycled_slots", 0) < 28:
-        raise RuntimeError(f"[{name}] Expected recycled_slots >= 28, got {fields}")
-    if fields.get("ctx_switches", 0) < 400:
-        raise RuntimeError(f"[{name}] Expected ctx_switches >= 400, got {fields}")
-    if smp >= 2 and fields.get("migrations", 0) < 1:
-        raise RuntimeError(f"[{name}] Expected cross-CPU migrations >= 1 on smp={smp}, got {fields}")
-
-
-def verify_apic_and_irq_lines(
-    name: str, serial_out: str, smp: int, expected_mode: str | None = None
-) -> None:
-    apic_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-APIC] PASS:" in ln]
-    if len(apic_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-APIC] PASS line, got {len(apic_lines)}")
-    if expected_mode and f"mode={expected_mode}" not in apic_lines[0]:
-        raise RuntimeError(f"[{name}] Expected mode={expected_mode} in {apic_lines[0]!r}")
-
-    apic_kv: dict[str, int] = {}
-    for tok in apic_lines[0].split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            if v.isdigit():
-                apic_kv[k] = int(v)
-    if apic_kv.get("ticks_per_ms", 0) < 100:
-        raise RuntimeError(f"[{name}] Invalid calibrated ticks_per_ms in {apic_lines[0]!r}")
-    if apic_kv.get("tsc_mhz", 0) < 100:
-        raise RuntimeError(f"[{name}] Invalid calibrated tsc_mhz in {apic_lines[0]!r}")
-
-    irq_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-IRQ-ONLY] PASS:" in ln]
-    if len(irq_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-IRQ-ONLY] PASS line, got {len(irq_lines)}")
-    irq_kv: dict[str, int] = {}
-    for tok in irq_lines[0].split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            if v.isdigit():
-                irq_kv[k] = int(v)
-    if irq_kv.get("cpus") != smp:
-        raise RuntimeError(f"[{name}] IRQ-only cpus mismatch: {irq_lines[0]!r}")
-    if irq_kv.get("min_cpu_irqs", 0) < 8 or irq_kv.get("total_timer_irqs", 0) < smp * 8:
-        raise RuntimeError(f"[{name}] Insufficient per-CPU timer IRQs in {irq_lines[0]!r}")
-    if "eoi_verified=true" not in irq_lines[0] or "trapframe_gpr_rflags_ok=true" not in irq_lines[0]:
-        raise RuntimeError(f"[{name}] Missing EOI/TrapFrame verification in {irq_lines[0]!r}")
-
-
-def verify_preempt_line(name: str, serial_out: str, smp: int) -> None:
-    p_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PREEMPT] PASS:" in ln]
-    if len(p_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-PREEMPT] PASS line, got {len(p_lines)}")
-    fields: dict[str, int] = {}
-    for tok in p_lines[0].split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            if v.isdigit():
-                fields[k] = int(v)
-    if fields.get("cpus") != smp:
-        raise RuntimeError(f"[{name}] Preempt cpus mismatch: {fields}")
-    if fields.get("timer_irqs", 0) < smp * 16:
-        raise RuntimeError(f"[{name}] Expected timer_irqs >= {smp * 16}, got {fields}")
-    if fields.get("preemptions", 0) < 4:
-        raise RuntimeError(f"[{name}] Expected involuntary preemptions >= 4, got {fields}")
-    if fields.get("deferred_rescheds", 0) < 1:
-        raise RuntimeError(f"[{name}] Expected deferred_rescheds >= 1, got {fields}")
-    if fields.get("spinner_preempts", 0) < 4:
-        raise RuntimeError(f"[{name}] Expected spinner_preempts >= 4, got {fields}")
-    if fields.get("race_recycled", 0) < 12:
-        raise RuntimeError(f"[{name}] Expected race_recycled >= 12, got {fields}")
-    if fields.get("stale_wakes_rejected") != 48 or fields.get("orphan_ready") != 0:
-        raise RuntimeError(f"[{name}] Preempt invariant mismatch: {fields}")
-    if smp >= 2 and fields.get("race_migrations", 0) < 1:
-        raise RuntimeError(f"[{name}] Expected preemptive race_migrations >= 1 on smp={smp}, got {fields}")
-
-
-def _parse_kv_ints(line: str) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for tok in line.split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            if v.isdigit():
-                out[k] = int(v)
-    return out
-
-
-def verify_pmm_and_untyped_lines(name: str, serial_out: str, smp: int) -> None:
-    pmm_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PMM] PASS:" in ln]
-    if len(pmm_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-PMM] PASS line, got {len(pmm_lines)}")
-    pmm_kv = _parse_kv_ints(pmm_lines[0])
-    if pmm_kv.get("usable_frames", 0) < 32768 or pmm_kv.get("free_init", 0) < 32768:
-        raise RuntimeError(f"[{name}] Unexpectedly low usable/free frames: {pmm_lines[0]!r}")
-    if pmm_kv.get("reclaimable_frames", 0) < 1 or pmm_kv.get("kernel_meta_frames", 0) < 256:
-        raise RuntimeError(f"[{name}] Missing reclaimable/kernel_meta accounting: {pmm_lines[0]!r}")
-    if pmm_kv.get("meta_overhead_bps", 9999) > 50:
-        raise RuntimeError(f"[{name}] FrameMeta overhead > 0.50% (50 bps): {pmm_lines[0]!r}")
-    if pmm_kv.get("leaked_frames", 1) != 0:
-        raise RuntimeError(f"[{name}] Frame leak detected: {pmm_lines[0]!r}")
-    for flag in ("bootstrap_sealed=true", "cross_domain_zero_ok=true", "oom_reclaim_conserved=true"):
-        if flag not in pmm_lines[0]:
-            raise RuntimeError(f"[{name}] Missing {flag} in {pmm_lines[0]!r}")
-
-    ut_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-UNTYPED] PASS:" in ln]
-    if len(ut_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-UNTYPED] PASS line, got {len(ut_lines)}")
-    for flag in (
-        "split_ok=true",
-        "retype_ok=true",
-        "pin_guard_ok=true",
-        "revoke_scrub_ok=true",
-        "conserved=true",
-    ):
-        if flag not in ut_lines[0]:
-            raise RuntimeError(f"[{name}] Missing {flag} in {ut_lines[0]!r}")
-
-    bench_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PMM-BENCH] PASS:" in ln]
-    if len(bench_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-PMM-BENCH] PASS line, got {len(bench_lines)}")
-    b_kv = _parse_kv_ints(bench_lines[0])
-    if b_kv.get("cpus") != smp:
-        raise RuntimeError(f"[{name}] PMM bench cpus mismatch: {bench_lines[0]!r}")
-    if b_kv.get("alloc_p50_cyc", 0) == 0 or b_kv.get("alloc_p99_cyc", 0) < b_kv.get("alloc_p50_cyc", 0):
-        raise RuntimeError(f"[{name}] Invalid alloc latency percentiles: {bench_lines[0]!r}")
-    if b_kv.get("free_p50_cyc", 0) == 0 or b_kv.get("free_p99_cyc", 0) < b_kv.get("free_p50_cyc", 0):
-        raise RuntimeError(f"[{name}] Invalid free latency percentiles: {bench_lines[0]!r}")
-    if b_kv.get("zero_4k_p50_cyc", 0) == 0 or b_kv.get("throughput_mops_x100", 0) == 0:
-        raise RuntimeError(f"[{name}] Missing zeroing/throughput metrics: {bench_lines[0]!r}")
-    if b_kv.get("mag_hit_pct", 0) < 90:
-        raise RuntimeError(f"[{name}] Expected magazine hit rate >= 90%, got: {bench_lines[0]!r}")
-    if (
-        b_kv.get("contig_2m_before", 0) < 16
-        or b_kv.get("contig_2m_mid", 99999) >= b_kv.get("contig_2m_before", 0)
-        or b_kv.get("contig_2m_after") != b_kv.get("contig_2m_before")
-    ):
-        raise RuntimeError(f"[{name}] 2MiB contiguous conservation mismatch: {bench_lines[0]!r}")
-
-    live_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-LIVENESS-REG] PASS:" in ln]
-    if len(live_lines) != 1:
-        raise RuntimeError(f"[{name}] Expected 1 [DRY-LIVENESS-REG] PASS line, got {len(live_lines)}")
-    l_kv = _parse_kv_ints(live_lines[0])
-    if (
-        l_kv.get("cpus") != smp
-        or l_kv.get("unpinned_spawner_waves") != 4
-        or l_kv.get("spawned") != 48
-        or l_kv.get("exited") != 48
-        or l_kv.get("starved") != 0
-    ):
-        raise RuntimeError(f"[{name}] Spawner liveness regression mismatch: {live_lines[0]!r}")
-
-
 def assert_positive_smp_boot(
     name: str,
     kernel_elf: pathlib.Path,
@@ -404,7 +245,7 @@ def assert_positive_smp_boot(
     spawned, park_rounds, work_units = expected_sched_metrics(smp)
     img_path = BUILD_DIR / f"esp_{name}.img"
     write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=35)
+    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp, timeout_sec=40)
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
     for line in serial_out.splitlines():
@@ -434,7 +275,11 @@ def assert_positive_smp_boot(
                 "[DRY-UNTYPED] PASS:",
                 f"[DRY-PMM-BENCH] PASS: cpus={smp}",
                 f"[DRY-LIVENESS-REG] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1B-A UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM & Untyped foundation verified cleanly.",
+                "[DRY-VSPACE] PASS:",
+                "[DRY-HUGEPAGE] PASS:",
+                f"[DRY-VSPACE-BENCH] PASS: cpus={smp}",
+                f"[DRY-VSPACE-SMP] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1B-B UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace & TLB coherence verified cleanly.",
             ]
         )
     must_not_contain = [
@@ -444,6 +289,8 @@ def assert_positive_smp_boot(
         "[DRY-SCHED-FAIL]",
         "[DRY-PREEMPT-FAIL]",
         "[DRY-PMM-FAIL]",
+        "[DRY-VSPACE-FAIL]",
+        "[DRY-TLB-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -464,7 +311,10 @@ def assert_positive_smp_boot(
     if not irq_only:
         verify_preempt_line(name, serial_out, smp)
         verify_pmm_and_untyped_lines(name, serial_out, smp)
-    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm invariants verified in {elapsed:.3f}s).")
+        verify_vspace_lines(name, serial_out, smp)
+    print(
+        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace invariants verified in {elapsed:.3f}s)."
+    )
 
 
 def main() -> None:
@@ -491,7 +341,7 @@ def main() -> None:
         )
         return
 
-    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E/F/G): 1 -> 2 -> 4 -> 20 vCPUs.
+    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E..1B-B): 1 -> 2 -> 4 -> 20 vCPUs.
     assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1)
     assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2)
     assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4)
@@ -563,57 +413,22 @@ def main() -> None:
     )
 
     # Negative H1 Scheduler Bug-Class Detection Tests (must fail deterministically with exit=35).
-    assert_boot_case(
-        name="sched_stack_owner_conflict",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 sched_fault=stack_owner",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-SCHED-FAIL] H1 Bug1 stack_owner violation",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="sched_orphan_ready_detected",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 sched_fault=orphan_ready",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-SCHED-FAIL] H1 Bug2 orphaned Ready thread detected",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="sched_lost_wakeup_unarmed",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 sched_fault=lost_wakeup",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-SCHED-FAIL] H1 Bug3 invalid park protocol state",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="sched_exit_resurrection",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 sched_fault=exit_resurrect",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-SCHED-FAIL] H1 Bug4 exiting/dead thread resurrection rejected",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
+    sched_negative_cases = [
+        ("sched_stack_owner_conflict", "stack_owner", "[DRY-SCHED-FAIL] H1 Bug1 stack_owner violation"),
+        ("sched_orphan_ready_detected", "orphan_ready", "[DRY-SCHED-FAIL] H1 Bug2 orphaned Ready thread detected"),
+        ("sched_lost_wakeup_unarmed", "lost_wakeup", "[DRY-SCHED-FAIL] H1 Bug3 invalid park protocol state"),
+        ("sched_exit_resurrection", "exit_resurrect", "[DRY-SCHED-FAIL] H1 Bug4 exiting/dead thread resurrection rejected"),
+    ]
+    for case_name, fault_arg, expected_fail in sched_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 sched_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=[expected_fail, "[DRY-PANIC]"],
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
 
     # Milestone 1A-D 1-CPU exception & panic regression suite.
     assert_boot_case(
@@ -658,70 +473,23 @@ def main() -> None:
     )
 
     # Milestone 1A-G Negative Preemptive Scheduler & APIC Timer Fault Isolation Tests (exit=35).
-    assert_boot_case(
-        name="preempt_irq_storm",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 preempt_fault=irq_storm",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-PREEMPT-FAIL] Timer interrupt storm / zero-progress livelock detected",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="preempt_nested_irq",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 preempt_fault=nested_irq",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-PREEMPT-FAIL] Nested timer interrupt violation (irq_depth=2)",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="preempt_lost_wakeup",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 preempt_fault=lost_wakeup",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-PREEMPT-FAIL] Preemptive lost-wakeup protocol violation",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="preempt_double_schedule",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 preempt_fault=double_sched",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-PREEMPT-FAIL] Double scheduling / duplicate runqueue enqueue detected",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
-
-    assert_boot_case(
-        name="preempt_stack_reuse",
-        kernel_elf=kernel_elf,
-        cmdline="console=com1 preempt_fault=stack_reuse",
-        smp=2,
-        expected_rc=EXIT_CODE_PANIC,
-        must_contain=[
-            "[DRY-PREEMPT-FAIL] Premature stack reuse while stack_owner active",
-            "[DRY-PANIC]",
-        ],
-        must_not_contain=["[DRY-BOOT-OK]"],
-    )
+    preempt_negative_cases = [
+        ("preempt_irq_storm", "irq_storm", "[DRY-PREEMPT-FAIL] Timer interrupt storm / zero-progress livelock detected"),
+        ("preempt_nested_irq", "nested_irq", "[DRY-PREEMPT-FAIL] Nested timer interrupt violation (irq_depth=2)"),
+        ("preempt_lost_wakeup", "lost_wakeup", "[DRY-PREEMPT-FAIL] Preemptive lost-wakeup protocol violation"),
+        ("preempt_double_schedule", "double_sched", "[DRY-PREEMPT-FAIL] Double scheduling / duplicate runqueue enqueue detected"),
+        ("preempt_stack_reuse", "stack_reuse", "[DRY-PREEMPT-FAIL] Premature stack reuse while stack_owner active"),
+    ]
+    for case_name, fault_arg, expected_fail in preempt_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 preempt_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=[expected_fail, "[DRY-PANIC]"],
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
 
     # Milestone 1B-A Negative Physical Memory Manager & Untyped Capability Fault Tests (exit=35).
     pmm_negative_cases = [
@@ -742,7 +510,84 @@ def main() -> None:
             must_not_contain=["[DRY-BOOT-OK]"],
         )
 
-    print("\n[QEMU-TEST] ALL 26 MILESTONE 1B-A SMP, H1 SCHEDULER, PMM & UNTYPED CHECKS PASSED.")
+    # Milestone 1B-B Negative VSpace, Page Table, Hardware Permission & TLB Shootdown Fault Tests (exit=35).
+    vspace_negative_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "vspace_wrong_aspace",
+            "wrong_aspace",
+            [
+                "[DRY-VSPACE-INFO] Testing wrong address-space hardware #PF",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cr2=0x400000",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "vspace_us_bypass",
+            "us_bypass",
+            ["[DRY-VSPACE-FAIL] U/S permission bypass", "[DRY-PANIC]"],
+        ),
+        (
+            "vspace_write_ro",
+            "write_ro",
+            [
+                "[DRY-VSPACE-INFO] Testing write-to-readonly hardware #PF",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cr2=0x500000",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "vspace_exec_nx",
+            "exec_nx",
+            [
+                "[DRY-VSPACE-INFO] Testing NX instruction-fetch hardware #PF",
+                "[DRY-EXCEPTION]",
+                "vec=14 (#PF Page-Fault)",
+                "cr2=0x501000",
+                "[DRY-PANIC]",
+            ],
+        ),
+        (
+            "vspace_double_map",
+            "double_map",
+            ["[DRY-VSPACE-FAIL] Double map detected", "[DRY-PANIC]"],
+        ),
+        (
+            "vspace_double_unmap",
+            "double_unmap",
+            ["[DRY-VSPACE-FAIL] Double unmap detected", "[DRY-PANIC]"],
+        ),
+        (
+            "vspace_stale_tlb",
+            "stale_tlb",
+            ["[DRY-TLB-FAIL] Stale TLB hazard", "[DRY-PANIC]"],
+        ),
+        (
+            "vspace_shootdown_timeout",
+            "shootdown_timeout",
+            ["[DRY-TLB-FAIL] Shootdown timeout", "[DRY-PANIC]"],
+        ),
+        (
+            "vspace_active_frame_reuse",
+            "active_frame_reuse",
+            ["[DRY-PMM-FAIL] Frame ownership / domain / pin violation", "[DRY-PANIC]"],
+        ),
+    ]
+    for case_name, fault_arg, expected_tokens in vspace_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 vspace_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=expected_tokens,
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
+
+    print("\n[QEMU-TEST] ALL 35 MILESTONE 1B-B SMP, H1 SCHEDULER, PMM, VSPACE & TLB COHERENCE CHECKS PASSED.")
 
 
 if __name__ == "__main__":

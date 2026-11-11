@@ -30,8 +30,8 @@ use crate::security::{SecDomain, SecError, SecFlags, SecLabel};
 use crate::serial_println;
 
 const MAX_OOM_FRAMES: usize = 65_536;
-const LAT_SAMPLES: usize = 512;
-const BENCH_ROUNDS_PER_CPU: usize = 256;
+const LAT_SAMPLES: usize = 2_048;
+const BENCH_ROUNDS_PER_CPU: usize = 512;
 const BENCH_BATCH: usize = 16;
 
 const LIVENESS_WAVES: usize = 4;
@@ -105,14 +105,18 @@ fn fill_page_pattern(ptr: *mut u8, pattern: u64) {
 }
 
 fn sort_samples(buf: &mut [u64; LAT_SAMPLES]) {
-    for i in 1..LAT_SAMPLES {
-        let key = buf[i];
-        let mut j = i;
-        while j > 0 && buf[j - 1] > key {
-            buf[j] = buf[j - 1];
-            j -= 1;
+    let mut gap = LAT_SAMPLES / 2;
+    while gap > 0 {
+        for i in gap..LAT_SAMPLES {
+            let key = buf[i];
+            let mut j = i;
+            while j >= gap && buf[j - gap] > key {
+                buf[j] = buf[j - gap];
+                j -= gap;
+            }
+            buf[j] = key;
         }
-        buf[j] = key;
+        gap /= 2;
     }
 }
 
@@ -165,14 +169,11 @@ fn verify_inventory_zeroing_and_oom(online_cpus: usize) {
     assert_eq!(PageOrder::Order2MiB.frame_count(), HUGE_2M_FRAMES);
     assert_eq!(bootstrap_state(), BootstrapState::Sealed);
     assert_eq!(bootstrap_alloc_pages(1, 1), Err(PmmError::BootstrapSealed));
-    assert_eq!(
-        alloc_pages(
-            PageOrder::Order2MiB,
-            SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0),
-            AllocFlags::ZERO,
-        ),
-        Err(PmmError::OrderUnsupportedYet)
-    );
+    let k2m_lbl = SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0);
+    let h2m = alloc_pages(PageOrder::Order2MiB, k2m_lbl, AllocFlags::ZERO)
+        .expect("Order2MiB allocation must succeed");
+    assert_eq!((h2m.pfn as usize) & (HUGE_2M_FRAMES - 1), 0);
+    free_pages(h2m, PageOrder::Order2MiB, k2m_lbl);
 
     // Verify `< 64 KiB` low guard, Local APIC MMIO `0xFEE0_0000`, active Limine `CR3`, and kernel
     // image physical base are strictly protected from general allocation.
@@ -467,7 +468,7 @@ fn measure_pmm_performance_and_contention(online_cpus: usize, tsc_mhz: u64) {
         }
     }
     sort_samples(samples);
-    let (alloc_p50, alloc_p95, alloc_p99) = (samples[256], samples[486], samples[506]);
+    let (alloc_p50, alloc_p95, alloc_p99) = (samples[1_024], samples[1_945], samples[2_027]);
 
     for chunk in 0..(LAT_SAMPLES / 32) {
         for i in 0..32 {
@@ -482,7 +483,7 @@ fn measure_pmm_performance_and_contention(online_cpus: usize, tsc_mhz: u64) {
         }
     }
     sort_samples(samples);
-    let zero_elided_p50 = samples[256];
+    let zero_elided_p50 = samples[1_024];
 
     for chunk in 0..(LAT_SAMPLES / 32) {
         for h in &mut tmp_handles {
@@ -495,7 +496,7 @@ fn measure_pmm_performance_and_contention(online_cpus: usize, tsc_mhz: u64) {
         }
     }
     sort_samples(samples);
-    let (free_p50, free_p95, free_p99) = (samples[256], samples[486], samples[506]);
+    let (free_p50, free_p95, free_p99) = (samples[1_024], samples[1_945], samples[2_027]);
 
     let zh = alloc_pages(PageOrder::Order4KiB, bench_lbl, AllocFlags::ZERO).unwrap();
     let zptr = resolve_frame_ptr(zh, bench_lbl);
@@ -506,7 +507,7 @@ fn measure_pmm_performance_and_contention(online_cpus: usize, tsc_mhz: u64) {
     }
     free_pages(zh, PageOrder::Order4KiB, bench_lbl);
     sort_samples(samples);
-    let (zero_p50, zero_p95, zero_p99) = (samples[256], samples[486], samples[506]);
+    let (zero_p50, zero_p95, zero_p99) = (samples[1_024], samples[1_945], samples[2_027]);
     flush_all_magazines_quiescent(online_cpus);
 
     // 2. Multi-CPU Contention Run A: Global-Direct (`BYPASS_PERCPU_CACHE`) across `online_cpus`.
@@ -551,8 +552,10 @@ fn measure_pmm_performance_and_contention(online_cpus: usize, tsc_mhz: u64) {
     assert_eq!(frag_after.contig_2m_blocks, frag_before.contig_2m_blocks);
 
     serial_println!(
-        "[DRY-PMM-BENCH] PASS: cpus={} alloc_p50_cyc={} alloc_p95_cyc={} alloc_p99_cyc={} free_p50_cyc={} free_p95_cyc={} free_p99_cyc={} zero_4k_p50_cyc={} zero_4k_p95_cyc={} zero_4k_p99_cyc={} zero_elided_p50_cyc={} throughput_mops_x100={} global_mops_x100={} mag_hit_pct={} global_spins={} mag_spins={} contig_2m_before={} contig_2m_mid={} contig_2m_after={} ext_frag_bps_after={}",
+        "[DRY-PMM-BENCH] PASS: cpus={} samples={} rounds_per_cpu={} alloc_p50_cyc={} alloc_p95_cyc={} alloc_p99_cyc={} free_p50_cyc={} free_p95_cyc={} free_p99_cyc={} zero_4k_p50_cyc={} zero_4k_p95_cyc={} zero_4k_p99_cyc={} zero_elided_p50_cyc={} throughput_mops_x100={} global_mops_x100={} mag_hit_pct={} global_spins={} mag_spins={} contig_2m_before={} contig_2m_mid={} contig_2m_after={} ext_frag_bps_after={}",
         online_cpus,
+        LAT_SAMPLES,
+        BENCH_ROUNDS_PER_CPU,
         alloc_p50,
         alloc_p95,
         alloc_p99,

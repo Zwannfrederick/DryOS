@@ -82,7 +82,6 @@ pub enum PmmError {
     BootstrapSealed,
     BootstrapExhausted,
     OutOfMemory,
-    OrderUnsupportedYet,
 }
 
 #[repr(u8)]

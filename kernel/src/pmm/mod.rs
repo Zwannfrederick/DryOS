@@ -4,9 +4,15 @@
 //! Pairs with `pmm::meta` (`FrameMeta` + `BootstrapAllocator`) and `pmm::untyped` (`ADR-003`
 //! `Untyped` split/retype/revoke capability foundation).
 
+pub(crate) mod huge_reclaim;
 pub mod meta;
 pub mod tests;
 pub mod untyped;
+
+pub(crate) use huge_reclaim::{
+    map_ref_dec_data_pfn_after_shootdown, map_ref_inc_data_frame, pt_frame_adjust_entries,
+    pt_frame_unpin_for_reclaim, reclaim_bootloader_frames_raw,
+};
 
 pub use meta::{
     bootstrap_alloc_pages, bootstrap_state, inventory, phys_to_hhdm, pmm_invariant_panic,
@@ -49,9 +55,9 @@ pub struct PmmPerfCounters {
     pub zero_elided: u64,
 }
 
-struct GlobalPoolInner {
-    head_pfn: u32,
-    free_count: u64,
+pub(crate) struct GlobalPoolInner {
+    pub(crate) head_pfn: u32,
+    pub(crate) free_count: u64,
 }
 
 struct GlobalFreePool {
@@ -100,7 +106,7 @@ static PERF_ZERO_RUNS: AtomicU64 = AtomicU64::new(0);
 static PERF_ZERO_ELIDED: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
-fn lock_global_pool_with_cli<R>(f: impl FnOnce(&mut GlobalPoolInner) -> R) -> R {
+pub(crate) fn lock_global_pool_with_cli<R>(f: impl FnOnce(&mut GlobalPoolInner) -> R) -> R {
     let saved_if = irq_save_cli();
     let mut spins = 0u64;
     while GLOBAL_POOL
@@ -209,14 +215,24 @@ fn apply_mandatory_zero_policy(
     }
 }
 
+#[inline]
+pub(crate) fn record_zero_accounting(runs: u64, elided: u64) {
+    if runs > 0 {
+        PERF_ZERO_RUNS.fetch_add(runs, Ordering::Relaxed);
+    }
+    if elided > 0 {
+        PERF_ZERO_ELIDED.fetch_add(elided, Ordering::Relaxed);
+    }
+}
+
 /// Allocate `2^order` physical frames bound to `label` under `ADR-007` isolation rules.
 pub fn alloc_pages(
     order: PageOrder,
     label: SecLabel,
     flags: AllocFlags,
 ) -> Result<FrameHandle, PmmError> {
-    if order != PageOrder::Order4KiB {
-        return Err(PmmError::OrderUnsupportedYet);
+    if order == PageOrder::Order2MiB {
+        return huge_reclaim::alloc_order_2m(label, flags);
     }
 
     if flags.contains(AllocFlags::BYPASS_PERCPU_CACHE) {
@@ -427,8 +443,10 @@ fn release_validated_frame(
 /// Free `2^order` physical frames previously allocated to `caller_label`.
 #[inline]
 pub fn free_pages(handle: FrameHandle, order: PageOrder, caller_label: SecLabel) {
-    assert_eq!(order, PageOrder::Order4KiB, "Only Order4KiB supported in 1B-A");
-    release_validated_frame(handle, caller_label, ZeroState::Dirty, false);
+    match order {
+        PageOrder::Order4KiB => release_validated_frame(handle, caller_label, ZeroState::Dirty, false),
+        PageOrder::Order2MiB => huge_reclaim::free_order_2m(handle, caller_label),
+    }
 }
 
 #[inline]

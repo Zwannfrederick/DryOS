@@ -18,11 +18,12 @@ use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-use crate::arch::{inb, outb, rdmsr, rdtsc, read_cr3, wrmsr};
+use crate::arch::{inb, irq_restore, irq_save_cli, outb, rdmsr, rdtsc, read_cr3, wrmsr};
 use crate::percpu::get_percpu_by_idx;
 
 pub const VEC_PIC_SPURIOUS_MASTER: u8 = 0x27;
 pub const VEC_PIC_SPURIOUS_SLAVE: u8 = 0x2f;
+pub const VEC_TLB_SHOOTDOWN: u8 = 0xee;
 pub const VEC_LAPIC_TIMER: u8 = 0xef;
 pub const VEC_APIC_SPURIOUS: u8 = 0xff;
 
@@ -40,6 +41,7 @@ const MSR_X2APIC_EOI: u32 = 0x80b;
 const MSR_X2APIC_SVR: u32 = 0x80f;
 const MSR_X2APIC_ISR7: u32 = 0x817;
 const MSR_X2APIC_ESR: u32 = 0x828;
+const MSR_X2APIC_ICR: u32 = 0x830;
 const MSR_X2APIC_LVT_TIMER: u32 = 0x832;
 const MSR_X2APIC_TIMER_INIT: u32 = 0x838;
 const MSR_X2APIC_TIMER_CUR: u32 = 0x839;
@@ -51,12 +53,16 @@ const MMIO_APIC_EOI: u64 = 0x0b0;
 const MMIO_APIC_SVR: u64 = 0x0f0;
 const MMIO_APIC_ISR7: u64 = 0x170;
 const MMIO_APIC_ESR: u64 = 0x280;
+const MMIO_ICR_LOW: u64 = 0x300;
+const MMIO_ICR_HIGH: u64 = 0x310;
 const MMIO_LVT_TIMER: u64 = 0x320;
 const MMIO_TIMER_INIT: u64 = 0x380;
 const MMIO_TIMER_CUR: u64 = 0x390;
 const MMIO_TIMER_DIV: u64 = 0x3e0;
 
 const LVT_MASKED: u32 = 1 << 16;
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const ICR_DELIV_PENDING: u32 = 1 << 12;
 const SVR_ENABLE: u32 = 1 << 8;
 const TIMER_DIV_BY_16: u32 = 0x3;
 
@@ -117,6 +123,7 @@ static XAPIC_PD: SyncPtPage = SyncPtPage(UnsafeCell::new(PageTablePage([0; 512])
 static XAPIC_PT: SyncPtPage = SyncPtPage(UnsafeCell::new(PageTablePage([0; 512])));
 
 static ACTIVE_APIC_MODE: AtomicU8 = AtomicU8::new(ApicMode::Uninitialized as u8);
+static APIC_PHYS_BASE: AtomicU64 = AtomicU64::new(0);
 static XAPIC_MMIO_VIRT: AtomicU64 = AtomicU64::new(0);
 static CALIBRATED_TICK_INIT: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_TICK_INIT: AtomicU32 = AtomicU32::new(0);
@@ -335,6 +342,43 @@ pub fn lapic_eoi() {
 }
 
 #[inline]
+pub fn apic_phys_base() -> u64 {
+    APIC_PHYS_BASE.load(Ordering::Acquire)
+}
+
+/// Send an edge-triggered Fixed Inter-Processor Interrupt (`vector >= 32`) to `dest_lapic_id`
+/// using the active `x2APIC` MSR (`0x830`) or `xAPIC` MMIO (`0x310`/`0x300`) transport.
+pub fn send_fixed_ipi(dest_lapic_id: u32, vector: u8) {
+    debug_assert!(vector >= 32, "Fixed IPI vector must be >= 32");
+    let low_cmd = ICR_LEVEL_ASSERT | (vector as u32);
+    match active_apic_mode() {
+        ApicMode::X2ApicMsr => {
+            let icr = ((dest_lapic_id as u64) << 32) | (low_cmd as u64);
+            // SAFETY: Valid 64-bit `IA32_X2APIC_ICR` (`0x830`) write at CPL=0.
+            unsafe { wrmsr(MSR_X2APIC_ICR, icr) };
+        }
+        ApicMode::XApicMmio => {
+            let base = XAPIC_MMIO_VIRT.load(Ordering::Relaxed);
+            // Mask local IRQs across the two-part `ICR_HIGH` + `ICR_LOW` MMIO write.
+            let saved_if = irq_save_cli();
+            // SAFETY: `base` maps the 4 KiB Local APIC MMIO page uncached (`PCD | PWT`).
+            unsafe {
+                while (read_volatile((base + MMIO_ICR_LOW) as *const u32) & ICR_DELIV_PENDING) != 0 {
+                    core::hint::spin_loop();
+                }
+                write_volatile((base + MMIO_ICR_HIGH) as *mut u32, dest_lapic_id << 24);
+                write_volatile((base + MMIO_ICR_LOW) as *mut u32, low_cmd);
+                while (read_volatile((base + MMIO_ICR_LOW) as *const u32) & ICR_DELIV_PENDING) != 0 {
+                    core::hint::spin_loop();
+                }
+            }
+            irq_restore(saved_if);
+        }
+        ApicMode::Uninitialized => panic!("send_fixed_ipi before Local APIC init"),
+    }
+}
+
+#[inline]
 pub fn arm_cpu_oneshot_tick(init_count: u32) {
     apic_write(MSR_X2APIC_TIMER_DIV, MMIO_TIMER_DIV, TIMER_DIV_BY_16);
     apic_write(MSR_X2APIC_LVT_TIMER, MMIO_LVT_TIMER, VEC_LAPIC_TIMER as u32);
@@ -474,6 +518,7 @@ pub fn detect_and_init_bsp_apic(
     let apic_base_msr = unsafe { rdmsr(MSR_IA32_APIC_BASE) };
     let apic_phys = apic_base_msr & PHYS_ADDR_MASK;
     assert_ne!(apic_phys, 0, "IA32_APIC_BASE physical base is zero");
+    APIC_PHYS_BASE.store(apic_phys, Ordering::Release);
 
     let chosen_mode = if !force_xapic && has_x2apic {
         ApicMode::X2ApicMsr

@@ -149,6 +149,7 @@ global_asm!(
     "ISR_NOERR 31",
     "ISR_NOERR 39",
     "ISR_NOERR 47",
+    "ISR_NOERR 238",
     "ISR_NOERR 239",
     "ISR_NOERR 254",
     "ISR_NOERR 255",
@@ -227,6 +228,7 @@ extern "C" {
     fn dry_isr_stub_31();
     fn dry_isr_stub_39();
     fn dry_isr_stub_47();
+    fn dry_isr_stub_238();
     fn dry_isr_stub_239();
     fn dry_isr_stub_254();
     fn dry_isr_stub_255();
@@ -300,6 +302,11 @@ fn handle_double_fault(frame: &TrapFrame, pcpu: Option<&'static PerCpuData>) -> 
 }
 
 extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
+    if frame.vector == (crate::apic::VEC_TLB_SHOOTDOWN as u64) {
+        crate::vspace::tlb::on_tlb_shootdown_ipi();
+        return;
+    }
+
     if frame.vector == (crate::apic::VEC_LAPIC_TIMER as u64) {
         crate::sched::on_lapic_timer_irq(frame);
         return;
@@ -386,6 +393,8 @@ pub fn init_bsp_idt() {
         table[crate::apic::VEC_PIC_SPURIOUS_SLAVE as usize] =
             IdtEntry::gate(dry_isr_stub_47 as *const () as usize as u64, 0, 0);
         // `IST = 0`: `TrapFrame` lands on the active thread's private 16 KiB stack (`#DF` owns `IST1`).
+        table[crate::apic::VEC_TLB_SHOOTDOWN as usize] =
+            IdtEntry::gate(dry_isr_stub_238 as *const () as usize as u64, 0, 0);
         table[crate::apic::VEC_LAPIC_TIMER as usize] =
             IdtEntry::gate(dry_isr_stub_239 as *const () as usize as u64, 0, 0);
         table[crate::apic::VEC_APIC_SPURIOUS as usize] =

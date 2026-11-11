@@ -15,14 +15,21 @@ SECTIONS
     __kernel_virt_start = .;
 
     .text ALIGN(0x1000) : {
+        __kernel_text_start = .;
         *(.text .text.*)
+        . = ALIGN(0x1000);
+        __kernel_text_end = .;
     } :text
 
     .rodata ALIGN(0x1000) : {
+        __kernel_rodata_start = .;
         *(.rodata .rodata.*)
+        . = ALIGN(0x1000);
+        __kernel_rodata_end = .;
     } :rodata
 
     .data ALIGN(0x1000) : {
+        __kernel_data_start = .;
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))

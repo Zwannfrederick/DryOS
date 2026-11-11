@@ -270,3 +270,28 @@ pub unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> &'a str {
         core::str::from_utf8(bytes).unwrap_or("<non-utf8>")
     }
 }
+
+struct CmdlineBuf(UnsafeCell<[u8; 256]>, UnsafeCell<usize>);
+// SAFETY: Populated once on BSP with `CLI` during early boot before APs start or `BootloaderReclaimable`
+// frames are reclaimed; thereafter strictly immutable `'static` `.bss` storage.
+unsafe impl Sync for CmdlineBuf {}
+
+static STATIC_CMDLINE: CmdlineBuf = CmdlineBuf(UnsafeCell::new([0u8; 256]), UnsafeCell::new(0));
+
+/// Copy Limine's `BOOTLOADER_RECLAIMABLE` command-line string into permanent kernel `.bss` so
+/// reclaiming bootloader memory in `Milestone 1B-B` never leaves a dangling `&'static str`.
+pub fn latch_cmdline_to_static_bss() -> &'static str {
+    let cmd_resp = CMDLINE_REQ.read().response;
+    if cmd_resp.is_null() {
+        return "";
+    }
+    // SAFETY: Executed once on BSP (`CLI`) while Limine `BOOTLOADER_RECLAIMABLE` mappings are intact.
+    unsafe {
+        let src = cstr_to_str((*cmd_resp).cmdline).as_bytes();
+        let copy_len = src.len().min(255);
+        let dst = &mut *STATIC_CMDLINE.0.get();
+        dst[..copy_len].copy_from_slice(&src[..copy_len]);
+        *STATIC_CMDLINE.1.get() = copy_len;
+        core::str::from_utf8(&dst[..copy_len]).unwrap_or("")
+    }
+}

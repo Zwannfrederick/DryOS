@@ -16,6 +16,7 @@ mod sched;
 mod security;
 mod serial;
 mod smp;
+mod vspace;
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -26,8 +27,8 @@ use crate::arch::{cli, halt_forever, qemu_exit, read_cr3, read_rsp, QEMU_EXIT_PA
 use crate::gdt_tss::{init_cpu_gdt_tss, prepare_cpu_boot_stack};
 use crate::idt::{init_bsp_idt, verify_breakpoint_trap_recovery};
 use crate::limine::{
-    base_revision_supported, cstr_to_str, BOOTLOADER_INFO_REQ, CMDLINE_REQ, FIRMWARE_TYPE_REQ,
-    LIMINE_FIRMWARE_EFI64, MP_REQ,
+    base_revision_supported, cstr_to_str, latch_cmdline_to_static_bss, BOOTLOADER_INFO_REQ,
+    FIRMWARE_TYPE_REQ, LIMINE_FIRMWARE_EFI64, MP_REQ,
 };
 use crate::mem_verify::verify_memory_and_hhdm;
 use crate::percpu::{init_cpu_percpu_and_gs, CpuRegionInfo};
@@ -89,15 +90,7 @@ extern "C" fn bsp_kmain() -> ! {
         fw_type
     );
 
-    let cmdline = {
-        let cmd_resp = CMDLINE_REQ.read().response;
-        if !cmd_resp.is_null() {
-            // SAFETY: Valid NUL-terminated command line string supplied by Limine.
-            unsafe { cstr_to_str((*cmd_resp).cmdline) }
-        } else {
-            ""
-        }
-    };
+    let cmdline = latch_cmdline_to_static_bss();
 
     let bsp_lapic_id = {
         let mp_resp = MP_REQ.read().response;
@@ -230,12 +223,20 @@ extern "C" fn bsp_kmain() -> ! {
     if !irq_only_stage {
         let pmm_fault = pmm::tests::PmmFaultTest::from_cmdline(cmdline);
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
+        let vspace_summary =
+            vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        vspace::tests::verify_vspace_and_tlb(
+            &vspace_summary,
+            smp.cpu_count,
+            apic_cal.tsc_mhz,
+            cmdline,
+        );
     }
     sched::shutdown_ap_scheduler_service();
 
     if !irq_only_stage {
         serial_println!(
-            "[DRY-BOOT-OK] Milestone 1B-A UEFI boot + {}-vCPU SMP + H1 scheduler + PMM & Untyped foundation verified cleanly.",
+            "[DRY-BOOT-OK] Milestone 1B-B UEFI boot + {}-vCPU SMP + H1 scheduler + PMM + VSpace & TLB coherence verified cleanly.",
             smp.cpu_count
         );
     }

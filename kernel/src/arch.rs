@@ -11,6 +11,7 @@ pub const QEMU_EXIT_SUCCESS: u32 = 0x10;
 /// Host exit status `(0x11 << 1) | 1 == 35`.
 pub const QEMU_EXIT_PANIC: u32 = 0x11;
 
+pub const MSR_IA32_EFER: u32 = 0xc000_0080;
 pub const MSR_IA32_GS_BASE: u32 = 0xc000_0101;
 pub const MSR_IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
 
@@ -123,6 +124,24 @@ pub fn irq_restore(was_enabled: bool) {
 }
 
 #[inline]
+pub fn read_cr0() -> u64 {
+    let cr0: u64;
+    // SAFETY: Reading CR0 at CPL=0 has no side effects.
+    unsafe {
+        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+    }
+    cr0
+}
+
+#[inline]
+pub unsafe fn write_cr0(val: u64) {
+    // SAFETY: Caller guarantees `val` preserves `PE` and `PG` with valid architectural flags.
+    unsafe {
+        asm!("mov cr0, {}", in(reg) val, options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline]
 pub fn read_cr3() -> u64 {
     let cr3: u64;
     // SAFETY: Reading CR3 at CPL=0 has no side effects.
@@ -130,6 +149,40 @@ pub fn read_cr3() -> u64 {
         asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
     }
     cr3
+}
+
+#[inline]
+pub unsafe fn write_cr3(phys_pml4: u64) {
+    // SAFETY: Caller guarantees `phys_pml4` is a 4 KiB-aligned valid PML4 frame mapping the active RIP/RSP.
+    unsafe {
+        asm!("mov cr3, {}", in(reg) phys_pml4, options(nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub fn read_cr4() -> u64 {
+    let cr4: u64;
+    // SAFETY: Reading CR4 at CPL=0 has no side effects.
+    unsafe {
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+    cr4
+}
+
+#[inline]
+pub unsafe fn write_cr4(val: u64) {
+    // SAFETY: Caller guarantees `val` preserves `PAE` and only sets CPUID-verified feature bits.
+    unsafe {
+        asm!("mov cr4, {}", in(reg) val, options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub fn invlpg(vaddr: u64) {
+    // SAFETY: `invlpg` is valid for any virtual address at CPL=0 and invalidates matching TLB + paging caches.
+    unsafe {
+        asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+    }
 }
 
 #[inline]

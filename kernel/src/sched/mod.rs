@@ -26,7 +26,7 @@ pub use preempt::{
 
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::apic::QUANTUM_TICKS;
 use crate::arch::{cli, irq_restore, irq_save_cli, read_rsp, sti};
@@ -40,6 +40,7 @@ use crate::sched::state::{
     preempt_invariant_panic, sched_invariant_panic, CommitParkOutcome, ExecState, Notification,
     TaskSchedState, ThreadId, WakeOutcome, GEN_MAX, NO_CPU,
 };
+use crate::vspace::{switch_cpu_vspace_if_needed, VSpaceId, KERNEL_VSPACE_ID};
 
 pub const THREAD_STACK_BYTES: usize = 16 * 1024;
 pub const WORKER_POOL_CAP: usize = 36;
@@ -53,6 +54,7 @@ pub enum ApEpochKind {
     Cooperative = 0,
     IrqOnlyVerify = 1,
     PreemptiveSched = 2,
+    KernelVSpaceSync = 3,
 }
 
 impl ApEpochKind {
@@ -61,6 +63,7 @@ impl ApEpochKind {
         match v {
             1 => Self::IrqOnlyVerify,
             2 => Self::PreemptiveSched,
+            3 => Self::KernelVSpaceSync,
             _ => Self::Cooperative,
         }
     }
@@ -88,6 +91,7 @@ pub struct KernelTcb {
     pub alloc_count: AtomicU64,
     pub progress_seq: AtomicU64,
     pub preempted_count: AtomicU64,
+    pub vspace_id: AtomicU16,
     pub slot_free: AtomicBool,
     pub notif: Notification,
 }
@@ -107,6 +111,7 @@ impl KernelTcb {
             alloc_count: AtomicU64::new(0),
             progress_seq: AtomicU64::new(0),
             preempted_count: AtomicU64::new(0),
+            vspace_id: AtomicU16::new(KERNEL_VSPACE_ID),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
         }
@@ -218,6 +223,7 @@ pub fn init_scheduler(online_cpus: usize) {
         idle.stack_top.store(pcpu.boot_stack_top, Ordering::Release);
         idle.prio.store(3, Ordering::Release);
         idle.last_cpu.store(cpu, Ordering::Release);
+        idle.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
         idle.slot_free.store(false, Ordering::Release);
         idle.sched.init_idle_running(cpu);
     }
@@ -241,6 +247,7 @@ pub fn init_scheduler(online_cpus: usize) {
         w.alloc_count.store(0, Ordering::Release);
         w.progress_seq.store(0, Ordering::Release);
         w.preempted_count.store(0, Ordering::Release);
+        w.vspace_id.store(KERNEL_VSPACE_ID, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
     }
@@ -260,6 +267,19 @@ pub fn try_spawn_kernel_thread(
 pub fn try_spawn_kernel_thread_ex(
     prio: usize,
     target_cpu: usize,
+    entry: KernelThreadFn,
+    arg: u64,
+    preemptible: bool,
+) -> Option<ThreadId> {
+    try_spawn_thread_in_vspace(prio, target_cpu, KERNEL_VSPACE_ID, entry, arg, preemptible)
+}
+
+/// Allocate a `Dead` worker TCB + 16 KiB stack bound to `vspace_id`, advance its `gen26`,
+/// initialize its `SwitchFrame`, and publish it as `ExecState::Ready` onto `target_cpu`'s runqueue.
+pub fn try_spawn_thread_in_vspace(
+    prio: usize,
+    target_cpu: usize,
+    vspace_id: VSpaceId,
     entry: KernelThreadFn,
     arg: u64,
     preemptible: bool,
@@ -294,6 +314,7 @@ pub fn try_spawn_kernel_thread_ex(
         w.last_cpu.store(NO_CPU, Ordering::Release);
         w.progress_seq.store(0, Ordering::Release);
         w.preempted_count.store(0, Ordering::Release);
+        w.vspace_id.store(vspace_id, Ordering::Release);
         w.notif.reset();
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
@@ -379,6 +400,12 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
     verify_slot_canary(prev_slot);
     pcpu.ctx_switches.fetch_add(1, Ordering::Relaxed);
     GLOBAL_CTX_SWITCHES.fetch_add(1, Ordering::Relaxed);
+
+    // Switch hardware `CR3` (if `next`'s `vspace_id` differs from CPU's active `VSpace`) *before*
+    // reaping `prev_slot` or decrementing `PHASE_PENDING_THREADS`, so exiting user-VSpace workers
+    // always vacate `VSpace.active_cpus` prior to epoch completion.
+    let next_vs = tcb(cur_slot).vspace_id.load(Ordering::Acquire);
+    switch_cpu_vspace_if_needed(cpu_idx, next_vs);
 
     let prev = tcb(prev_slot);
     match post_kind {
@@ -634,6 +661,9 @@ pub fn ap_scheduler_service_loop(cpu_idx: usize) {
                         }
                     }
                     stop_cpu_timer_for_phase(pcpu);
+                }
+                ApEpochKind::KernelVSpaceSync => {
+                    crate::vspace::activate_kernel_vspace_on_ap(cpu_idx);
                 }
             }
             seen_epoch = cur_epoch;
