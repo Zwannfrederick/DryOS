@@ -13,8 +13,13 @@ pub const LIMINE_COMMON_MAGIC_1: u64 = 0x0a82_e883_a194_f07b;
 pub const LIMINE_FIRMWARE_EFI64: u64 = 2;
 
 pub const LIMINE_MEMMAP_USABLE: u64 = 0;
+pub const LIMINE_MEMMAP_RESERVED: u64 = 1;
+pub const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
+pub const LIMINE_MEMMAP_ACPI_NVS: u64 = 3;
+pub const LIMINE_MEMMAP_BAD_MEMORY: u64 = 4;
 pub const LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE: u64 = 5;
 pub const LIMINE_MEMMAP_EXECUTABLE_AND_MODULES: u64 = 6;
+pub const LIMINE_MEMMAP_FRAMEBUFFER: u64 = 7;
 
 #[repr(transparent)]
 pub struct BootSlot<T>(pub UnsafeCell<T>);

@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (15:12 +03:00)
-- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi ve Faz 1 `Milestone 1A` (`Adım A..E` SMP + `Adım F` İşbirlikçi `H1` + `Adım G` Preemptive `H1` Zamanlayıcısı ve `Local APIC`/`x2APIC` Kalibrasyonu, `21/21` otomatik QEMU testi) eksiksiz tamamlandı ve makine tarafından doğrulandı.** **`Milestone 1B` (`VSpace`/`CR3`, Ring 3 userspace, `CSpace`, IPC)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
+- **Son Güncelleme:** 11 Kasım 2026 (15:56 +03:00)
+- **Mevcut Durum:** **Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi, Faz 1 `Milestone 1A` (`Adım A..G`, commit `fad423b`) ve Faz 1 `Milestone 1B-A` (Physical Memory Manager, `Untyped` Capability Yaşam Döngüsü ve BSP-Pinsiz `20`-vCPU Spawner Liveness Regresyonu, `26/26` otomatik QEMU testi) eksiksiz tamamlandı ve makine tarafından doğrulandı.** **`Milestone 1B-B` (`VSpace` 4-seviye sayfa tabloları, `2 MiB` huge-page genişlemesi, `CR3` değişimi, `BootloaderReclaimable` geri kazanımı ve `active_cpus` TLB shootdown)** öncesinde kullanıcı değerlendirmesi beklenmektedir.
 
 ---
 
@@ -81,10 +81,22 @@
   - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif testleri ve 4 negatif SMP/donanım arıza testi (`smp_ap_timeout`, `smp_dup_cpu_id`, `smp_stack_overlap`, `smp_df_ist1_ap`) doğrulandı.
 - **Adım F — İşbirlikçi (`Cooperative`) `H1` Kernel-Thread Zamanlayıcısı (`b6ad2e9`):**
   - `kernel/src/sched/{state.rs,runqueue.rs,context.rs,mod.rs,tests.rs}` ile `AtomicU32(exec_state, park_token, gen26)`, açık `fence(Ordering::SeqCst)`, lock-free `PerCpuRunQueue` + CPU'lar arası *work stealing*, 36 adet bağımsız 16 KiB worker yığını (`Dead` sonrası güvenli `gen26 + 1` geri dönüşümlü), System V 16-bayt hizalı `dry_switch_to` + `dry_thread_entry_trampoline` ve `RSP` değişimi sonrası `finish_post_switch` uygulandı; `15/15` QEMU senaryosu regresyon olarak korundu.
-- **Adım G — Preemptive `H1` Zamanlayıcısı ve `Local APIC`/`x2APIC` Kalibrasyonu:**
+- **Adım G — Preemptive `H1` Zamanlayıcısı ve `Local APIC`/`x2APIC` Kalibrasyonu (`fad423b`):**
   - `kernel/src/{apic.rs,idt.rs,percpu.rs}` ve `kernel/src/sched/{preempt.rs,preempt_tests.rs,context.rs,mod.rs,runqueue.rs,state.rs}` ile eski `8259 PIC` maskelemesi, `CPUID` + `IA32_APIC_BASE` yetenek tespiti ve 3-kademeli geri-düşüş (`x2apic-msr` -> `xapic-mmio` HHDM UC -> deterministik panik), 3 pencereli i8254 PIT Kanal 2 dinamik kalibrasyonu (`ticks_per_ms ≈ 62.500..62.543`, `QUANTUM_TICKS = 2`), `IST = 0` özel thread yığını üzerinde bloklamasız `on_lapic_timer_irq` (`EOI`-önce-switch, `CLI` `finish_post_switch`, One-Shot yeniden kurma), `preempt_count` yuvalanması (`0 -> 1 -> 2 -> 1 -> 0`) + `need_resched`, CPU'yu bırakmayan spinner kesilmesi ve `IRQ` vs `yield`/`park`/`wake`/`exit` yarışları uygulandı.
   - Kademeli `1 -> 2 -> 4 -> 20 vCPU` pozitif koşuları, `apic_mode=xapic` yedek kip koşusu (`boot_2cpu_xapic_fallback`), korunan `15` regresyon testi ve `5` yeni negatif preemptive testi (`preempt_irq_storm`, `preempt_nested_irq`, `preempt_lost_wakeup`, `preempt_double_schedule`, `preempt_stack_reuse`) dahil **`21/21` otomatik QEMU senaryosu** geçti (`python3 tools/qemu_boot_test.py`).
-  - **Açık Sınırlar:** (1) Ring 3 userspace, `CR3`/TLB adres alanı değişimi, VFS ve `DRY Vault` çalışma zamanı `Milestone 1A-G` kapsamı dışındadır (`Milestone 1B+`); (2) PIT kalibrasyonu sanallaştırılmış KVM zamanlayıcısını ölçer ve 4C/8T konakta `-smp 20` koşusu çıplak metal mikrosaniye-altı zamanlama doğruluğunu veya fiziksel 20 çekirdek performansını kanıtlamaz.
+
+---
+
+## 4. Faz 1 `Milestone 1B` Durumu (`Alt Aşama 1B-A` Tamamlandı)
+
+### Tamamlanan `Milestone 1B-A` — Physical Memory Manager & `Untyped` Capability Temeli `[TAMAMLANDI — 11 Kasım 2026]`
+- **Üretilen / Güncellenen Dosyalar:** `kernel/src/pmm/{meta.rs,mod.rs,untyped.rs,tests.rs}`, `kernel/src/{limine.rs,main.rs}`, `kernel/src/sched/preempt_tests.rs`, `tools/qemu_boot_test.py`.
+- **Doğrulanan Mekanizmalar ve Ölçümler:**
+  - Limine Base Rev 3 tam bellek envanteri (`%100` PFN korunumu, `< 64 KiB` SIPI/BIOS ve `0xFEE0_0000` Local APIC MMIO koruması, aktif Limine `CR3` `BootloaderReclaimable` kilidi) ve tek yönlü `BootstrapAllocator` (`Uninit -> Active -> Sealed`) ile kalıcı `PMM` ayrımı.
+  - `16 B` `FrameMeta` (`%0.39` RAM ek yükü = `39 bps`, veri sayfasına dokunmayan serbest liste), genişletilebilir `PageOrder` (`Order4KiB = 0`, `Order2MiB = 9`), `CLI` korumalı `PerCpuFrameCache` (`MAGAZINE_CAP = 64`, `MAGAZINE_BATCH = 32`; `4 vCPU`'da `29.97` vs `3.73 Mops/s`, `20 vCPU`'da spin çekişmesi `6.972.056 -> 829`), `ADR-007` zorunlu alan/kompartmanlar arası `rep stosq` sıfırlama + `VerifiedZero`/aynı-kompartman yazım elemesi (`2.81x` hızlanma) ve tam-RAM OOM korunumu (`leaked_frames=0`).
+  - Tam `CSpace` radiks tablosu eklemeden `Untyped` `split / retype / revoke` sözleşmesi (`KernelObjHeader`, `SecLabel::inherit_child`, monotonik `watermark_bytes`, `BusyPinned` DMA/map kapısı, soy `generation + 1` ve `rep stosq` kazıma).
+  - `1A-G` `20`-vCPU spawner açlık analizi ve BSP-pinsiz `T_spawner` aşırı yükleme regresyonu (`1, 2, 4, 20 vCPU`; `20` vCPU'da `35/36` aktif TCB yuvası, `0` BSP pinleme, `0` `yield_now()`, `4` dalga `48/48` görev, `starved=0`) + 5 negatif `pmm_*` arıza testi (`pmm_double_free`, `pmm_use_after_free`, `pmm_double_alloc`, `pmm_ownership_violation`, `pmm_untyped_revoke`) dahil **`26/26` otomatik QEMU senaryosu** geçti.
+- **Açık Sınırlar:** Ring 3 userspace, `CR3`/TLB adres alanı değişimi, tam `CSpace` radiks tablosu, IPC, VFS ve Linux ABI `Milestone 1B-A` kapsamı dışındadır; 4C/8T konakta `-smp 20` koşusu fiziksel 20 çekirdek performansını kanıtlamaz; çapraz-öncelik yaşlandırma (Faz 3 `ADR-004`) ve kompartman-başına `Untyped::retype(TcbObj)` TCB kabul kotaları (`Milestone 1B-C`) sonraki aşamaların sınırıdır.
 
 ### Sıradaki Adım (Kullanıcı Değerlendirmesi Sonrası)
-- **`Milestone 1B`:** `Untyped` fiziksel bellek yönetimi, 4-seviye `VSpace`/`CR3` + `active_cpus` TLB shootdown, Ring 3 geçişi (`SYSCALL`/`SYSRETQ`), `CSpace`, `ADR-007` zorlaması ve senkron `Endpoint` IPC.
+- **`Milestone 1B-B`:** 4-seviye `VSpace` sayfa tabloları, `PageOrder::Order2MiB` huge-page genişlemesi, kendi çekirdek `CR3` adres alanına geçiş sonrası `BootloaderReclaimable` çerçevelerin geri kazanımı ve `active_cpus` maskeli hedefli TLB shootdown.

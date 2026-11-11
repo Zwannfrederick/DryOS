@@ -11,6 +11,7 @@ mod idt;
 mod limine;
 mod mem_verify;
 mod percpu;
+mod pmm;
 mod sched;
 mod security;
 mod serial;
@@ -172,6 +173,7 @@ extern "C" fn bsp_kmain() -> ! {
     serial_println!(
         "[DRY-SEC] PASS: ADR-007 SecLabel (8B) + 3-Domain + Lease/Revoke invariants verified"
     );
+    let _pmm_inv = pmm::init_pmm(&mem);
 
     let force_xapic = cmdline.contains("apic_mode=xapic");
     let apic_cal = apic::detect_and_init_bsp_apic(
@@ -225,11 +227,15 @@ extern "C" fn bsp_kmain() -> ! {
     let irq_only_stage = cmdline.contains("preempt_stage=irq_only");
     let preempt_fault = sched::preempt_tests::PreemptFaultTest::from_cmdline(cmdline);
     sched::preempt_tests::verify_preemptive_scheduler(smp.cpu_count, irq_only_stage, preempt_fault);
+    if !irq_only_stage {
+        let pmm_fault = pmm::tests::PmmFaultTest::from_cmdline(cmdline);
+        pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
+    }
     sched::shutdown_ap_scheduler_service();
 
     if !irq_only_stage {
         serial_println!(
-            "[DRY-BOOT-OK] Milestone 1A-G UEFI boot + {}-vCPU SMP + cooperative & preemptive H1 scheduler verified cleanly.",
+            "[DRY-BOOT-OK] Milestone 1B-A UEFI boot + {}-vCPU SMP + H1 scheduler + PMM & Untyped foundation verified cleanly.",
             smp.cpu_count
         );
     }

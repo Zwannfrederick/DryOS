@@ -316,6 +316,81 @@ def verify_preempt_line(name: str, serial_out: str, smp: int) -> None:
         raise RuntimeError(f"[{name}] Expected preemptive race_migrations >= 1 on smp={smp}, got {fields}")
 
 
+def _parse_kv_ints(line: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for tok in line.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            if v.isdigit():
+                out[k] = int(v)
+    return out
+
+
+def verify_pmm_and_untyped_lines(name: str, serial_out: str, smp: int) -> None:
+    pmm_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PMM] PASS:" in ln]
+    if len(pmm_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-PMM] PASS line, got {len(pmm_lines)}")
+    pmm_kv = _parse_kv_ints(pmm_lines[0])
+    if pmm_kv.get("usable_frames", 0) < 32768 or pmm_kv.get("free_init", 0) < 32768:
+        raise RuntimeError(f"[{name}] Unexpectedly low usable/free frames: {pmm_lines[0]!r}")
+    if pmm_kv.get("reclaimable_frames", 0) < 1 or pmm_kv.get("kernel_meta_frames", 0) < 256:
+        raise RuntimeError(f"[{name}] Missing reclaimable/kernel_meta accounting: {pmm_lines[0]!r}")
+    if pmm_kv.get("meta_overhead_bps", 9999) > 50:
+        raise RuntimeError(f"[{name}] FrameMeta overhead > 0.50% (50 bps): {pmm_lines[0]!r}")
+    if pmm_kv.get("leaked_frames", 1) != 0:
+        raise RuntimeError(f"[{name}] Frame leak detected: {pmm_lines[0]!r}")
+    for flag in ("bootstrap_sealed=true", "cross_domain_zero_ok=true", "oom_reclaim_conserved=true"):
+        if flag not in pmm_lines[0]:
+            raise RuntimeError(f"[{name}] Missing {flag} in {pmm_lines[0]!r}")
+
+    ut_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-UNTYPED] PASS:" in ln]
+    if len(ut_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-UNTYPED] PASS line, got {len(ut_lines)}")
+    for flag in (
+        "split_ok=true",
+        "retype_ok=true",
+        "pin_guard_ok=true",
+        "revoke_scrub_ok=true",
+        "conserved=true",
+    ):
+        if flag not in ut_lines[0]:
+            raise RuntimeError(f"[{name}] Missing {flag} in {ut_lines[0]!r}")
+
+    bench_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-PMM-BENCH] PASS:" in ln]
+    if len(bench_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-PMM-BENCH] PASS line, got {len(bench_lines)}")
+    b_kv = _parse_kv_ints(bench_lines[0])
+    if b_kv.get("cpus") != smp:
+        raise RuntimeError(f"[{name}] PMM bench cpus mismatch: {bench_lines[0]!r}")
+    if b_kv.get("alloc_p50_cyc", 0) == 0 or b_kv.get("alloc_p99_cyc", 0) < b_kv.get("alloc_p50_cyc", 0):
+        raise RuntimeError(f"[{name}] Invalid alloc latency percentiles: {bench_lines[0]!r}")
+    if b_kv.get("free_p50_cyc", 0) == 0 or b_kv.get("free_p99_cyc", 0) < b_kv.get("free_p50_cyc", 0):
+        raise RuntimeError(f"[{name}] Invalid free latency percentiles: {bench_lines[0]!r}")
+    if b_kv.get("zero_4k_p50_cyc", 0) == 0 or b_kv.get("throughput_mops_x100", 0) == 0:
+        raise RuntimeError(f"[{name}] Missing zeroing/throughput metrics: {bench_lines[0]!r}")
+    if b_kv.get("mag_hit_pct", 0) < 90:
+        raise RuntimeError(f"[{name}] Expected magazine hit rate >= 90%, got: {bench_lines[0]!r}")
+    if (
+        b_kv.get("contig_2m_before", 0) < 16
+        or b_kv.get("contig_2m_mid", 99999) >= b_kv.get("contig_2m_before", 0)
+        or b_kv.get("contig_2m_after") != b_kv.get("contig_2m_before")
+    ):
+        raise RuntimeError(f"[{name}] 2MiB contiguous conservation mismatch: {bench_lines[0]!r}")
+
+    live_lines = [ln.strip() for ln in serial_out.splitlines() if "[DRY-LIVENESS-REG] PASS:" in ln]
+    if len(live_lines) != 1:
+        raise RuntimeError(f"[{name}] Expected 1 [DRY-LIVENESS-REG] PASS line, got {len(live_lines)}")
+    l_kv = _parse_kv_ints(live_lines[0])
+    if (
+        l_kv.get("cpus") != smp
+        or l_kv.get("unpinned_spawner_waves") != 4
+        or l_kv.get("spawned") != 48
+        or l_kv.get("exited") != 48
+        or l_kv.get("starved") != 0
+    ):
+        raise RuntimeError(f"[{name}] Spawner liveness regression mismatch: {live_lines[0]!r}")
+
+
 def assert_positive_smp_boot(
     name: str,
     kernel_elf: pathlib.Path,
@@ -355,7 +430,11 @@ def assert_positive_smp_boot(
         must_contain.extend(
             [
                 f"[DRY-PREEMPT] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1A-G UEFI boot + {smp}-vCPU SMP + cooperative & preemptive H1 scheduler verified cleanly.",
+                "[DRY-PMM] PASS:",
+                "[DRY-UNTYPED] PASS:",
+                f"[DRY-PMM-BENCH] PASS: cpus={smp}",
+                f"[DRY-LIVENESS-REG] PASS: cpus={smp}",
+                f"[DRY-BOOT-OK] Milestone 1B-A UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM & Untyped foundation verified cleanly.",
             ]
         )
     must_not_contain = [
@@ -364,6 +443,7 @@ def assert_positive_smp_boot(
         "[DRY-SMP-FAIL]",
         "[DRY-SCHED-FAIL]",
         "[DRY-PREEMPT-FAIL]",
+        "[DRY-PMM-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -383,7 +463,8 @@ def assert_positive_smp_boot(
     verify_apic_and_irq_lines(name, serial_out, smp, expected_mode=expected_apic_mode)
     if not irq_only:
         verify_preempt_line(name, serial_out, smp)
-    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt invariants verified in {elapsed:.3f}s).")
+        verify_pmm_and_untyped_lines(name, serial_out, smp)
+    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm invariants verified in {elapsed:.3f}s).")
 
 
 def main() -> None:
@@ -642,7 +723,26 @@ def main() -> None:
         must_not_contain=["[DRY-BOOT-OK]"],
     )
 
-    print("\n[QEMU-TEST] ALL 21 MILESTONE 1A-G SMP, COOPERATIVE + PREEMPTIVE SCHEDULER & FAULT CHECKS PASSED.")
+    # Milestone 1B-A Negative Physical Memory Manager & Untyped Capability Fault Tests (exit=35).
+    pmm_negative_cases = [
+        ("pmm_double_free", "double_free", "[DRY-PMM-FAIL] Double free detected"),
+        ("pmm_use_after_free", "uaf", "[DRY-PMM-FAIL] Use-after-free / stale generation detected"),
+        ("pmm_double_alloc", "double_alloc", "[DRY-PMM-FAIL] Double allocation / corrupt free-state detected"),
+        ("pmm_ownership_violation", "owner_mismatch", "[DRY-PMM-FAIL] Frame ownership / domain / pin violation"),
+        ("pmm_untyped_revoke", "untyped_revoke", "[DRY-PMM-FAIL] Revoked Untyped / stale capability access rejected"),
+    ]
+    for case_name, fault_arg, expected_fail in pmm_negative_cases:
+        assert_boot_case(
+            name=case_name,
+            kernel_elf=kernel_elf,
+            cmdline=f"console=com1 pmm_fault={fault_arg}",
+            smp=2,
+            expected_rc=EXIT_CODE_PANIC,
+            must_contain=[expected_fail, "[DRY-PANIC]"],
+            must_not_contain=["[DRY-BOOT-OK]"],
+        )
+
+    print("\n[QEMU-TEST] ALL 26 MILESTONE 1B-A SMP, H1 SCHEDULER, PMM & UNTYPED CHECKS PASSED.")
 
 
 if __name__ == "__main__":

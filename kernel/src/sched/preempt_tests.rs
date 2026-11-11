@@ -259,7 +259,7 @@ pub(crate) fn run_ap_irq_only_stage(cpu_idx: usize) {
     run_cpu_irq_only_torture(cpu_idx);
 }
 
-fn begin_preemptive_epoch(substage: u8, expected_threads: usize) {
+pub(crate) fn begin_preemptive_epoch(substage: u8, expected_threads: usize) {
     arm_epoch_watchdog(substage);
     set_ap_epoch_kind(ApEpochKind::PreemptiveSched);
     AP_PHASE_DONE_CPUS.store(0, Ordering::Release);
@@ -298,7 +298,7 @@ fn spawn_preemptible_with_assist(
     }
 }
 
-fn drain_preemptive_epoch_and_audit(online_cpus: usize) {
+pub(crate) fn drain_preemptive_epoch_and_audit(online_cpus: usize) {
     let start = rdtsc();
     let bsp_pcpu = get_percpu_by_idx(0);
     start_cpu_timer_for_phase(bsp_pcpu);
