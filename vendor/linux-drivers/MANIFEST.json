@@ -1,0 +1,336 @@
+{
+  "subsystem": "drivers/net/ethernet/intel/igc",
+  "license": "GPL-2.0-only",
+  "versions": {
+    "v6.12": {
+      "git_remote": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "tag_object_sha": "06090c9b622a7e1f797e775db4c035e0d779b76e",
+      "commit_sha": "adc218676eef25575469234709c2d87185ca223a",
+      "file_count": 26,
+      "total_lines": 17845,
+      "files": [
+        {
+          "name": "Makefile",
+          "bytes": 339,
+          "lines": 12,
+          "sha256": "52fa84978a3c1303c1945e979dd79151b4ba504233a0b9860f8a21250362e6cd"
+        },
+        {
+          "name": "igc.h",
+          "bytes": 21167,
+          "lines": 763,
+          "sha256": "ee23eba3040e68d57cda95e1217c65380cb6cfb82a09af35633e2d0debfdccdf"
+        },
+        {
+          "name": "igc_base.c",
+          "bytes": 10885,
+          "lines": 446,
+          "sha256": "40693e0241a98ebbec6a42b8304050b8c6be34a30721df2ca741a73e2013ed4b"
+        },
+        {
+          "name": "igc_base.h",
+          "bytes": 3625,
+          "lines": 106,
+          "sha256": "9117d7dd912ccb8457336cb99e3f5213ab63ab45fc502e17938e1ac42f57472d"
+        },
+        {
+          "name": "igc_defines.h",
+          "bytes": 31460,
+          "lines": 715,
+          "sha256": "f78ba005e163d6eaa91e43a09088f273a7cc6a77fbefd8b427256688e31edb67"
+        },
+        {
+          "name": "igc_diag.c",
+          "bytes": 4970,
+          "lines": 186,
+          "sha256": "2fd343dd0fbff884e57264d98d2e91c657d07b7fb3f3e9383409aca2e7b3e650"
+        },
+        {
+          "name": "igc_diag.h",
+          "bytes": 909,
+          "lines": 30,
+          "sha256": "839e685a1b621a39c63fbd91268a4f0254a41822120bda4b9af053b311ae573c"
+        },
+        {
+          "name": "igc_dump.c",
+          "bytes": 9248,
+          "lines": 318,
+          "sha256": "3199aa26b1b245f5d54b06a90b0e938018a10846957fc8df1c1a2f8726f36f02"
+        },
+        {
+          "name": "igc_ethtool.c",
+          "bytes": 59153,
+          "lines": 2091,
+          "sha256": "e297e12458a21ce3b23129b5a1e9aea6b4bf4494fe9e0edd14f8ca5aaf2c19fc"
+        },
+        {
+          "name": "igc_hw.h",
+          "bytes": 5876,
+          "lines": 288,
+          "sha256": "631f7efd61a4eca177033c69204161125fcfbf4544a3ac4e337f6e24c3c6f2d9"
+        },
+        {
+          "name": "igc_i225.c",
+          "bytes": 16322,
+          "lines": 641,
+          "sha256": "b9340ff35856146df04e0aa360f87b13ad99734ba3896fa844455b55a0827549"
+        },
+        {
+          "name": "igc_i225.h",
+          "bytes": 501,
+          "lines": 16,
+          "sha256": "5530f99f0413554dc789ed7d9fca27bf2b660896bc2d8db77e37c3f35ffb974a"
+        },
+        {
+          "name": "igc_leds.c",
+          "bytes": 7810,
+          "lines": 302,
+          "sha256": "6a259c04854e63f881854b6052a5713985a3bebca07cec29f6dc757428705315"
+        },
+        {
+          "name": "igc_mac.c",
+          "bytes": 25217,
+          "lines": 881,
+          "sha256": "b038ec0ec22843fae44a10b950be830c3091857367bfa958ba45aa3eed256ccc"
+        },
+        {
+          "name": "igc_mac.h",
+          "bytes": 1130,
+          "lines": 39,
+          "sha256": "c0343e80285dd63b2d01177c27727da0ecfde336f4f9176b79f973f84bbad561"
+        },
+        {
+          "name": "igc_main.c",
+          "bytes": 198340,
+          "lines": 7654,
+          "sha256": "2578b86408c31b00b802edcf508a84cdcd888453c53d55d18801de084f38f809"
+        },
+        {
+          "name": "igc_nvm.c",
+          "bytes": 4812,
+          "lines": 215,
+          "sha256": "6de7a1bba933eba73a0fc59a9fda598250ca71ce0962eb84a0d84104d8f2f0cc"
+        },
+        {
+          "name": "igc_nvm.h",
+          "bytes": 430,
+          "lines": 14,
+          "sha256": "1591e1e7b4271adb8d5283ed353102d0c7f0a6f00583bee16cde506ae4b32569"
+        },
+        {
+          "name": "igc_phy.c",
+          "bytes": 21720,
+          "lines": 792,
+          "sha256": "5a30b77f6f0d368eead9383991bb7e54bf24cd5dd3881517fe1729528583d3ca"
+        },
+        {
+          "name": "igc_phy.h",
+          "bytes": 754,
+          "lines": 22,
+          "sha256": "23f14ce1e1190a07c05b742622112fe3f10298d7f9036137a453ccc264de9153"
+        },
+        {
+          "name": "igc_ptp.c",
+          "bytes": 34873,
+          "lines": 1318,
+          "sha256": "c12d03c3113f4c7f42450a9abc1ecb1642e784ce51396972d0b1eabb41783d7f"
+        },
+        {
+          "name": "igc_regs.h",
+          "bytes": 15787,
+          "lines": 351,
+          "sha256": "a71400016d05233bb570581a130b7a5b6cbab70c457a5637510cb7f734e54530"
+        },
+        {
+          "name": "igc_tsn.c",
+          "bytes": 12392,
+          "lines": 465,
+          "sha256": "7813e6428d8ba77ca7ae701aebf011fbbe052301379a0e33ea0a476ef287a617"
+        },
+        {
+          "name": "igc_tsn.h",
+          "bytes": 390,
+          "lines": 12,
+          "sha256": "4660c4e1e54f18c4d7741eec5e9373fa7065793fb13e89214fa45995eb38d7c3"
+        },
+        {
+          "name": "igc_xdp.c",
+          "bytes": 3750,
+          "lines": 151,
+          "sha256": "b89a063659e3a29eda4e225621c8696b6ddd06aabfee29e07054fd0803960ed8"
+        },
+        {
+          "name": "igc_xdp.h",
+          "bytes": 470,
+          "lines": 17,
+          "sha256": "0aea61b77459979aa260e9fd69f4ebf5ea4f12ecd17ccc25135dcf04e0837521"
+        }
+      ]
+    },
+    "v6.18": {
+      "git_remote": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "tag_object_sha": "f7b88edb52c8dd01b7e576390d658ae6eef0e134",
+      "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+      "file_count": 26,
+      "total_lines": 18528,
+      "files": [
+        {
+          "name": "Makefile",
+          "bytes": 339,
+          "lines": 12,
+          "sha256": "52fa84978a3c1303c1945e979dd79151b4ba504233a0b9860f8a21250362e6cd"
+        },
+        {
+          "name": "igc.h",
+          "bytes": 22839,
+          "lines": 801,
+          "sha256": "508e7f43268102b5001bc6ddfa36e603e2c318a9c8167f58dbd4ed02de0e530b"
+        },
+        {
+          "name": "igc_base.c",
+          "bytes": 10986,
+          "lines": 452,
+          "sha256": "d56e5d1092167684170c5df21b3065f5226f7be9348991887bc29bfacb9f5a58"
+        },
+        {
+          "name": "igc_base.h",
+          "bytes": 3301,
+          "lines": 99,
+          "sha256": "131e3975c4549b88b0357aeffd8a2f28b5f7de845273cd27afdae447c23a94eb"
+        },
+        {
+          "name": "igc_defines.h",
+          "bytes": 34077,
+          "lines": 767,
+          "sha256": "c5fdbde5a5645834b2133559f0249456bbbd9afce5c16a1cf7e7b128a120921b"
+        },
+        {
+          "name": "igc_diag.c",
+          "bytes": 4939,
+          "lines": 185,
+          "sha256": "5fd0470601f6a4ca869d4f398093eda01ba58c1063485e79b5e28c756a3c6d08"
+        },
+        {
+          "name": "igc_diag.h",
+          "bytes": 909,
+          "lines": 30,
+          "sha256": "839e685a1b621a39c63fbd91268a4f0254a41822120bda4b9af053b311ae573c"
+        },
+        {
+          "name": "igc_dump.c",
+          "bytes": 9248,
+          "lines": 318,
+          "sha256": "3199aa26b1b245f5d54b06a90b0e938018a10846957fc8df1c1a2f8726f36f02"
+        },
+        {
+          "name": "igc_ethtool.c",
+          "bytes": 62892,
+          "lines": 2196,
+          "sha256": "0a474de0e5e4fb77fd8e228040910c806788b4e9e6d851c601be3d9ecb4fb4ad"
+        },
+        {
+          "name": "igc_hw.h",
+          "bytes": 5596,
+          "lines": 282,
+          "sha256": "bba59768bdc25c228c926c7633ccfee83690f6ba6912cc770555596a6f91d487"
+        },
+        {
+          "name": "igc_i225.c",
+          "bytes": 16317,
+          "lines": 641,
+          "sha256": "566e6b374a00982957e20e21d576b31b410f294cf0717ec31b0a28c005bdae06"
+        },
+        {
+          "name": "igc_i225.h",
+          "bytes": 501,
+          "lines": 16,
+          "sha256": "5530f99f0413554dc789ed7d9fca27bf2b660896bc2d8db77e37c3f35ffb974a"
+        },
+        {
+          "name": "igc_leds.c",
+          "bytes": 7810,
+          "lines": 302,
+          "sha256": "6a259c04854e63f881854b6052a5713985a3bebca07cec29f6dc757428705315"
+        },
+        {
+          "name": "igc_mac.c",
+          "bytes": 24762,
+          "lines": 871,
+          "sha256": "9614daf00e02e3f19a96ae3f88c79e742c9825517482c9e1ac17d8c4dd47e068"
+        },
+        {
+          "name": "igc_mac.h",
+          "bytes": 1130,
+          "lines": 39,
+          "sha256": "c0343e80285dd63b2d01177c27727da0ecfde336f4f9176b79f973f84bbad561"
+        },
+        {
+          "name": "igc_main.c",
+          "bytes": 205051,
+          "lines": 7854,
+          "sha256": "f8fe4b99988b9dd108296482597f263989eed0efd231be25a300ce5bbe26c97e"
+        },
+        {
+          "name": "igc_nvm.c",
+          "bytes": 3734,
+          "lines": 165,
+          "sha256": "abd76729263cf958cea72f67948d2ec964ebfd4f25644142cb68a97df6542b66"
+        },
+        {
+          "name": "igc_nvm.h",
+          "bytes": 349,
+          "lines": 12,
+          "sha256": "cf5434a26d39ef9758071bf0b39596e062cb293ee1506437366865aeb17095c6"
+        },
+        {
+          "name": "igc_phy.c",
+          "bytes": 21422,
+          "lines": 780,
+          "sha256": "9e2d778f0c2e1038c849ba570e37194d37c74300c977af0870121bd72953edc7"
+        },
+        {
+          "name": "igc_phy.h",
+          "bytes": 754,
+          "lines": 22,
+          "sha256": "23f14ce1e1190a07c05b742622112fe3f10298d7f9036137a453ccc264de9153"
+        },
+        {
+          "name": "igc_ptp.c",
+          "bytes": 35404,
+          "lines": 1345,
+          "sha256": "ff3f58571bccf8f3d4abe88a3a0405c5cfda23c09d58836f73ce99b18104a1e2"
+        },
+        {
+          "name": "igc_regs.h",
+          "bytes": 16558,
+          "lines": 367,
+          "sha256": "68ae816aea172fe45854db679758fef106c032757ba73af7691f0ee794da6609"
+        },
+        {
+          "name": "igc_tsn.c",
+          "bytes": 19523,
+          "lines": 722,
+          "sha256": "6353e01ed54cbb2a04ef7921bed1cb93b25f00bfeb3cf22f750169b87df56a6e"
+        },
+        {
+          "name": "igc_tsn.h",
+          "bytes": 1995,
+          "lines": 69,
+          "sha256": "68ed2e15509c81005d47739c83cacecf325fc3a572a38c461bf0fd7d02e56759"
+        },
+        {
+          "name": "igc_xdp.c",
+          "bytes": 4230,
+          "lines": 164,
+          "sha256": "e6596f123b7569298308ca73d2b75409e4fc483b5613e5cf3f1a2f791c883d5f"
+        },
+        {
+          "name": "igc_xdp.h",
+          "bytes": 470,
+          "lines": 17,
+          "sha256": "0aea61b77459979aa260e9fd69f4ebf5ea4f12ecd17ccc25135dcf04e0837521"
+        }
+      ]
+    }
+  }
+}

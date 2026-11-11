@@ -1,7 +1,7 @@
 # DRY OS — Geliştirme Devir Teslim ve Uygulama Durumu (`HANDOVER`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (09:36 +03:00)
-- **Mevcut Durum:** Git deposu (`main`) ilklendirildi; temel mimari ve ADR belgeleri korundu (`commit 5e7356e`). **Görev 1 (TLA+ TLC Biçimsel Doğrulaması) ve Görev 2 (Rust `loom` + Native Çok-Çekirdek Stres Doğrulaması) eksiksiz tamamlandı (`H1` kapısı geçildi).** `H2` ve çekirdek önyükleme (`Görev 3–5`) aşamalarına henüz geçilmedi.
+- **Son Güncelleme:** 11 Kasım 2026 (12:30 +03:00)
+- **Mevcut Durum:** **Faz 0 doğrulama kapısı (`H1` Scheduler ve `H2` Linux Driver Island Fizibilitesi — Görev 1..4) eksiksiz tamamlandı.** `dry-kernel` Faz 1 QEMU önyükleme aşaması (`Görev 5`) için mimari geçiş önerisi hazırlandı; çekirdek kodlamasına başlamadan önce kullanıcı onayı beklenmektedir.
 
 ---
 
@@ -12,11 +12,11 @@
 3. **ADR-003 (CSpace):** Faz 1–2'de sabit boyutlu düz korumalı tablo (*Flat Guarded CNode* + `generation` + `iommu_pin_count`), Faz 3'te ABI kırmadan 2 seviyeli radiks ağacı ve epoch-tabanlı `Revoke`.
 4. **ADR-004 (Scheduler):** TLC ve Rust `loom` ile doğrulanan `H1` (`AtomicU32(exec_state, park_token)` + açık `fence(Ordering::SeqCst)` + `CAS` tabanlı `post_switch_*`/`finish_waking_and_push`) + CPU başına öncelikli RR kuyruk + IPC Öncelik Bağışı (*Priority Inheritance*); Faz 3–4'te topoloji-farkındalıklı *work stealing* ve `NO_HZ_FULL`.
 5. **ADR-005 (Lisans):** DRY Kernel ve native servisler `MIT OR GPL-2.0-only`; Linux *Driver Island* süreçleri ve `libdry_lx_*` katmanı `GPL-2.0-only` (saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları sürücü adalarında yasak).
-6. **ADR-006 (Sıra & Bağımsızlık):** **H1 tamamlandı**; sıradaki adım **H2** fizibilite doğrulamasıdır. DRY Kernel gelişimi (Faz 1–2) H2'nin tüm sürücülerde başarılı olmasına bağımlı kılınmayacaktır.
+6. **ADR-006 (Sıra & Bağımsızlık):** **H1 ve H2 tamamlandı (`Gate 0` geçildi).** DRY Kernel gelişimi (Faz 1–2) H2'nin tüm sürücü sınıflarında veya fiziksel silikon IOMMU'da doğrulanmasını beklemeyecektir.
 
 ---
 
-## 2. Tamamlanan Doğrulamalar (`H1` — 11 Kasım 2026)
+## 2. Tamamlanan Doğrulamalar (`H1` & `H2` — 11 Kasım 2026)
 
 ### Görev 1: `H1` Modelinin Yürütülebilir TLC Doğrulaması `[TAMAMLANDI]`
 - **Üretilen Dosyalar:**
@@ -48,21 +48,34 @@
 
 ---
 
-## 3. Sıradaki Aşamalar ve Açık Ön-Koşullar (`Görev 3–5`)
+### Görev 3: `H2` Kaynak Edinimi, İkili Sembol Denetimi ve `libclang` AST Çıkarımı `[TAMAMLANDI]`
+- **Üretilen Dosyalar:**
+  - `vendor/linux-drivers/MANIFEST.json` (`v6.12` commit `adc218676eef25575469234709c2d87185ca223a`, `26` dosya, `17.845` satır; `v6.18` commit `7d0a66e4bb9081d75c82ec4957c50034cb0ea449`, `26` dosya, `18.528` satır; `0` değiştirilen satır)
+  - `tools/h2-audit/fetch_igc_sources.py`, `tools/h2-audit/audit_symbols.py`, `tools/h2-audit/clang_ast_extractor.c`, `tools/h2-audit/clang_ast_deps.py`
+  - `experiments/h2-island/manifests/igc-kmod-symbols.json`, `experiments/h2-island/manifests/igc-clang-ast-deps.json`
+- **Doğrulanan Sonuçlar:**
+  - İkili `igc.ko.zst`: `6.18.60-1-lts = 247` sembol, `7.2.14-arch1-1 = 244` sembol (`237` ortak = **`%96.0`**); `e1000e` ile `%72.5`, `igb` ile `%79.3` / `%83.8` örtüşme.
+  - `libclang` `23.1.4` AST: `v6.18` 13 TU genelinde **`349` dış çekirdek çağrısı** (`195` adedi `nm -u`'dan gizli `static inline` yardımcı; 4'lü sınıflandırma: `auto_map=131`, `semantic_adapter=132`, `feature_prune=40`, `unsupported=46`, `sınıflandırılmamış=0`).
 
-### Açık Ön-Koşullar
-1. **Görev 3–4 Ön-Koşulu (Linux `.c` Kaynakları ve Fiziksel `igc` Yokluğu):** `/usr/src/linux-lts` yalnızca başlıkları içeriyor (`*.c` yok); ayrıca makinede fiziksel Intel `igc` NIC yok ve QEMU 11.1.3 `-device igc` içermiyor (`igb` ve `e1000e` içeriyor). Görev 3–4'te `kernel.org` üzerinden `v6.12` / `v6.18` `drivers/net/ethernet/intel/{igc,e1000e,igb}` dosyaları çekilecek; `igc` tam derleme/bağlama hedefi, QEMU `intel-iommu` + `e1000e`/`igb` ise canlı paket/VFIO hedefi olarak kullanılacak.
-2. **Görev 5 Ön-Koşulu (`rust-src` / `x86_64-unknown-none` ve `limine` Eksik):** Sistem Rust kurulumunda yalnızca `x86_64-unknown-linux-gnu` hedef kütüphanesi kurulu ve `limine` paketi henüz yüklü değil. Görev 5'e geçmeden önce `rust-src` ve `limine` kurulması gerekecek.
+### Görev 4: `H2` `igc` Userspace Driver Island (`GPL-2.0-only`) ve Ayrı QEMU `vfio-pci` PoC `[TAMAMLANDI]`
+- **Üretilen Dosyalar:**
+  - `experiments/h2-island/Makefile`, `experiments/h2-island/include/dry_island.h`, `experiments/h2-island/include/lx_emul/*.h`, `experiments/h2-island/include/{linux,net}/*.h`
+  - `experiments/h2-island/src/{dma_arena.c,lx_mmio_irq.c,lx_net_shim.c,igc_pruned_stubs.c}`
+  - `experiments/h2-island/tests/test_h2_igc_island.c`, `experiments/h2-island/tests/vfio_e1000e_live.c`
+- **Doğrulanan Sonuçlar:**
+  - **Uyumluluk Runtime Boyutu:** Toplam **`3.468` satır (`3.028` SLOC)** (`<= 5.000 LOC` hedefi altında); upstream `igc` değişikliği **`%0.00`**; `v6.12 -> v6.18` taşıma farkı **`38` satır (`28` SLOC)** (`<= 100 LOC` hedefi altında).
+  - **`make -C experiments/h2-island test`:** Hem `v6.18` hem `v6.12` gerçek 6 çekirdek `igc` C dosyası derlenip bağlandı; `DmaArena` + gölge `vmemmap`, BAR0 MMIO + `eventfd` MSI-X/NAPI ve uçtan uca `igc_probe -> igc_open -> 3x TX/DMA/MSIX/NAPI/IoRing RX -> igc_close` geçti (`dyn_iommu=0`).
+  - **`make -C experiments/h2-island vfio-test` (Ayrı `e1000e` Deneyi):** KVM + emüle `intel-iommu` (`caching-mode=on`) + `vfio-pci` üzerinde iki `e1000e` (`8086:10d3`) arasında canlı DMA TX/RX + MSI `eventfd` ve eşlenmemiş `0xdead0000` IOVA için DMAR hatası doğrulandı (*Not: fiziksel silikon IOMMU güvenlik kanıtı değildir*).
 
-### Görev 3: `H2` Bağımlılık ve Sürüm Kayması Analizinin Otomatik Tekrar Üretimi `[SIRADAKİ ADIM]`
-- **Dosya Konumları:** `tools/h2-audit/audit_symbols.py`, `experiments/h2-island/manifests/igc-6.18-symbols.json`, `vendor/linux-drivers/` (yalnızca `igc`/`e1000e` kaynak dilimi)
-- **Çalıştırma Komutu:**
-  ```bash
-  python3 tools/h2-audit/audit_symbols.py --kmod-lts 6.18.60-1-lts --kmod-curr 7.2.14-arch1-1 --out experiments/h2-island/manifests/igc-6.18-symbols.json
-  ```
+---
 
-### Görev 4: `H2` VFIO / Driver Island PoC'sinin İlk Uygulanabilir Parçası `[BEKLEMEDE]`
-- **Dosya Konumları:** `experiments/h2-island/Makefile`, `experiments/h2-island/src/dma_arena.c`, `experiments/h2-island/src/lx_rt_sync.c`, `experiments/h2-island/src/vfio_probe.c`, `experiments/h2-island/include/lx_emul/`
+## 3. Sıradaki Aşama ve Açık Ön-Koşullar (`Görev 5` — Faz 1 `dry-kernel` QEMU Önyükleme)
 
-### Görev 5: Deney Sonuçlarına Göre Minimal `dry-kernel` QEMU Boot İskeleti `[BEKLEMEDE]`
-- **Dosya Konumları:** `kernel/Cargo.toml`, `kernel/linker.ld`, `kernel/src/main.rs`, `tools/qemu-run.sh`
+### Doğrulanmış Konak Araç Zinciri Durumu
+- **Hazır Olanlar:** `rustc 1.99.1` (Arch Linux `1:1.99.1-1`), `/usr/bin/ld.lld`, `/usr/bin/qemu-system-x86_64` (`11.1.3` + `/dev/kvm`), `/usr/share/edk2/x64/OVMF_CODE.4m.fd` & `OVMF_VARS.4m.fd`, `mtools` (`mformat`, `mmd`, `mcopy` — `xorriso` gerektirmeden GPT/FAT32 UEFI ESP imajı üretebilir).
+- **Eksik Ön-Koşullar (Kullanıcı Onayı / Kurulum Gerektirenler):**
+  1. **`x86_64-unknown-none` / `rust-src`:** Sistemde `rustup` yoktur ve `/usr/lib/rustlib/` yalnızca `x86_64-unknown-linux-gnu` içerir (`/usr/lib/rustlib/src` yok). Bare-metal `no_std` derlemesi için Arch `rust-src` paketinin (`RUSTC_BOOTSTRAP=1 -Z build-std=core,alloc`) veya `rustup` (`rustup target add x86_64-unknown-none`) kurulumu gerekir.
+  2. **Limine UEFI Önyükleyici (`BOOTX64.EFI`):** Sistemde `limine` paketi kurulu değildir; ya sistem paketi (`pacman -S limine`) kurulmalı ya da resmi `limine-v10.x-binary` dalından yalnızca `BOOTX64.EFI` ikilisi `vendor/limine/` altına indirilmelidir.
+
+### Görev 5: Minimal `dry-kernel` Limine UEFI QEMU Boot İskeleti `[KULLANICI ONAYI BEKLİYOR]`
+- **Planlanan Dosya Konumları:** `kernel/Cargo.toml`, `kernel/linker.ld`, `kernel/src/{main.rs,limine_proto.rs,serial.rs,arch_x86_64.rs,smp.rs,sched_h1.rs}`, `tools/qemu-run.sh`

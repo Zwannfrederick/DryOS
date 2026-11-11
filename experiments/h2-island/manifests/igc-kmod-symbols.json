@@ -1,0 +1,1594 @@
+{
+  "driver": "igc",
+  "modules_analyzed": {
+    "6.18.60-1-lts": {
+      "path": "/lib/modules/6.18.60-1-lts/kernel/drivers/net/ethernet/intel/igc/igc.ko.zst",
+      "elf_bytes": 483648,
+      "undefined_symbol_count": 247,
+      "category_counts": {
+        "auto_map": 61,
+        "semantic_adapter": 95,
+        "feature_prune": 76,
+        "unsupported": 15
+      }
+    },
+    "7.2.14-arch1-1": {
+      "path": "/lib/modules/7.2.14-arch1-1/kernel/drivers/net/ethernet/intel/igc/igc.ko.zst",
+      "elf_bytes": 503263,
+      "undefined_symbol_count": 244
+    }
+  },
+  "version_drift_6_18_to_7_2": {
+    "common_count": 237,
+    "stability_ratio": 0.9595,
+    "removed_in_7_2": [
+      "__SCT__preempt_schedule_notrace",
+      "__mutex_init",
+      "__napi_schedule",
+      "__preempt_count",
+      "__warn_printk",
+      "hugetlb_optimize_vmemmap_key",
+      "ktime_get_clock_ts64",
+      "ktime_get_snapshot",
+      "skb_add_rx_frag_netmem",
+      "skb_copy_bits"
+    ],
+    "added_in_7_2": [
+      "__SCT__WARN_trap",
+      "__napi_schedule_irqoff",
+      "__vlan_get_protocol_offset",
+      "dump_stack",
+      "ktime_get_snapshot_id",
+      "mutex_init_generic",
+      "tracepoint_srcu"
+    ]
+  },
+  "cross_driver_overlap_6_18": {
+    "e1000e": {
+      "elf_bytes": 806696,
+      "symbol_count": 200,
+      "shared_with_igc": 145,
+      "shared_ratio_of_e1000e": 0.725
+    },
+    "igb": {
+      "elf_bytes": 784022,
+      "symbol_count": 261,
+      "shared_with_igc": 207,
+      "shared_ratio_of_igb": 0.7931
+    }
+  },
+  "union_symbol_count": 254,
+  "union_category_counts": {
+    "auto_map": 62,
+    "semantic_adapter": 98,
+    "feature_prune": 79,
+    "unsupported": 15
+  },
+  "unclassified_count": 0,
+  "symbols": {
+    "__SCK__tp_func_xdp_exception": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__SCT__WARN_trap": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "__SCT__might_resched": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__SCT__preempt_schedule_notrace": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "__SCT__tp_func_xdp_exception": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__alloc_pages_noprof": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__alloc_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__const_udelay": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__cpu_online_mask": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__dma_sync_single_for_cpu": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__dma_sync_single_for_device": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__dynamic_netdev_dbg": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__fentry__": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__fortify_panic": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__free_pages": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__hw_addr_sync_dev": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__kmalloc_cache_noprof": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__kmalloc_noprof": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__list_add_valid_or_report": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__list_del_entry_valid_or_report": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__mutex_init": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "__napi_schedule": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "__napi_schedule_irqoff": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "__netdev_alloc_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__netif_napi_del_locked": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__num_online_cpus": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__page_frag_cache_drain": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__pci_register_driver": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__pm_runtime_idle": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__pm_runtime_resume": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__preempt_count": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "__rcu_read_lock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__rcu_read_unlock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__ref_stack_chk_guard": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__skb_pad": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__stack_chk_fail": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__tracepoint_xdp_exception": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__udelay": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__vlan_get_protocol_offset": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "__warn_printk": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "__x86_indirect_thunk_rax": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__x86_indirect_thunk_rdx": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__x86_return_thunk": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "__xdp_rxq_info_reg": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_dev_err": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_dev_info": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_dev_warn": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_printk": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_raw_spin_lock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_raw_spin_lock_irqsave": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_raw_spin_unlock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "_raw_spin_unlock_irqrestore": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "alloc_etherdev_mqs": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "bpf_dispatcher_xdp_func": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "bpf_master_redirect_enabled_key": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "bpf_prog_put": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "bpf_stats_enabled_key": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "bpf_warn_invalid_xdp_action": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "cancel_work_sync": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "consume_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "cpu_number": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "csum_partial": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dev_addr_mod": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dev_driver_string": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dev_kfree_skb_any_reason": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dev_trans_start": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "device_set_wakeup_enable": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_alloc_attrs": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_free_attrs": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_map_page_attrs": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_set_coherent_mask": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_set_mask": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dma_unmap_page_attrs": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "do_trace_netlink_extack": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dql_completed": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dql_reset": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "dump_stack": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "eth_get_headlen": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "eth_platform_get_mac_address": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "eth_type_trans": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_event_handle": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_get_mm": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_init": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_link_state_handle": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_set_mm": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_mmsv_stop": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_puts": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ethtool_sprintf": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "free_irq": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "free_netdev": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "get_device_system_crosststamp": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "gro_receive_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "hrtimer_cancel": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "hrtimer_setup": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "hrtimer_start_range_ns": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "hugetlb_optimize_vmemmap_key": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "ioremap": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "iounmap": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "is_vmalloc_addr": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "jiffies": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "kfree": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "kmalloc_caches": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ktime_get": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ktime_get_clock_ts64": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "ktime_get_snapshot": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "ktime_get_snapshot_id": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "ktime_get_with_offset": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "kvfree_call_rcu": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "led_classdev_register_ext": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "led_classdev_unregister": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "memchr_inv": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "memcmp": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "memcpy": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "memcpy_fromio": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "memset": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "mod_timer": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "msleep": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "msleep_interruptible": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "mutex_init_generic": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "mutex_lock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "mutex_unlock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_alloc_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_build_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_complete_done": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_consume_skb": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_disable": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_enable": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "napi_schedule_prep": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "net_ratelimit": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_err": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_info": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_printk": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_reset_tc": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_rss_key_fill": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_set_num_tc": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_set_tc_queue": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netdev_warn": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_carrier_off": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_carrier_on": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_device_attach": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_device_detach": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_napi_add_weight_locked": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_napi_set_irq_locked": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_queue_set_napi": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_rx": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_schedule_queue": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_set_real_num_queues": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_tx_stop_all_queues": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "netif_tx_wake_queue": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ns_to_timespec64": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "numa_node": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "page_offset_base": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "param_ops_int": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_clear_master": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_device_is_present": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_device": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_link_state": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_link_state_locked": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_msi": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_msix": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_disable_ptm": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_enable_device_mem": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_enable_msi": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_enable_msix_range": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_enable_ptm": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_enable_wake": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_iounmap": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_read_config_word": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_release_selected_regions": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_request_selected_regions": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_restore_state": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_save_state": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_select_bars": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_set_master": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_set_power_state": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_unregister_driver": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pci_wake_from_d3": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pcie_print_link_status": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pcie_ptm_enabled": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "phys_base": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pm_schedule_suspend": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "print_hex_dump": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "pskb_expand_head": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ptp_clock_event": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ptp_clock_index": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ptp_clock_register": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ptp_clock_unregister": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "ptp_find_pin": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "queue_work_on": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "refcount_warn_saturate": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "register_netdev": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "request_threaded_irq": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "round_jiffies": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "rtnl_lock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "rtnl_unlock": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "sched_clock": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "scnprintf": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "set_normalized_timespec64": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "sized_strscpy": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "skb_add_rx_frag_netmem": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "skb_checksum_help": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "skb_clone_tx_timestamp": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "skb_copy_bits": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": false
+    },
+    "skb_put": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "skb_tstamp_tx": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "snprintf": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "softnet_data": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "sprintf": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "static_key_slow_dec": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "static_key_slow_inc": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "strchr": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "strnlen": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "synchronize_irq": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "synchronize_net": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "system_percpu_wq": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "system_state": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "this_cpu_off": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "timecounter_init": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "timer_delete_sync": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "timer_init_key": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "tracepoint_srcu": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": false,
+      "in_7_2": true
+    },
+    "unregister_netdev": {
+      "category": "semantic_adapter",
+      "reason": "dma_napi_skb_irq_or_rt_sync_adapter",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "usleep_range_state": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "vfree": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "vmalloc_array_noprof": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "vmemmap_base": {
+      "category": "unsupported",
+      "reason": "monolithic_percpu_or_vmemmap_binary_global",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "vzalloc_noprof": {
+      "category": "auto_map",
+      "reason": "direct_allocator_pci_mmio_time_or_libc_map",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_convert_zc_to_xdp_frame": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_do_flush": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_do_redirect": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_features_clear_redirect_target": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_features_set_redirect_target": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_master_redirect": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_return_frame": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_rxq_info_is_reg": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_rxq_info_reg_mem_model": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_rxq_info_unreg": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_rxq_info_unreg_mem_model": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xdp_warn": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_alloc": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_dma_map": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_dma_unmap": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_free": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_raw_get_data": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_raw_get_dma": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xp_set_rxq_info": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_clear_rx_need_wakeup": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_get_pool_from_qid": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_set_rx_need_wakeup": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_set_tx_need_wakeup": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_tx_completed": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_tx_peek_desc": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_tx_release": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    },
+    "xsk_uses_need_wakeup": {
+      "category": "feature_prune",
+      "reason": "optional_xdp_ptp_tsn_pm_or_tracing",
+      "in_6_18": true,
+      "in_7_2": true
+    }
+  }
+}
