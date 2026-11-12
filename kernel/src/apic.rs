@@ -23,6 +23,9 @@ use crate::percpu::get_percpu_by_idx;
 
 pub const VEC_PIC_SPURIOUS_MASTER: u8 = 0x27;
 pub const VEC_PIC_SPURIOUS_SLAVE: u8 = 0x2f;
+pub const VEC_EXT_IRQ_BASE: u8 = 0x30;
+pub const EXT_IRQ_VECTOR_COUNT: usize = 16;
+pub const VEC_EXT_IRQ_LAST: u8 = VEC_EXT_IRQ_BASE + (EXT_IRQ_VECTOR_COUNT as u8) - 1;
 pub const VEC_TLB_SHOOTDOWN: u8 = 0xee;
 pub const VEC_LAPIC_TIMER: u8 = 0xef;
 pub const VEC_APIC_SPURIOUS: u8 = 0xff;
@@ -128,6 +131,8 @@ static XAPIC_MMIO_VIRT: AtomicU64 = AtomicU64::new(0);
 static CALIBRATED_TICK_INIT: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_TICK_INIT: AtomicU32 = AtomicU32::new(0);
 static SPURIOUS_APIC_IRQS: AtomicU64 = AtomicU64::new(0);
+static BOOT_TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
+static CALIBRATED_TSC_KHZ: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn io_delay() {
@@ -344,6 +349,19 @@ pub fn lapic_eoi() {
 #[inline]
 pub fn apic_phys_base() -> u64 {
     APIC_PHYS_BASE.load(Ordering::Acquire)
+}
+
+/// Return `(tsc_mhz, uptime_ms, elapsed_tsc)` measured monotonically from `BOOT_TSC_ORIGIN`.
+#[inline]
+pub fn uptime_telemetry() -> (u64, u64, u64) {
+    let origin = BOOT_TSC_ORIGIN.load(Ordering::Acquire);
+    let khz = CALIBRATED_TSC_KHZ.load(Ordering::Acquire).max(1_000);
+    let elapsed = if origin == 0 {
+        0
+    } else {
+        rdtsc().saturating_sub(origin)
+    };
+    (khz / 1_000, elapsed / khz, elapsed)
 }
 
 /// Send an edge-triggered Fixed Inter-Processor Interrupt (`vector >= 32`) to `dest_lapic_id`
@@ -563,6 +581,8 @@ pub fn detect_and_init_bsp_apic(
     let tick_init = (best_ticks_ms.clamp(1_000, 50_000_000)) as u32;
     CALIBRATED_TICK_INIT.store(tick_init, Ordering::Release);
     ACTIVE_TICK_INIT.store(tick_init, Ordering::Release);
+    BOOT_TSC_ORIGIN.store(rdtsc(), Ordering::Release);
+    CALIBRATED_TSC_KHZ.store(best_tsc_khz.max(1_000), Ordering::Release);
 
     ApicCalibrationSummary {
         mode: chosen_mode,

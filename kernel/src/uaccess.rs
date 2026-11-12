@@ -47,6 +47,7 @@ pub enum SysError {
     MsgSize = -90,
     IrqForbidden = -95,
     Revoked = -110,
+    Already = -114,
     TimedOut = -116,
     Canceled = -125,
 }

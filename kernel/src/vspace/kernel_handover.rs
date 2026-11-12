@@ -249,10 +249,11 @@ pub fn init_and_activate_kernel_vspace(
     let ktext_phys_start = mem.kernel_phys_base + (text_start - mem.kernel_virt_base);
     let kro_phys_end = mem.kernel_phys_base + (rodata_end - mem.kernel_virt_base);
     let apic_page_phys = apic_phys_base() & PTE_PHYS_MASK_4K;
+    let ioapic_page_phys = crate::acpi::ioapic_phys_base().map(|p| p & PTE_PHYS_MASK_4K);
 
     for pfn in 0..inv.max_tracked_pfn {
         let phys = (pfn as u64) << PAGE_SHIFT;
-        if phys == apic_page_phys {
+        if phys == apic_page_phys || ioapic_page_phys == Some(phys) {
             continue;
         }
         if query_frame_state(phys) == FrameState::ReservedOrMmio {
@@ -273,6 +274,23 @@ pub fn init_and_activate_kernel_vspace(
         uc_flags,
         &mut pt_frames,
     );
+    if let Some(io_phys) = ioapic_page_phys {
+        if io_phys != apic_page_phys {
+            assert_eq!(
+                query_frame_state(io_phys),
+                FrameState::ReservedOrMmio,
+                "IOAPIC base {:#x} must reside in ReservedOrMmio space",
+                io_phys
+            );
+            map_kernel_4k_init(
+                pml4_h.pfn,
+                mem.hhdm_offset + io_phys,
+                io_phys,
+                uc_flags,
+                &mut pt_frames,
+            );
+        }
+    }
 
     let wx_ok = audit_kernel_upper_half_wx_and_us(pml4_h.pfn);
     assert!(wx_ok, "KERNEL_VSPACE upper-half W^X or U/S=0 audit failed");

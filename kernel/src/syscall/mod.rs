@@ -11,37 +11,32 @@
 //! - **Preserved:** `rbx`, `rbp`, `rsp`, `r12`..`r15` (except explicit IPC receive outputs).
 //! - **Clobbered / Scrubbed:** `rcx` (`RIP`), `r11` (`RFLAGS`), and `rdi`, `rsi`, `r8`, `r9`, `r10`.
 
+pub mod cold;
 pub mod entry;
 
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::arch::{cli, read_rflags, read_rsp, sti};
-use crate::cspace::cap::{CapError, CapPtr};
-use crate::cspace::revoke::{cspace_delete_cap, cspace_destroy_object, cspace_revoke_children};
-use crate::cspace::{cspace_derive, with_pinned_cap};
-use crate::display::sys_fb_map;
+use crate::cspace::cap::CapPtr;
 use crate::ipc::endpoint::{
-    ep_create, ep_recv, ep_reply, ep_reply_recv, ep_send_or_call, IpcFastOut, IpcSendInput,
+    ep_recv, ep_reply, ep_reply_recv, ep_send_or_call, IpcFastOut, IpcSendInput,
 };
-use crate::ipc::notif::{notif_create, notif_signal, notif_wait};
+use crate::ipc::notif::{notif_signal, notif_wait};
 use crate::ipc::{
-    map_cap_err_to_sys, MsgTag, SharedPayloadDesc, UserIpcRecvExt, UserIpcSendExt,
-    MAX_IPC_EXTRA_BYTES, MSG_FLAG_EXTRA_BUF, MSG_FLAG_GRANT_CAP, MSG_FLAG_NON_BLOCKING,
-    MSG_FLAG_SHARED_DESC,
+    MsgTag, SharedPayloadDesc, UserIpcRecvExt, UserIpcSendExt, MAX_IPC_EXTRA_BYTES,
+    MSG_FLAG_EXTRA_BUF, MSG_FLAG_GRANT_CAP, MSG_FLAG_NON_BLOCKING, MSG_FLAG_SHARED_DESC,
 };
 use crate::percpu::current_percpu;
-use crate::proc::supervisor::{sys_proc_spawn, sys_proc_wait};
 use crate::sched::state::ThreadId;
 use crate::sched::{
     current_slot_on_cpu, set_ap_epoch_kind, tcb, yield_now, ApEpochKind, AP_PHASE_DONE_CPUS,
     AP_PHASE_EPOCH,
 };
-use crate::security::{
-    current_lease_epoch, unpack_seclabel_u64, CapRights, SecDomain, SecFlags, SecLabel,
-};
+use crate::security::{unpack_seclabel_u64, CapRights, SecLabel};
 use crate::serial::write_sanitized_user_bytes;
 use crate::serial_println;
+use crate::syscall::cold::sys_cold_dispatch;
 use crate::syscall::entry::{
     init_syscall_msrs_on_current_cpu, validate_user_context, SyscallFrame,
     DRY_BENCH_LAST_SYSCALL_ENTRY_TSC, USER_RFLAGS_ALLOWED_MASK, USER_RFLAGS_FIXED_SET,
@@ -70,6 +65,12 @@ pub const SYS_CAP_REVOKE: u64 = 16;
 pub const SYS_PROC_SPAWN: u64 = 17;
 pub const SYS_PROC_WAIT: u64 = 18;
 pub const SYS_FB_MAP: u64 = 19;
+pub const SYS_IRQ_BIND: u64 = 20;
+pub const SYS_IRQ_ACK: u64 = 21;
+pub const SYS_IOPORT_RW: u64 = 22;
+pub const SYS_SYSINFO: u64 = 23;
+pub const SYS_FRAME_ALLOC: u64 = 24;
+pub const SYS_VSPACE_MAP: u64 = 25;
 
 pub const MAX_WRITE_DEBUG_LEN: usize = 512;
 
@@ -126,19 +127,6 @@ pub fn init_all_cpus_syscall_and_smap(online_cpus: usize) {
     }
 }
 
-fn decode_target_obj_label(subj_label: SecLabel, spec: u64) -> Result<SecLabel, SysError> {
-    if spec == 0 {
-        return Ok(subj_label);
-    }
-    let dom = match (spec & 0xff) as u8 {
-        0 => SecDomain::Userspace,
-        1 => SecDomain::RootSystem,
-        _ => return Err(SysError::Perm),
-    };
-    let comp = ((spec >> 16) & 0xffff) as u16;
-    Ok(SecLabel::new(dom, SecFlags::NONE, comp, 1))
-}
-
 #[inline(never)]
 fn sys_write_debug_impl(user_ptr: u64, byte_len: u64, trace: bool) -> Result<isize, SysError> {
     if byte_len > (MAX_WRITE_DEBUG_LEN as u64) {
@@ -152,42 +140,6 @@ fn sys_write_debug_impl(user_ptr: u64, byte_len: u64, trace: bool) -> Result<isi
         serial_println!("[DRY-SYSCALL] write_debug: OK");
     }
     Ok(len as isize)
-}
-
-fn sys_cap_query_impl(
-    cspace_id: u16,
-    subj_raw: u64,
-    cap_raw: u64,
-    user_out_ptr: u64,
-) -> Result<isize, SysError> {
-    if (user_out_ptr & 7) != 0 {
-        return Err(SysError::Inval);
-    }
-    let subj_label = unpack_seclabel_u64(subj_raw);
-    let now_epoch = current_lease_epoch();
-    let ptr = CapPtr(cap_raw);
-
-    let info = with_pinned_cap(cspace_id, subj_label, ptr, CapRights::READ, now_epoch, |res| {
-        Ok(UserCapInfo {
-            obj_kind: res.obj_kind as u8,
-            domain: res.obj_label.domain as u8,
-            flags: res.obj_label.flags.0 as u16,
-            rights_bits: res.rights.0 as u32,
-            compartment_id: res.obj_label.compartment_id,
-            _pad: 0,
-            lease_epoch: res.lease_epoch,
-            badge: res.badge,
-            abi_reserved: 0,
-        })
-    })
-    .map_err(map_cap_err_to_sys)?;
-
-    // SAFETY: `UserCapInfo` is `#[repr(C)]` POD (`32` bytes) with zero uninitialized padding (`_pad = 0`).
-    let bytes = unsafe {
-        core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<UserCapInfo>())
-    };
-    copy_to_user(user_out_ptr, bytes)?;
-    Ok(0)
 }
 
 type ParsedSendExt = (
@@ -459,108 +411,6 @@ fn sys_ipc_reply_recv_ext(
     )?;
     commit_user_recv_ext(recv_ext_ptr, tmpl, &out, &r_extra)?;
     Ok(out)
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn sys_cold_dispatch(
-    nr: u64,
-    pid: u32,
-    cur_slot: usize,
-    a0: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
-) -> (isize, u64) {
-    let cur_tcb = tcb(cur_slot);
-    match nr {
-        SYS_CAP_QUERY => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj_raw = cur_tcb.subj_label_raw.load(Ordering::Acquire);
-            match sys_cap_query_impl(cs_id, subj_raw, a0, a1) {
-                Ok(v) => (v, 0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_EP_CREATE => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            match decode_target_obj_label(subj, a0)
-                .and_then(|obj_lbl| ep_create(cs_id, subj, obj_lbl, 0).map_err(map_cap_err_to_sys))
-            {
-                Ok((cap, _)) => (0, cap.0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_NOTIFY_CREATE => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            match decode_target_obj_label(subj, a0)
-                .and_then(|obj_lbl| notif_create(cs_id, subj, obj_lbl, 0).map_err(map_cap_err_to_sys))
-            {
-                Ok((cap, _)) => (0, cap.0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_CAP_DERIVE => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            let now = current_lease_epoch();
-            match cspace_derive(
-                cs_id,
-                subj,
-                CapPtr(a0),
-                CapRights((a1 & 0xffff) as u16),
-                a2 as u32,
-                a3,
-                now,
-            )
-            .map_err(map_cap_err_to_sys)
-            {
-                Ok(cap) => (0, cap.0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_CAP_REVOKE => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            let now = current_lease_epoch();
-            let res: Result<usize, CapError> = match a1 {
-                0 => cspace_revoke_children(cs_id, subj, CapPtr(a0), now),
-                1 => cspace_delete_cap(cs_id, subj, CapPtr(a0), now).map(|()| 1),
-                2 => cspace_destroy_object(cs_id, subj, CapPtr(a0), now).map(|()| 1),
-                _ => Err(CapError::InvalidHandle),
-            };
-            match res.map_err(map_cap_err_to_sys) {
-                Ok(n) => (n as isize, 0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_PROC_SPAWN => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            match sys_proc_spawn(pid, cs_id, subj, a0, a1, a2, a3, a4, a5) {
-                Ok(pair) => pair,
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        SYS_PROC_WAIT => match sys_proc_wait(pid, a0, a1, a2) {
-            Ok(pair) => pair,
-            Err(e) => (e.as_raw(), 0),
-        },
-        SYS_FB_MAP => {
-            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
-            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            let vs_id = cur_tcb.vspace_id.load(Ordering::Acquire);
-            match sys_fb_map(cs_id, subj, vs_id, a0, a1, a2) {
-                Ok(pages) => (pages, 0),
-                Err(e) => (e.as_raw(), 0),
-            }
-        }
-        _ => (SysError::NoSys.as_raw(), 0),
-    }
 }
 
 #[cold]

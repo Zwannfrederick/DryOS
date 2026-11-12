@@ -4,6 +4,7 @@
 #![no_std]
 #![no_main]
 
+mod acpi;
 mod apic;
 mod arch;
 mod cspace;
@@ -11,6 +12,7 @@ mod display;
 mod gdt_tss;
 mod idt;
 mod ipc;
+mod irq;
 mod limine;
 mod mem_verify;
 mod percpu;
@@ -177,6 +179,21 @@ extern "C" fn bsp_kmain() -> ! {
     );
     let _pmm_inv = pmm::init_pmm(&mem);
     let _fb_valid = display::init_framebuffer(&mem, cmdline);
+    let acpi_madt = acpi::discover_acpi_madt(
+        mem.hhdm_offset,
+        mem.kernel_phys_base,
+        mem.kernel_virt_base,
+    );
+    serial_println!(
+        "[DRY-ACPI] PASS: rsdp_rev={} xsdt={} ioapic_found={} ioapic_id={} ioapic_phys={:#x} gsi_base={} iso_overrides={}",
+        acpi_madt.rsdp_revision,
+        acpi_madt.used_xsdt,
+        acpi_madt.ioapic_found,
+        acpi_madt.ioapic_id,
+        acpi_madt.ioapic_phys,
+        acpi_madt.ioapic_gsi_base,
+        acpi_madt.iso_override_count
+    );
 
     let force_xapic = cmdline.contains("apic_mode=xapic");
     let apic_cal = apic::detect_and_init_bsp_apic(
@@ -235,6 +252,11 @@ extern "C" fn bsp_kmain() -> ! {
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        let _ioapic_ok = irq::init_ioapic_and_irq_subsystem(mem.hhdm_offset, bsp_lapic_id);
+        if cmdline.contains("irq_fault=") {
+            syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+            irq::tests::maybe_run_irq_fault_test(cmdline, smp.cpu_count);
+        }
         if cmdline.contains("ipc_fault=") {
             syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
             ipc::tests::maybe_run_ipc_fault_test(cmdline, smp.cpu_count);
@@ -245,6 +267,16 @@ extern "C" fn bsp_kmain() -> ! {
         }
         if cmdline.contains("cspace_fault=") {
             cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        }
+        if cmdline.contains("interactive=1") {
+            syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+            irq::tests::maybe_run_p1_interactive_session(cmdline, smp.cpu_count);
+            sched::shutdown_ap_scheduler_service();
+            serial_println!(
+                "[DRY-BOOT-OK] Milestone 2A-1 (P1 First Interaction) {}-vCPU interactive session verified cleanly.",
+                smp.cpu_count
+            );
+            qemu_exit(QEMU_EXIT_SUCCESS);
         }
         vspace::tests::verify_vspace_and_tlb(
             &vspace_summary,
@@ -257,6 +289,7 @@ extern "C" fn bsp_kmain() -> ! {
         syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
         proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
         ipc::tests::verify_ipc_services_and_display(cmdline, smp.cpu_count);
+        irq::tests::verify_irq_and_ioport_security(cmdline, smp.cpu_count);
     }
     sched::shutdown_ap_scheduler_service();
 

@@ -434,6 +434,16 @@ pub fn cspace_destroy_object(
                 return Err(CapError::StaleGenerationAba);
             }
         }
+        CapObjectKind::IrqLine => {
+            if !crate::irq::is_irq_line_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
+        CapObjectKind::IoPort => {
+            if !crate::irq::ioport::is_ioport_cap_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
         CapObjectKind::Untyped => {
             let tok = UntypedCapToken {
                 slot_idx: resolved.obj_id as u16,
@@ -545,6 +555,12 @@ pub fn cspace_destroy_object(
         }
         CapObjectKind::Notification => {
             crate::ipc::notif::destroy_notif(resolved.obj_id, resolved.expected_obj_gen);
+        }
+        CapObjectKind::IrqLine => {
+            crate::irq::destroy_irq_line(resolved.obj_id, resolved.expected_obj_gen);
+        }
+        CapObjectKind::IoPort => {
+            crate::irq::ioport::destroy_ioport_cap(resolved.obj_id, resolved.expected_obj_gen);
         }
         CapObjectKind::BootModule | CapObjectKind::Framebuffer | CapObjectKind::None => {}
     }

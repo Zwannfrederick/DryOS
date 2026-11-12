@@ -325,7 +325,11 @@ pub(crate) fn map_ref_inc_data_frame(
             && owner.domain == SecDomain::RootSystem
             && owner.flags.contains(SecFlags::READ_ONLY_EXPORT)
             && expected_owner.domain != SecDomain::Kernel;
-        if !same_owner && !ro_system_export {
+        let ro_user_delegate = !writable
+            && owner.domain == SecDomain::Userspace
+            && !owner.flags.contains(SecFlags::NO_DELEGATE)
+            && expected_owner.domain != SecDomain::Kernel;
+        if !same_owner && !ro_system_export && !ro_user_delegate {
             pmm_invariant_panic(format_args!(
                 "Frame ownership / domain / pin violation: map pfn={:#x} owner=({:?},{}) expected=({:?},{})",
                 pfn, owner.domain, owner.compartment_id, expected_owner.domain, expected_owner.compartment_id

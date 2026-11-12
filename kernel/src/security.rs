@@ -131,6 +131,12 @@ impl CapRights {
     pub const FB_ROOT: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
     );
+    pub const IRQ_ROOT: Self = Self(
+        Self::READ.0 | Self::SIGNAL.0 | Self::WAIT.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const IOPORT_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
 
     #[inline(always)]
     pub const fn contains(self, rhs: Self) -> bool {

@@ -78,6 +78,8 @@ pub enum CapObjectKind {
     Endpoint = 8,
     BootModule = 9,
     Framebuffer = 10,
+    IrqLine = 11,
+    IoPort = 12,
 }
 
 impl CapObjectKind {
@@ -94,6 +96,8 @@ impl CapObjectKind {
             8 => Self::Endpoint,
             9 => Self::BootModule,
             10 => Self::Framebuffer,
+            11 => Self::IrqLine,
+            12 => Self::IoPort,
             _ => Self::None,
         }
     }

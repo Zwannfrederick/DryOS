@@ -149,6 +149,22 @@ global_asm!(
     "ISR_NOERR 31",
     "ISR_NOERR 39",
     "ISR_NOERR 47",
+    "ISR_NOERR 48",
+    "ISR_NOERR 49",
+    "ISR_NOERR 50",
+    "ISR_NOERR 51",
+    "ISR_NOERR 52",
+    "ISR_NOERR 53",
+    "ISR_NOERR 54",
+    "ISR_NOERR 55",
+    "ISR_NOERR 56",
+    "ISR_NOERR 57",
+    "ISR_NOERR 58",
+    "ISR_NOERR 59",
+    "ISR_NOERR 60",
+    "ISR_NOERR 61",
+    "ISR_NOERR 62",
+    "ISR_NOERR 63",
     "ISR_NOERR 238",
     "ISR_NOERR 239",
     "ISR_NOERR 254",
@@ -252,6 +268,22 @@ extern "C" {
     fn dry_isr_stub_31();
     fn dry_isr_stub_39();
     fn dry_isr_stub_47();
+    fn dry_isr_stub_48();
+    fn dry_isr_stub_49();
+    fn dry_isr_stub_50();
+    fn dry_isr_stub_51();
+    fn dry_isr_stub_52();
+    fn dry_isr_stub_53();
+    fn dry_isr_stub_54();
+    fn dry_isr_stub_55();
+    fn dry_isr_stub_56();
+    fn dry_isr_stub_57();
+    fn dry_isr_stub_58();
+    fn dry_isr_stub_59();
+    fn dry_isr_stub_60();
+    fn dry_isr_stub_61();
+    fn dry_isr_stub_62();
+    fn dry_isr_stub_63();
     fn dry_isr_stub_238();
     fn dry_isr_stub_239();
     fn dry_isr_stub_254();
@@ -339,6 +371,13 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
     if frame.vector == (crate::apic::VEC_APIC_SPURIOUS as u64) {
         // Intel SDM Vol. 3A 10.9: Spurious APIC interrupt MUST NOT write EOI.
         crate::apic::record_spurious_apic_irq();
+        return;
+    }
+
+    if frame.vector >= (crate::apic::VEC_EXT_IRQ_BASE as u64)
+        && frame.vector <= (crate::apic::VEC_EXT_IRQ_LAST as u64)
+    {
+        crate::irq::on_external_irq(frame.vector as u8);
         return;
     }
 
@@ -437,6 +476,16 @@ pub fn init_bsp_idt() {
             IdtEntry::gate(dry_isr_stub_39 as *const () as usize as u64, 0, 0);
         table[crate::apic::VEC_PIC_SPURIOUS_SLAVE as usize] =
             IdtEntry::gate(dry_isr_stub_47 as *const () as usize as u64, 0, 0);
+        let ext_stubs: [unsafe extern "C" fn(); 16] = [
+            dry_isr_stub_48, dry_isr_stub_49, dry_isr_stub_50, dry_isr_stub_51,
+            dry_isr_stub_52, dry_isr_stub_53, dry_isr_stub_54, dry_isr_stub_55,
+            dry_isr_stub_56, dry_isr_stub_57, dry_isr_stub_58, dry_isr_stub_59,
+            dry_isr_stub_60, dry_isr_stub_61, dry_isr_stub_62, dry_isr_stub_63,
+        ];
+        for (idx, stub) in ext_stubs.iter().enumerate() {
+            table[(crate::apic::VEC_EXT_IRQ_BASE as usize) + idx] =
+                IdtEntry::gate(*stub as usize as u64, 0, 0);
+        }
         // `IST = 0`: `TrapFrame` lands on the active thread's private 16 KiB stack (`#DF` owns `IST1`).
         table[crate::apic::VEC_TLB_SHOOTDOWN as usize] =
             IdtEntry::gate(dry_isr_stub_238 as *const () as usize as u64, 0, 0);

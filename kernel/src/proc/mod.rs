@@ -229,6 +229,13 @@ pub(crate) fn slot_ref(pid: u32) -> Option<&'static ProcessSlot> {
     }
 }
 
+#[inline]
+pub fn process_vspace_cap(pid: u32) -> Option<CapPtr> {
+    let slot = slot_ref(pid)?;
+    let raw = slot.vs_cap_raw.load(Ordering::Acquire);
+    (raw != 0).then_some(CapPtr(raw))
+}
+
 fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_cap: CapPtr) {
     let now_epoch = current_lease_epoch();
     if vs_cap != CapPtr::NULL {
@@ -249,6 +256,8 @@ fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_
                     | CapObjectKind::Untyped
                     | CapObjectKind::Endpoint
                     | CapObjectKind::Notification
+                    | CapObjectKind::IrqLine
+                    | CapObjectKind::IoPort
             )
         {
             let _ = unmap_all_records_for_slot(global_slot_id(cspace_id, idx as u16));

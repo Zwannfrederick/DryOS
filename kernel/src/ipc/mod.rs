@@ -179,6 +179,10 @@ pub fn on_cap_slot_revoked(
         }
         CapObjectKind::Notification => {
             notif::on_notif_cap_revoked(obj_id, expected_obj_gen, global_slot);
+            crate::irq::on_notif_cap_revoked_for_irq(obj_id, expected_obj_gen, global_slot);
+        }
+        CapObjectKind::IrqLine => {
+            crate::irq::on_irq_cap_revoked(obj_id, expected_obj_gen, global_slot);
         }
         _ => {}
     }
@@ -208,6 +212,10 @@ pub fn on_process_terminating(pid: u32, cspace_id: CSpaceId) {
             // `dry_init`'s root supervisor cap!).
             let (ep_id, ep_gen) = unpack_obj_meta(slot.obj_meta.load(Ordering::Acquire));
             endpoint::on_delegated_server_exit(ep_id, ep_gen, pid);
+        } else if st == SlotState::Live && kind == CapObjectKind::IrqLine {
+            let (irq_id, irq_gen) = unpack_obj_meta(slot.obj_meta.load(Ordering::Acquire));
+            let gslot = crate::cspace::global_slot_id(cspace_id, idx as u16);
+            crate::irq::on_irq_cap_revoked(irq_id, irq_gen, gslot);
         }
     }
 }

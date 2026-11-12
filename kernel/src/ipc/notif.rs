@@ -208,6 +208,54 @@ pub fn notif_signal(
     .map_err(map_cap_err_to_sys)
 }
 
+/// Non-blocking hardware-ISR `Notification` signal (`0` `CSpace` lookups, `0` sleeping operations).
+///
+/// Safe to invoke inside `on_external_irq` (`irq_depth > 0`, `RFLAGS.IF == 0`).
+pub(crate) fn notif_signal_from_irq(obj_id: u32, expected_gen: u32, signal_bits: u64) -> bool {
+    let idx = obj_id as usize;
+    if idx >= MAX_NOTIFICATIONS {
+        return false;
+    }
+    let n = &NOTIF_TABLE[idx];
+    if !n.allocated.load(Ordering::Acquire)
+        || n.closed.load(Ordering::Acquire)
+        || n.generation.load(Ordering::Acquire) != expected_gen
+    {
+        return false;
+    }
+    let bits = signal_bits.max(1);
+    n.pending_bits.fetch_or(bits, Ordering::AcqRel);
+    fence(Ordering::SeqCst);
+
+    let mut wake_target: Option<(ThreadId, usize)> = None;
+    if n.waiter_slot.load(Ordering::SeqCst) != NO_WAITER {
+        with_notif_lock(n, || {
+            if n.allocated.load(Ordering::Acquire)
+                && !n.closed.load(Ordering::Acquire)
+                && n.generation.load(Ordering::Acquire) == expected_gen
+                && n.wait_state.load(Ordering::Acquire) == WAIT_BLOCKED
+            {
+                let w_slot = n.waiter_slot.load(Ordering::Relaxed);
+                if w_slot != NO_WAITER {
+                    let word = n.pending_bits.swap(0, Ordering::AcqRel);
+                    if word != 0 {
+                        let w_gen = n.waiter_gen26.load(Ordering::Relaxed);
+                        let w_cpu = n.waiter_cpu.load(Ordering::Relaxed) as usize;
+                        n.delivered_bits.store(word, Ordering::Release);
+                        n.waiter_slot.store(NO_WAITER, Ordering::Release);
+                        n.wait_state.store(WAIT_DELIVERED, Ordering::Release);
+                        wake_target = Some((ThreadId::new(w_slot as usize, w_gen), w_cpu));
+                    }
+                }
+            }
+        });
+    }
+    if let Some((tid, pref_cpu)) = wake_target {
+        let _ = wake_thread(tid, pref_cpu);
+    }
+    true
+}
+
 /// Wait for and atomically consume accumulated `Notification` bits (`CapRights::WAIT`).
 pub fn notif_wait(
     cspace_id: CSpaceId,

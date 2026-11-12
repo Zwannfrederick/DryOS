@@ -246,6 +246,21 @@ pub struct LimineFramebufferRequest {
     pub response: *const LimineFramebufferResponse,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineRsdpResponse {
+    pub revision: u64,
+    pub address: *const u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineRsdpRequest {
+    pub id: [u64; 4],
+    pub revision: u64,
+    pub response: *const LimineRsdpResponse,
+}
+
 #[used]
 #[link_section = ".limine_requests_start"]
 pub static REQUESTS_START_MARKER: [u64; 4] = [
@@ -351,6 +366,19 @@ pub static FRAMEBUFFER_REQ: BootSlot<LimineFramebufferRequest> = BootSlot(Unsafe
 ));
 
 #[used]
+#[link_section = ".limine_requests"]
+pub static RSDP_REQ: BootSlot<LimineRsdpRequest> = BootSlot(UnsafeCell::new(LimineRsdpRequest {
+    id: [
+        LIMINE_COMMON_MAGIC_0,
+        LIMINE_COMMON_MAGIC_1,
+        0xc5e7_7b6b_397e_7b43,
+        0x2763_7845_accd_cf3c,
+    ],
+    revision: 0,
+    response: core::ptr::null(),
+}));
+
+#[used]
 #[link_section = ".limine_requests_end"]
 pub static REQUESTS_END_MARKER: [u64; 2] = [0xadc0_e053_1bb1_0d03, 0x9572_709f_3176_4c62];
 
@@ -398,7 +426,7 @@ pub fn latch_cmdline_to_static_bss() -> &'static str {
     }
 }
 
-pub const MAX_LATCHED_MODULES: usize = 8;
+pub const MAX_LATCHED_MODULES: usize = 12;
 
 #[derive(Clone, Copy)]
 struct LatchedModule {
@@ -557,4 +585,15 @@ pub fn latch_framebuffer_to_static_bss() -> bool {
 pub fn get_latched_framebuffer() -> Option<LatchedFramebuffer> {
     // SAFETY: Read-only after `latch_framebuffer_to_static_bss` on BSP.
     unsafe { *STATIC_FB.0.get() }
+}
+
+/// Read the ACPI `RSDP` pointer supplied by Limine (`Base Revision 3` physical address or HHDM).
+pub fn get_rsdp_raw_addr() -> Option<u64> {
+    let resp = RSDP_REQ.read().response;
+    if resp.is_null() {
+        return None;
+    }
+    // SAFETY: Validated non-null response populated by Limine before `_start`.
+    let addr = unsafe { (*resp).address as u64 };
+    (addr != 0).then_some(addr)
 }

@@ -663,6 +663,11 @@ pub(crate) fn release_contiguous_from_untyped(base_pfn: u32, frame_count: usize,
     });
 }
 
+#[inline]
+pub fn free_global_frames_snapshot() -> u64 {
+    lock_global_pool_with_cli(|pool| pool.free_count)
+}
+
 pub fn measure_fragmentation(online_cpus: usize) -> FragReport {
     let max_pfn = PMM_META.max_tracked_pfn.load(Ordering::Acquire) as usize;
     let free_global = lock_global_pool_with_cli(|pool| pool.free_count);
