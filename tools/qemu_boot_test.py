@@ -21,6 +21,7 @@ from qemu_log_validators import (
     verify_vspace_lines,
 )
 from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_and_display_lines
+from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -105,7 +106,10 @@ def build_userspace() -> list[pathlib.Path]:
         ],
         env=env,
     )
-    print("[QEMU-TEST] Building release ELF64 userspace binaries (user-hello, user-peer, dry-init, dry-echo, dry-display)...")
+    print(
+        "[QEMU-TEST] Building release ELF64 userspace binaries "
+        "(user-hello, user-peer, dry-init, dry-echo, dry-display, dry-input, dry-shell)..."
+    )
     subprocess.check_call(
         [
             "cargo",
@@ -122,7 +126,18 @@ def build_userspace() -> list[pathlib.Path]:
         env=env,
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
-    bins = [out_dir / b for b in ("user-hello", "user-peer", "dry-init", "dry-echo", "dry-display")]
+    bins = [
+        out_dir / b
+        for b in (
+            "user-hello",
+            "user-peer",
+            "dry-init",
+            "dry-echo",
+            "dry-display",
+            "dry-input",
+            "dry-shell",
+        )
+    ]
     for b in bins:
         if not b.exists():
             raise RuntimeError(f"Missing userspace ELF {b}")
@@ -206,6 +221,8 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         ("dry-init", "dry-init.elf"),
         ("dry-echo", "dry-echo.elf"),
         ("dry-display", "dry-display.elf"),
+        ("dry-input", "dry-input.elf"),
+        ("dry-shell", "dry-shell.elf"),
     ]
 
     conf_path = BUILD_DIR / "limine.conf"
@@ -394,6 +411,8 @@ def assert_positive_smp_boot(
                 f"[DRY-SERVICES] PASS: cpus={smp}",
                 f"[DRY-IPC-SEC] PASS: cpus={smp}",
                 f"[DRY-IPC-BENCH] PASS: cpus={smp}",
+                f"[DRY-IRQ] PASS: cpus={smp}",
+                f"[DRY-IRQ-BENCH] PASS: cpus={smp}",
                 f"[DRY-BOOT-OK] Milestone 1C UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Services, IPC & GOP Display verified cleanly.",
             ]
         )
@@ -409,6 +428,7 @@ def assert_positive_smp_boot(
         "[DRY-CSPACE-FAIL]",
         "[DRY-USER-FAIL]",
         "[DRY-IPC-FAIL]",
+        "[DRY-IRQ-FAIL]",
         "[DRY-APIC-FAIL]",
         "[DRY-DF-IST1] FAIL",
     ]
@@ -433,8 +453,9 @@ def assert_positive_smp_boot(
         verify_cspace_and_tlb_debt_lines(name, serial_out, smp)
         verify_userspace_lines(name, serial_out, smp)
         verify_ipc_and_display_lines(name, serial_out, smp, expect_fb=expect_fb)
+        verify_p1_irq_lines(name, serial_out, smp)
     print(
-        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/user/ipc/display invariants verified in {elapsed:.3f}s)."
+        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/user/ipc/irq/display invariants verified in {elapsed:.3f}s)."
     )
 
 
@@ -443,12 +464,20 @@ def main() -> None:
     parser.add_argument("--build-only", action="store_true", help="Run clippy + release build without QEMU")
     parser.add_argument("--smp-only", type=int, default=0, help="Run only a single positive N-vCPU boot test")
     parser.add_argument("--irq-only", action="store_true", help="Sub-Stage A: verify only APIC timer IRQ + EOI + TrapFrame")
+    parser.add_argument("--p1-only", action="store_true", help="Run only Milestone 2A-1 (P1) interactive & negative security suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     kernel_elf = build_kernel()
     if args.build_only:
         print(f"[QEMU-TEST] Build-only check succeeded: {kernel_elf}")
+        return
+
+    if args.p1_only:
+        run_p1_suite(
+            kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
+        )
+        print("\n[QEMU-TEST] ALL 9 MILESTONE 2A-1 (P1) INTERACTIVE HARDWARE E2E & SECURITY CHECKS PASSED.")
         return
 
     if args.smp_only > 0:
@@ -886,7 +915,14 @@ def main() -> None:
             must_not_contain=["[DRY-BOOT-OK]"],
         )
 
-    print("\n[QEMU-TEST] ALL 56 MILESTONE 1C SMP, H1 SCHEDULER, PMM, VSPACE, CSPACE, RING 3 SERVICES, IPC & DISPLAY CHECKS PASSED.")
+    run_p1_suite(
+        kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
+    )
+
+    print(
+        "\n[QEMU-TEST] ALL 65 DETERMINISTIC QEMU CHECKS "
+        "(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 / P1 FIRST INTERACTION) PASSED."
+    )
 
 
 if __name__ == "__main__":
