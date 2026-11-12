@@ -81,6 +81,8 @@ class _DesktopSessionHarness:
         smp: int = 2,
         expect_fb: bool = True,
         extra_qemu_args: list[str] | None = None,
+        mem: str = "256M",
+        enable_debug_exit: bool = True,
     ) -> None:
         self.name = name
         self.smp = smp
@@ -104,15 +106,13 @@ class _DesktopSessionHarness:
             "-smp",
             str(smp),
             "-m",
-            "256M",
+            mem,
             "-drive",
             f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
             "-drive",
             f"if=pflash,format=raw,file={vars_copy}",
             "-drive",
             f"format=raw,file={img_path}",
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-serial",
             "stdio",
             "-display",
@@ -121,6 +121,8 @@ class _DesktopSessionHarness:
             f"unix:{self.qmp_sock},server=on,wait=off",
             "-no-reboot",
         ]
+        if enable_debug_exit:
+            cmd.extend(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         if expect_fb:
             cmd.extend(["-vga", "std"])
         if extra_qemu_args:

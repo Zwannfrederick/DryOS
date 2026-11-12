@@ -9,12 +9,13 @@ use crate::action::LatencyRing;
 use crate::compositor::DesktopCompositor;
 use crate::gfx::Rect;
 use crate::shell::LineBuilder;
-use crate::wm::{LayoutMode, WindowManager, TOPBAR_H};
+use crate::wm::{LayoutMode, SessionVisualState, WindowManager, TOPBAR_H};
 use crate::{
-    pack_msg_tag, sys_cap_revoke, sys_ipc_reply_inline, sys_write_debug, UserIpcRecvExt,
-    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_PONG,
-    IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER, IPC_OP_WM_POLL_ACTION,
-    IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS, IPC_OP_WM_TOGGLE_TILING,
+    pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_reply_inline, sys_write_debug,
+    UserIpcRecvExt, BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
+    IPC_OP_PONG, IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER,
+    IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
+    IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TOGGLE_TILING,
 };
 
 pub fn wm_log_line(lb: &LineBuilder) {
@@ -228,6 +229,51 @@ pub fn handle_wm_admin_op(
                     reply_tok,
                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
                     [mrs[0] & 0x3, px, cyc, 0],
+                );
+            }
+            true
+        }
+        IPC_OP_WM_SET_SESSION_STATE => {
+            if ext.sender_badge != BADGE_SUPERVISOR {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            let now_tsc = rdtsc_user();
+            // `mrs[0] == u64::MAX` updates `blank_timeout_tsc` (`mrs[1]`) without changing visual state.
+            if mrs[0] != u64::MAX {
+                let Some(next) = SessionVisualState::from_u8((mrs[0] & 0xff) as u8) else {
+                    wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
+                    reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                    return true;
+                };
+                wm.set_session_state(next, now_tsc, &mut comp.scene_dirty);
+            } else {
+                wm.last_input_tsc = now_tsc;
+            }
+            if mrs[2] != 0 {
+                wm.blank_timeout_tsc = mrs[1];
+            }
+            let (px, cyc) = comp.flush_all(wm);
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-WM] SESSION state=");
+            lb.push_u64(wm.session_state as u64);
+            lb.push_bytes(b" blank_tsc=");
+            lb.push_u64(wm.blank_timeout_tsc);
+            lb.push_bytes(b" px=");
+            lb.push_u64(px);
+            wm_log_line(&lb);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
+                    [
+                        wm.session_state as u64,
+                        px,
+                        cyc,
+                        wm.locked_blocked_events,
+                    ],
                 );
             }
             true

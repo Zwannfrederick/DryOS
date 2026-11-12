@@ -38,6 +38,24 @@ pub unsafe fn inb(port: u16) -> u8 {
 }
 
 #[inline]
+pub unsafe fn outw(port: u16, val: u16) {
+    // SAFETY: Caller guarantees `port` is a valid 16-bit architectural I/O port.
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let val: u16;
+    // SAFETY: Caller guarantees `port` is a valid 16-bit architectural I/O port.
+    unsafe {
+        asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    val
+}
+
+#[inline]
 pub unsafe fn outl(port: u16, val: u32) {
     // SAFETY: Caller guarantees `port` is a valid architectural I/O port.
     unsafe {

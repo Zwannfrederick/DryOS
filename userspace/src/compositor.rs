@@ -19,14 +19,15 @@ use crate::gfx::{
     glyph_8x16, DirtyRegion, Rect, BOX_HORIZ, CURSOR_H, CURSOR_SPRITE_12X16, CURSOR_W,
     MAX_DIRTY_RECTS,
 };
+use crate::shell::LineBuilder;
 use crate::surface::{
     SurfaceCell, STYLE_ACCENT, STYLE_HEADER, STYLE_MUTED, STYLE_OK, STYLE_PROMPT, STYLE_WARN,
     TERM_CELLS,
 };
 use crate::wm::{
-    LayoutMode, WindowManager, WindowSlot, MAX_WINDOWS, SHADOW_OFF, TITLE_KIND_DIALOG,
-    TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL, TOPBAR_H,
-    WIN_BORDER, WIN_TITLE_H,
+    LayoutMode, SessionVisualState, WindowManager, WindowSlot, MAX_WINDOWS, SHADOW_OFF,
+    TITLE_KIND_DIALOG, TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON,
+    TITLE_KIND_TERMINAL, TOPBAR_H, WIN_BORDER, WIN_TITLE_H,
 };
 use crate::wm_layout::{TABSTRIP_H, TABSTRIP_Y};
 use crate::{rdtsc_user, UserFbInfo};
@@ -652,10 +653,95 @@ impl DesktopCompositor {
         }
     }
 
+    fn paint_lock_shield(&mut self, wm: &WindowManager, clip: Rect) {
+        self.fill_back_clipped(Rect::new(0, 0, self.w, self.h), clip, self.pal.bg_shadow);
+        let cw = 640usize;
+        let ch = 224usize;
+        let cx = self.w.saturating_sub(cw) / 2;
+        let cy = self.h.saturating_sub(ch) / 2;
+        let card = Rect::new(cx, cy, cw, ch);
+        if card.intersect(clip).is_empty() {
+            return;
+        }
+        self.fill_back_clipped(card, clip, self.pal.border_focus);
+        let inner = Rect::new(cx + 2, cy + 2, cw - 4, ch - 4);
+        self.fill_back_clipped(inner, clip, self.pal.bg_win);
+        let hdr = Rect::new(cx + 2, cy + 2, cw - 4, 32);
+        self.fill_back_clipped(hdr, clip, self.pal.bg_title_focus);
+
+        self.draw_str_clipped(
+            cx + 18,
+            cy + 10,
+            b"DRY OS // SESSION LOCK SHIELD [CPL=3 COMPOSITOR GATE]",
+            self.pal.fg_accent,
+            self.pal.bg_title_focus,
+            clip,
+        );
+        self.draw_str_clipped(
+            cx + 18,
+            cy + 48,
+            b"STATUS : INPUT ROUTING BLOCKED TO ALL USER COMPARTMENTS",
+            self.pal.fg_ok,
+            self.pal.bg_win,
+            clip,
+        );
+        self.draw_str_clipped(
+            cx + 18,
+            cy + 72,
+            b"AUTH   : UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)",
+            self.pal.fg_warn,
+            self.pal.bg_win,
+            clip,
+        );
+        self.draw_str_clipped(
+            cx + 18,
+            cy + 98,
+            b"Active Ring 3 apps continue executing isolated underneath.",
+            self.pal.fg_muted,
+            self.pal.bg_win,
+            clip,
+        );
+
+        let mut blb = LineBuilder::new();
+        blb.push_bytes(b"Blocked key/mouse inputs while locked: ");
+        blb.push_u64(wm.locked_blocked_events);
+        self.draw_str_clipped(
+            cx + 18,
+            cy + 124,
+            blb.as_bytes(),
+            self.pal.fg_primary,
+            self.pal.bg_win,
+            clip,
+        );
+
+        let btn = wm.unlock_button_rect();
+        self.fill_back_clipped(btn, clip, self.pal.border_focus);
+        let b_in = Rect::new(btn.x + 2, btn.y + 2, btn.w - 4, btn.h - 4);
+        self.fill_back_clipped(b_in, clip, self.pal.bg_pill);
+        self.draw_str_clipped(
+            btn.x + 16,
+            btn.y + 6,
+            b"[ UNLOCK SESSION (Enter/Click) ]",
+            self.pal.fg_accent,
+            self.pal.bg_pill,
+            clip,
+        );
+    }
+
     /// Repaint `clip` in `back_ptr` from bottom-to-top Z-order and queue `clip` for MMIO flush.
     pub fn repaint_scene_rect(&mut self, wm: &WindowManager, clip: Rect) {
         let c = clip.clamp_to(self.w, self.h);
         if c.is_empty() {
+            return;
+        }
+        if wm.session_state == SessionVisualState::DisplayBlanked {
+            self.fill_back_clipped(c, c, 0);
+            self.mmio_dirty.mark(c);
+            return;
+        }
+        if wm.session_state == SessionVisualState::SessionLocked {
+            self.paint_lock_shield(wm, c);
+            self.mmio_dirty.mark(c);
             return;
         }
         self.paint_background_and_topbar(wm, c);
@@ -681,7 +767,11 @@ impl DesktopCompositor {
             return (0, 0);
         }
 
-        let cur_r = wm.cursor_rect();
+        let cur_r = if wm.session_state == SessionVisualState::DisplayBlanked {
+            Rect::EMPTY
+        } else {
+            wm.cursor_rect()
+        };
         let cur_scale = if wm.cursor_large { 2usize } else { 1usize };
         let t0 = rdtsc_user();
         let mut total_px = 0u64;

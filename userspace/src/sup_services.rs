@@ -4,18 +4,30 @@
 use crate::init_legacy::{domain_spec, log_line};
 use crate::shell::LineBuilder;
 use crate::vfs_proto::vfs_seed_boot_entry;
+use crate::wm::SessionVisualState;
 use crate::{
     msg_tag_label, pack_msg_tag, sys_cap_derive, sys_cap_revoke, sys_ep_create, sys_ipc_call_inline,
-    sys_ipc_call_with_grant, sys_proc_spawn, sys_proc_wait, BootModManifestEntry, RootInitBootInfo,
-    BADGE_SUPERVISOR, BADGE_SUP_DISPLAY, BOOT_MANIFEST_OFFSET, IPC_OP_ERR_INVAL, IPC_OP_EXIT_CLEAN,
-    IPC_OP_INPUT_SET_PREFS, IPC_OP_PONG, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_QUERY_STATE,
-    IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS, RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ,
+    sys_ipc_call_with_grant, sys_proc_spawn, sys_proc_wait, sys_write_debug, BootModManifestEntry,
+    RootInitBootInfo, BADGE_SUPERVISOR, BADGE_SUP_DISPLAY, BADGE_SUP_ROGUE, BOOT_MANIFEST_OFFSET,
+    IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_SET_PREFS,
+    IPC_OP_PONG, IPC_OP_PWR_REBOOT, IPC_OP_PWR_SHUTDOWN_S5, IPC_OP_PWR_SUSPEND_S3,
+    IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
+    IPC_OP_WM_SET_SESSION_STATE, RIGHT_CALL, RIGHT_GRANT, RIGHT_MANAGE, RIGHT_MAP, RIGHT_READ,
     RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WRITE,
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
 const DISPLAY_COMP_ID: u16 = 0x0002;
 pub const VFS_COMP_ID: u16 = 0x0004;
+pub const POWER_COMP_ID: u16 = 0x0005;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalPowerMode {
+    None,
+    ExitHarness,
+    HardwareShutdownS5,
+    HardwareReboot,
+}
 
 /// Live runtime session preferences maintained by `dry-init` (volatile RAM; no fake disk persistence).
 #[derive(Clone, Copy)]
@@ -170,6 +182,61 @@ pub fn spawn_and_seed_vfs(
     Ok((vfs_handle, vfs_ep, vfs_sup_cap))
 }
 
+/// Spawn `dry-power` (`0x0005`) if `boot.power_mod_cap != 0` and delegate `CapObjectKind::PowerCtrl`.
+/// Returns `(pwr_handle, pwr_ep, pwr_sup_cap)`.
+pub fn spawn_and_bind_power_service(boot: &RootInitBootInfo) -> Result<(u64, u64, u64), i32> {
+    if boot.power_mod_cap == 0 || boot.power_ctrl_cap == 0 {
+        return Ok((0, 0, 0));
+    }
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
+
+    let pwr_ep = sys_ep_create(ipc_spec).map_err(|_| 191)?;
+    let pwr_sup_cap = sys_cap_derive(pwr_ep, cli_rights, 0, BADGE_SUPERVISOR).map_err(|_| 191)?;
+    let pwr_ctrl_deleg = sys_cap_derive(
+        boot.power_ctrl_cap,
+        RIGHT_READ | RIGHT_MANAGE | RIGHT_GRANT,
+        0,
+        0,
+    )
+    .map_err(|_| 192)?;
+    let (pwr_handle, pwr_pid) = sys_proc_spawn(
+        boot.power_mod_cap,
+        1,
+        POWER_COMP_ID,
+        (pwr_ep, srv_rights, 0x5057),
+        (pwr_ctrl_deleg, RIGHT_READ | RIGHT_MANAGE),
+    )
+    .map_err(|_| 193)?;
+
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-INIT] Power service ready pid=");
+    lb.push_u64(pwr_pid);
+    log_line(&lb);
+
+    Ok((pwr_handle, pwr_ep, pwr_sup_cap))
+}
+
+pub fn probe_power_badge_gate(pwr_ep: u64) -> Result<(), i32> {
+    if pwr_ep == 0 {
+        return Ok(());
+    }
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let rogue_pwr = sys_cap_derive(pwr_ep, cli_rights, 0, BADGE_SUP_ROGUE).map_err(|_| 194)?;
+    let res = sys_ipc_call_inline(
+        rogue_pwr,
+        pack_msg_tag(IPC_OP_PWR_SHUTDOWN_S5, 0, 1, 0),
+        [0; 4],
+        0,
+    );
+    let _ = sys_cap_revoke(rogue_pwr, 1);
+    match res {
+        Ok((rtag, _, _)) if msg_tag_label(rtag) == IPC_OP_ERR_PERM => Ok(()),
+        _ => Err(195),
+    }
+}
+
 pub fn shutdown_vfs_service(vfs_handle: u64, vfs_ep: u64, vfs_sup_cap: u64) -> Result<(), i32> {
     if vfs_ep == 0 {
         return Ok(());
@@ -199,8 +266,12 @@ pub fn teardown_p3_core_services(
     disp_sup_cap: u64,
     disp_ep: u64,
     disp_handle: u64,
+    pwr_handle: u64,
+    pwr_ep: u64,
+    pwr_sup_cap: u64,
     sup_notif: u64,
     sup_ep: u64,
+    final_mode: FinalPowerMode,
 ) -> Result<(), i32> {
     let _ = sys_ipc_call_inline(
         input_ep,
@@ -230,6 +301,39 @@ pub fn teardown_p3_core_services(
         }
         let _ = sys_cap_revoke(disp_sup_cap, 1);
         let _ = sys_cap_revoke(disp_ep, 2);
+    }
+
+    if final_mode == FinalPowerMode::HardwareShutdownS5 && pwr_sup_cap != 0 {
+        let _ = sys_write_debug(b"[DRY-INIT] Controlled teardown complete -> invoking dry-power S5\n");
+        let _ = sys_ipc_call_inline(
+            pwr_sup_cap,
+            pack_msg_tag(IPC_OP_PWR_SHUTDOWN_S5, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+    } else if final_mode == FinalPowerMode::HardwareReboot && pwr_sup_cap != 0 {
+        let _ =
+            sys_write_debug(b"[DRY-INIT] Controlled teardown complete -> invoking dry-power reset\n");
+        let _ = sys_ipc_call_inline(
+            pwr_sup_cap,
+            pack_msg_tag(IPC_OP_PWR_REBOOT, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+    }
+
+    if pwr_ep != 0 {
+        let _ = sys_ipc_call_inline(
+            pwr_sup_cap,
+            pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+        if sys_proc_wait(pwr_handle, 0, 0) != Ok((0, 0)) {
+            return Err(196);
+        }
+        let _ = sys_cap_revoke(pwr_sup_cap, 1);
+        let _ = sys_cap_revoke(pwr_ep, 2);
     }
 
     let _ = sys_cap_revoke(sup_notif, 2);
@@ -335,14 +439,72 @@ pub fn apply_display_prefs(
     Ok([flags as u64, px, cyc, 0])
 }
 
-pub fn apply_blank_timeout(prefs: &mut SupervisorPrefs, sec: u16) -> Result<[u64; 4], u32> {
+pub fn apply_blank_timeout(
+    disp_sup_cap: u64,
+    tsc_mhz: u64,
+    prefs: &mut SupervisorPrefs,
+    sec: u16,
+) -> Result<[u64; 4], u32> {
     if sec > 3600 {
         return Err(IPC_OP_ERR_INVAL);
+    }
+    let blank_tsc = (sec as u64)
+        .saturating_mul(1_000_000)
+        .saturating_mul(tsc_mhz.max(1000));
+    if disp_sup_cap != 0 {
+        let (rtag, _, _) = sys_ipc_call_inline(
+            disp_sup_cap,
+            pack_msg_tag(IPC_OP_WM_SET_SESSION_STATE, 0, 3, 0),
+            [u64::MAX, blank_tsc, 1, 0],
+            0,
+        )
+        .map_err(|_| IPC_OP_ERR_INVAL)?;
+        if msg_tag_label(rtag) != IPC_OP_PONG {
+            return Err(msg_tag_label(rtag));
+        }
     }
     prefs.blank_timeout_sec = sec;
     let mut lb = LineBuilder::new();
     lb.push_bytes(b"[DRY-SUP] PREFS blank_timeout_s=");
     lb.push_u64(sec as u64);
     log_line(&lb);
-    Ok([sec as u64, 0, 0, 0])
+    Ok([sec as u64, blank_tsc, 0, 0])
+}
+
+pub fn apply_session_visual_state(
+    disp_sup_cap: u64,
+    state: SessionVisualState,
+) -> Result<[u64; 4], u32> {
+    if disp_sup_cap == 0 {
+        return Ok([state as u64, 0, 0, 0]);
+    }
+    let (rtag, _, rmrs) = sys_ipc_call_inline(
+        disp_sup_cap,
+        pack_msg_tag(IPC_OP_WM_SET_SESSION_STATE, 0, 3, 0),
+        [state as u64, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| IPC_OP_ERR_INVAL)?;
+    if msg_tag_label(rtag) != IPC_OP_PONG {
+        return Err(msg_tag_label(rtag));
+    }
+    Ok(rmrs)
+}
+
+pub fn request_suspend_s3(pwr_sup_cap: u64) -> Result<[u64; 4], u32> {
+    if pwr_sup_cap != 0 {
+        if let Ok((rtag, _, _)) = sys_ipc_call_inline(
+            pwr_sup_cap,
+            pack_msg_tag(IPC_OP_PWR_SUSPEND_S3, 0, 1, 0),
+            [0; 4],
+            0,
+        ) {
+            return Err(msg_tag_label(rtag));
+        }
+    } else {
+        let _ = sys_write_debug(
+            b"[DRY-POWER] S3 suspend rejected: -ENOSYS (UEFI real-mode wake vector unimplemented)\n",
+        );
+    }
+    Err(IPC_OP_ERR_NOSYS)
 }

@@ -704,6 +704,11 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             };
             let i8042_cap =
                 mint_root_ioport_cap(cs, lbl, &[I8042_DATA_PORT, I8042_STATUS_CMD_PORT])?;
+            let pwr_ctrl_cap = if session_mode >= 10 {
+                crate::power::mint_root_power_cap(cs, lbl)?
+            } else {
+                CapPtr::NULL
+            };
 
             let (info_fr_cap, info_fh) =
                 cspace_alloc_frame(cs, lbl, lbl, PageOrder::Order4KiB, false, 0)?;
@@ -724,7 +729,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 files_mod_cap: files_cap.0,
                 settings_mod_cap: settings_cap.0,
                 power_mod_cap: power_cap.0,
-                power_ctrl_cap: 0,
+                power_ctrl_cap: pwr_ctrl_cap.0,
                 boot_manifest_count: mod_count as u64,
             };
             // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
@@ -786,6 +791,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
 
     // Release all APs into preemptive scheduling without a fixed test timeout and dispatch on BSP
     // until `dry-shell` receives `shutdown` and `dry-init` reaps all services cleanly.
+    crate::sched::set_desktop_idle_hlt(session_mode >= 10);
     if online_cpus > 1 {
         set_ap_epoch_kind(ApEpochKind::PreemptiveSched);
         AP_PHASE_EPOCH.fetch_add(1, Ordering::AcqRel);
@@ -798,11 +804,13 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             crate::arch::halt_forever();
         }
         if !idle_dispatch_once(0) {
-            core::hint::spin_loop();
+            crate::sched::idle_park_or_spin(0);
         }
     }
     stop_cpu_timer_for_phase(bsp_pcpu);
     cli();
+    let (hlt_calls, hlt_tsc) = crate::sched::idle_hlt_telemetry(online_cpus);
+    crate::sched::set_desktop_idle_hlt(false);
     set_preemptive_mode_active(false);
 
     let ReclaimStatus::ReclaimedNow(outcome) =
@@ -826,6 +834,15 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
 
     let (ext_irqs, irq_acks, _, _) = irq_telemetry();
     let (io_ops, io_denied) = crate::irq::ioport::ioport_telemetry();
+    if session_mode >= 10 {
+        serial_println!(
+            "[DRY-IDLE-HLT] PASS: cpus={} hlt_calls={} hlt_tsc={} pwr_denied={}",
+            online_cpus,
+            hlt_calls,
+            hlt_tsc,
+            crate::power::power_denied_count()
+        );
+    }
     if session_mode >= 2 {
         serial_println!(
             "[DRY-P2-SESSION] PASS: cpus={} mode={} irq1={} irq12={} ext_irqs={} irq_acks={} ioport_ops={} ioport_denied={} leaked_frames={}",

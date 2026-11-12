@@ -31,7 +31,7 @@ use dry_userspace::{
 };
 
 const QUEUE_CAPACITY: usize = 64;
-const IDLE_PARK_TIMEOUT_CYC: u64 = 3_500_000;
+const IDLE_PARK_TIMEOUT_CYC: u64 = 30_000_000;
 const IRQ1_BIT: u64 = 1 << 1;
 const IRQ12_BIT: u64 = 1 << 12;
 

@@ -36,8 +36,8 @@ use crate::security::{
 use crate::syscall::{
     UserCapInfo, DRY_SYSCALL_ABI_VERSION, SYS_CAP_DERIVE, SYS_CAP_QUERY, SYS_CAP_REVOKE,
     SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC, SYS_IOPORT_RW, SYS_IRQ_ACK, SYS_IRQ_BIND,
-    SYS_NOTIFY_CREATE, SYS_PROC_KILL, SYS_PROC_LIST, SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO,
-    SYS_VSPACE_MAP,
+    SYS_NOTIFY_CREATE, SYS_POWER_CTL, SYS_PROC_KILL, SYS_PROC_LIST, SYS_PROC_SPAWN, SYS_PROC_WAIT,
+    SYS_SYSINFO, SYS_VSPACE_MAP,
 };
 use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::VmProt;
@@ -375,6 +375,14 @@ pub(crate) fn sys_cold_dispatch(
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
             match sys_proc_kill(pid, subj, a0, a1) {
                 Ok(()) => (0, 0),
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_POWER_CTL => {
+            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            match crate::power::sys_power_ctl(cs_id, subj, a0, a1) {
+                Ok(v) => (v, 0),
                 Err(e) => (e.as_raw(), 0),
             }
         }

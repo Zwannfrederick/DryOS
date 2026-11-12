@@ -48,6 +48,10 @@ path = "src/bin/dry_files.rs"
 name = "dry-settings"
 path = "src/bin/dry_settings.rs"
 
+[[bin]]
+name = "dry-power"
+path = "src/bin/dry_power.rs"
+
 [profile.dev]
 panic = "abort"
 

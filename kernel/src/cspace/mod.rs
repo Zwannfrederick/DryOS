@@ -130,6 +130,7 @@ fn verify_live_object_cold(kind: CapObjectKind, obj_id: u32, expected_gen: u32) 
         CapObjectKind::Framebuffer => crate::display::is_framebuffer_cap_live(obj_id, expected_gen),
         CapObjectKind::IrqLine => crate::irq::is_irq_line_live(obj_id, expected_gen),
         CapObjectKind::IoPort => crate::irq::ioport::is_ioport_cap_live(obj_id, expected_gen),
+        CapObjectKind::PowerCtrl => crate::power::is_power_cap_live(obj_id, expected_gen),
         CapObjectKind::CNode => {
             let idx = obj_id as usize;
             idx < MAX_CSPACES

@@ -444,6 +444,11 @@ pub fn cspace_destroy_object(
                 return Err(CapError::StaleGenerationAba);
             }
         }
+        CapObjectKind::PowerCtrl => {
+            if !crate::power::is_power_cap_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
         CapObjectKind::Untyped => {
             let tok = UntypedCapToken {
                 slot_idx: resolved.obj_id as u16,
@@ -562,7 +567,10 @@ pub fn cspace_destroy_object(
         CapObjectKind::IoPort => {
             crate::irq::ioport::destroy_ioport_cap(resolved.obj_id, resolved.expected_obj_gen);
         }
-        CapObjectKind::BootModule | CapObjectKind::Framebuffer | CapObjectKind::None => {}
+        CapObjectKind::BootModule
+        | CapObjectKind::Framebuffer
+        | CapObjectKind::PowerCtrl
+        | CapObjectKind::None => {}
     }
 
     CSPACE_TABLE[cspace_id as usize]

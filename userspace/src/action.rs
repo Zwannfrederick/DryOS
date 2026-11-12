@@ -134,6 +134,7 @@ pub enum DesktopAction {
     RequestShutdown,
     RequestReboot,
     RequestSuspendS3,
+    RequestPoweroffHw,
 }
 
 impl DesktopAction {
@@ -158,6 +159,7 @@ impl DesktopAction {
             Self::RequestShutdown => [15, 0],
             Self::RequestReboot => [16, 0],
             Self::RequestSuspendS3 => [17, 0],
+            Self::RequestPoweroffHw => [18, 0],
         }
     }
 
@@ -190,6 +192,7 @@ impl DesktopAction {
             15 => Self::RequestShutdown,
             16 => Self::RequestReboot,
             17 => Self::RequestSuspendS3,
+            18 => Self::RequestPoweroffHw,
             _ => Self::None,
         }
     }

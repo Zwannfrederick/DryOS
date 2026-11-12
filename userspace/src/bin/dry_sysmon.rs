@@ -27,11 +27,11 @@ use dry_userspace::wm::{WindowRole, TITLE_KIND_SYSMON};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait,
-    sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserProcInfo, UserSysInfo,
-    IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO,
-    IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE,
-    IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
-    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    sys_power_query, sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserPowerInfo,
+    UserProcInfo, UserSysInfo, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SUP_ACTION,
+    IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT,
+    IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, RIGHT_MAP,
+    RIGHT_READ, RIGHT_SIGNAL, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SYSMON_SURF_VADDR: u64 = 0x1800_0000;
@@ -270,6 +270,7 @@ fn render_life_station_frame(
     surf: &SharedWindowSurface,
     sys: &UserSysInfo,
     prev_sys: &UserSysInfo,
+    pwr: &UserPowerInfo,
     procs: &[UserProcInfo],
     refresh_seq: u64,
     keys_rcvd: u64,
@@ -347,12 +348,12 @@ fn render_life_station_frame(
     let mut r5 = LineBuilder::new();
     r5.push_bytes(b"CtxSw: ");
     r5.push_u64(sys.total_ctx_switches);
-    r5.push_bytes(b"  IRQ1: ");
+    r5.push_bytes(b"  HLT: ");
+    r5.push_u64(pwr.idle_hlt_calls);
+    r5.push_bytes(b"  IRQ1/12: ");
     r5.push_u64(sys.irq1_delivered);
-    r5.push_bytes(b"  IRQ12: ");
+    r5.push_byte(b'/');
     r5.push_u64(sys.irq12_delivered);
-    r5.push_bytes(b"  Tmr: ");
-    r5.push_u64(sys.timer_irqs);
     write_row_cols(surf, LIFE_COLS, 5, r5.as_bytes(), STYLE_ACCENT);
 
     write_row_cols(surf, LIFE_COLS, 6, &div, STYLE_MUTED);
@@ -494,6 +495,10 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     let mut sys = UserSysInfo::default();
     let _ = sys_sysinfo(&mut sys);
     let mut prev_sys = sys;
+    let mut pwr = UserPowerInfo::default();
+    if p3_mode {
+        let _ = sys_power_query(&mut pwr);
+    }
     let mut procs = [UserProcInfo::default(); 24];
     let mut proc_count = if p3_mode {
         sys_proc_list(&mut procs).unwrap_or((0, 0)).0
@@ -509,6 +514,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
             surf,
             &sys,
             &prev_sys,
+            &pwr,
             &procs[..proc_count.min(procs.len())],
             refresh_seq,
             keys_rcvd,
@@ -646,11 +652,13 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         prev_sys = sys;
         let _ = sys_sysinfo(&mut sys);
         if p3_mode {
+            let _ = sys_power_query(&mut pwr);
             proc_count = sys_proc_list(&mut procs).unwrap_or((0, 0)).0;
             render_life_station_frame(
                 surf,
                 &sys,
                 &prev_sys,
+                &pwr,
                 &procs[..proc_count.min(procs.len())],
                 refresh_seq,
                 keys_rcvd,

@@ -326,15 +326,23 @@ pub fn shootdown_tlb(
     }
 
     let timeout_tsc = SHOOTDOWN_TIMEOUT_TSC.load(Ordering::Relaxed);
-    let t_lock0 = rdtsc();
+    let mut t_lock0 = rdtsc();
+    let mut last_gen = NEXT_REQ_GEN.load(Ordering::Acquire);
+    let mut barges = 0usize;
     let saved_if = irq_save_cli();
 
-    while TLB_REQ_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
+    while TLB_REQ_LOCK.load(Ordering::Relaxed)
+        || TLB_REQ_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
     {
         poll_and_ack_pending_shootdown(caller_cpu);
-        if rdtsc().wrapping_sub(t_lock0) > timeout_tsc {
+        let cur_gen = NEXT_REQ_GEN.load(Ordering::Acquire);
+        if cur_gen != last_gen && barges < MAX_CPUS * 64 {
+            last_gen = cur_gen;
+            barges += 1;
+            t_lock0 = rdtsc();
+        } else if rdtsc().wrapping_sub(t_lock0) > timeout_tsc {
             irq_restore(saved_if);
             tlb_invariant_panic(format_args!(
                 "Shootdown timeout acquiring TLB_REQ_LOCK on cpu={} vspace={}",

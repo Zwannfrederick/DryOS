@@ -14,10 +14,11 @@ use crate::init_legacy::{domain_spec, log_line, run_wm_security_audit, spawn_and
 use crate::shell::LineBuilder;
 use crate::sup_services::{
     apply_blank_timeout, apply_display_prefs, apply_input_prefs, apply_layout_action,
-    spawn_and_bind_p3_display, spawn_and_seed_vfs, sync_live_layout_pref, teardown_p3_core_services,
-    SupervisorPrefs,
+    apply_session_visual_state, probe_power_badge_gate, request_suspend_s3,
+    spawn_and_bind_p3_display, spawn_and_bind_power_service, spawn_and_seed_vfs,
+    sync_live_layout_pref, teardown_p3_core_services, FinalPowerMode, SupervisorPrefs,
 };
-use crate::wm::SUP_BIT_WM_ACTION;
+use crate::wm::{SessionVisualState, SUP_BIT_WM_ACTION};
 use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_ep_create,
     sys_exit, sys_ipc_call_inline, sys_ipc_recv_ext, sys_ipc_reply_inline,
@@ -93,6 +94,10 @@ struct SupervisorCtx {
     input_ep: u64,
     input_sup_cap: u64,
     vfs_ep: u64,
+    pwr_sup_cap: u64,
+    tsc_mhz: u64,
+    session_mode: u64,
+    final_power_mode: FinalPowerMode,
     prefs: SupervisorPrefs,
     launch_lat: LatencyRing,
     unauth_rejects: u64,
@@ -101,6 +106,7 @@ struct SupervisorCtx {
 }
 
 impl SupervisorCtx {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         boot: &RootInitBootInfo,
         sup_ep: u64,
@@ -108,6 +114,8 @@ impl SupervisorCtx {
         input_ep: u64,
         input_sup_cap: u64,
         vfs_ep: u64,
+        pwr_sup_cap: u64,
+        tsc_mhz: u64,
     ) -> Self {
         Self {
             slots: [
@@ -121,6 +129,10 @@ impl SupervisorCtx {
             input_ep,
             input_sup_cap,
             vfs_ep,
+            pwr_sup_cap,
+            tsc_mhz,
+            session_mode: boot.session_mode,
+            final_power_mode: FinalPowerMode::None,
             prefs: SupervisorPrefs::new(),
             launch_lat: LatencyRing::new(),
             unauth_rejects: 0,
@@ -350,7 +362,7 @@ impl SupervisorCtx {
         }
     }
 
-    fn execute_action(&mut self, act: DesktopAction, wants_shutdown: &mut bool) -> Result<[u64; 4], u32> {
+    fn execute_action(&mut self, act: DesktopAction) -> Result<[u64; 4], u32> {
         match act {
             DesktopAction::None => {
                 self.inval_rejects = self.inval_rejects.wrapping_add(1);
@@ -394,27 +406,40 @@ impl SupervisorCtx {
             DesktopAction::SetThemeContrast(flags) => {
                 apply_display_prefs(self.disp_sup_cap, &mut self.prefs, flags)
             }
-            DesktopAction::SetBlankTimeoutSec(sec) => apply_blank_timeout(&mut self.prefs, sec),
+            DesktopAction::SetBlankTimeoutSec(sec) => {
+                apply_blank_timeout(self.disp_sup_cap, self.tsc_mhz, &mut self.prefs, sec)
+            }
+            DesktopAction::BlankDisplayNow => {
+                apply_session_visual_state(self.disp_sup_cap, SessionVisualState::DisplayBlanked)
+            }
+            DesktopAction::LockSession => {
+                apply_session_visual_state(self.disp_sup_cap, SessionVisualState::SessionLocked)
+            }
+            DesktopAction::UnlockSession => {
+                apply_session_visual_state(self.disp_sup_cap, SessionVisualState::Active)
+            }
             DesktopAction::RequestShutdown => {
-                *wants_shutdown = true;
+                self.final_power_mode = if self.session_mode == 13 {
+                    FinalPowerMode::HardwareShutdownS5
+                } else {
+                    FinalPowerMode::ExitHarness
+                };
                 Ok([1, 0, 0, 0])
             }
+            DesktopAction::RequestPoweroffHw => {
+                self.final_power_mode = FinalPowerMode::HardwareShutdownS5;
+                Ok([3, 0, 0, 0])
+            }
             DesktopAction::RequestReboot => {
-                // Wired to real hardware ACPI FADT / 0xCF9 / i8042 reset in Phase P3-C (`dry-power`).
-                *wants_shutdown = true;
+                self.final_power_mode = FinalPowerMode::HardwareReboot;
                 Ok([2, 0, 0, 0])
             }
-            DesktopAction::RequestSuspendS3 => {
-                let _ = sys_write_debug(
-                    b"[DRY-POWER] S3 suspend rejected: -ENOSYS (UEFI real-mode wake vector unimplemented)\n",
-                );
-                Err(IPC_OP_ERR_NOSYS)
-            }
-            _ => Ok([0; 4]),
+            DesktopAction::RequestSuspendS3 => request_suspend_s3(self.pwr_sup_cap),
+            DesktopAction::CloseWindow(_) | DesktopAction::CycleFocus => Ok([0; 4]),
         }
     }
 
-    fn drain_wm_actions(&mut self, wants_shutdown: &mut bool) {
+    fn drain_wm_actions(&mut self) {
         if self.disp_sup_cap == 0 {
             return;
         }
@@ -431,27 +456,29 @@ impl SupervisorCtx {
                 break;
             }
             let act = DesktopAction::from_words(rmrs[0], rmrs[1]);
-            let _ = self.execute_action(act, wants_shutdown);
-            if rmrs[2] == 0 || *wants_shutdown {
+            let _ = self.execute_action(act);
+            if rmrs[2] == 0 || self.final_power_mode != FinalPowerMode::None {
                 break;
             }
         }
     }
 }
 
-fn run_p3_sup_security_audit(sup_ep: u64, disp_ep: u64, ctx: &mut SupervisorCtx) -> Result<(), i32> {
+fn run_p3_sup_security_audit(
+    sup_ep: u64,
+    disp_ep: u64,
+    pwr_ep: u64,
+    ctx: &mut SupervisorCtx,
+) -> Result<(), i32> {
     if disp_ep != 0 {
         run_wm_security_audit(disp_ep)?;
     }
+    probe_power_badge_gate(pwr_ep)?;
 
     let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
     let rogue_sup = sys_cap_derive(sup_ep, cli_rights, 0, BADGE_SUP_ROGUE).map_err(|_| 184)?;
     let _ = sys_cap_revoke(rogue_sup, 1);
 
-    // Directly verify badge authorization & malformed message rejection on `SupervisorCtx` invariants
-    // (note: self-calling `sup_ep` from the single `dry-init` server thread would self-deadlock on rendezvous,
-    // so we ALSO spawn a real untrusted Ring 3 probe or test cross-compartment IPC from `Terminal` E2E,
-    // AND verify the exact gate helper below!).
     if is_action_badge_authorized(BADGE_SUP_ROGUE)
         || is_action_badge_authorized(BADGE_SUP_FILES)
         || is_action_badge_authorized(0)
@@ -463,15 +490,10 @@ fn run_p3_sup_security_audit(sup_ep: u64, disp_ep: u64, ctx: &mut SupervisorCtx)
     {
         return Err(186);
     }
-    let mut dummy_shutdown = false;
-    if ctx.execute_action(DesktopAction::from_words(0xdead_beef, 999), &mut dummy_shutdown)
-        != Err(IPC_OP_ERR_INVAL)
-    {
+    if ctx.execute_action(DesktopAction::from_words(0xdead_beef, 999)) != Err(IPC_OP_ERR_INVAL) {
         return Err(187);
     }
-    if ctx.execute_action(DesktopAction::from_words(1, 99), &mut dummy_shutdown)
-        != Err(IPC_OP_ERR_INVAL)
-    {
+    if ctx.execute_action(DesktopAction::from_words(1, 99)) != Err(IPC_OP_ERR_INVAL) {
         return Err(188);
     }
 
@@ -520,6 +542,10 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         Ok(v) => v,
         Err(code) => sys_exit(code),
     };
+    let (pwr_handle, pwr_ep, pwr_sup_cap) = match spawn_and_bind_power_service(boot) {
+        Ok(v) => v,
+        Err(code) => sys_exit(code),
+    };
 
     let (disp_handle, disp_ep, disp_sup_cap) =
         match spawn_and_bind_p3_display(boot, sup_ep, sup_notif) {
@@ -533,7 +559,16 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     };
     let input_sup_cap = sys_cap_derive(input_ep, cli_rights, 0, BADGE_SUPERVISOR).unwrap_or(0);
 
-    let mut ctx = SupervisorCtx::new(boot, sup_ep, disp_sup_cap, input_ep, input_sup_cap, vfs_ep);
+    let mut ctx = SupervisorCtx::new(
+        boot,
+        sup_ep,
+        disp_sup_cap,
+        input_ep,
+        input_sup_cap,
+        vfs_ep,
+        pwr_sup_cap,
+        sys.tsc_mhz,
+    );
     if ctx.launch_or_focus(AppId::Terminal).is_err() {
         sys_exit(148);
     }
@@ -543,17 +578,16 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
 
     let mut sec_audit_done = boot.session_mode != 11;
     let mut restarts = 0u64;
-    let mut wants_shutdown = false;
 
     loop {
         ctx.reap_exited_apps(None);
 
         if let Ok(bits) = sys_notify_wait(sup_notif, MSG_FLAG_NON_BLOCKING as u64, 0) {
             if (bits & SUP_BIT_WM_ACTION) != 0 {
-                ctx.drain_wm_actions(&mut wants_shutdown);
+                ctx.drain_wm_actions();
             }
         }
-        if wants_shutdown {
+        if ctx.final_power_mode != FinalPowerMode::None {
             break;
         }
 
@@ -569,14 +603,16 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     0,
                 ) {
                     if qmrs[3] >= 2 {
-                        if let Err(code) = run_p3_sup_security_audit(sup_ep, disp_ep, &mut ctx) {
+                        if let Err(code) =
+                            run_p3_sup_security_audit(sup_ep, disp_ep, pwr_ep, &mut ctx)
+                        {
                             sys_exit(code);
                         }
                         sec_audit_done = true;
                     }
                 }
             } else {
-                if let Err(code) = run_p3_sup_security_audit(sup_ep, disp_ep, &mut ctx) {
+                if let Err(code) = run_p3_sup_security_audit(sup_ep, disp_ep, pwr_ep, &mut ctx) {
                     sys_exit(code);
                 }
                 sec_audit_done = true;
@@ -601,7 +637,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         [0; 4],
                     );
                 }
-                ctx.drain_wm_actions(&mut wants_shutdown);
+                ctx.drain_wm_actions();
             }
             IPC_OP_SUP_HELLO => {
                 let Some(app) = SupervisorCtx::app_from_sup_badge(ext.sender_badge) else {
@@ -780,9 +816,9 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
                         [1, 0, 0, 0],
                     );
-                    let _ = ctx.execute_action(act, &mut wants_shutdown);
+                    let _ = ctx.execute_action(act);
                 } else {
-                    match ctx.execute_action(act, &mut wants_shutdown) {
+                    match ctx.execute_action(act) {
                         Ok(out_mrs) => {
                             if reply_tok != 0 {
                                 let _ = sys_ipc_reply_inline(
@@ -870,7 +906,8 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     continue;
                 }
                 if !sec_audit_done {
-                    if let Err(code) = run_p3_sup_security_audit(sup_ep, disp_ep, &mut ctx) {
+                    if let Err(code) = run_p3_sup_security_audit(sup_ep, disp_ep, pwr_ep, &mut ctx)
+                    {
                         sys_exit(code);
                     }
                 }
@@ -882,7 +919,11 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         [1, 0, 0, 0],
                     );
                 }
-                wants_shutdown = true;
+                ctx.final_power_mode = if boot.session_mode == 13 {
+                    FinalPowerMode::HardwareShutdownS5
+                } else {
+                    FinalPowerMode::ExitHarness
+                };
             }
             _ => {
                 if reply_tok != 0 {
@@ -896,7 +937,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
             }
         }
 
-        if wants_shutdown {
+        if ctx.final_power_mode != FinalPowerMode::None {
             break;
         }
     }
@@ -932,8 +973,12 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         disp_sup_cap,
         disp_ep,
         disp_handle,
+        pwr_handle,
+        pwr_ep,
+        pwr_sup_cap,
         sup_notif,
         sup_ep,
+        ctx.final_power_mode,
     ) {
         sys_exit(code);
     }

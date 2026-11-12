@@ -733,6 +733,66 @@ pub fn notify_thread(target: ThreadId, bits: u64, preferred_cpu: usize) -> WakeO
     wake_thread(target, preferred_cpu)
 }
 
+static DESKTOP_IDLE_HLT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CPU_IN_HLT: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static IDLE_HLT_CALLS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static IDLE_HLT_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+pub fn set_desktop_idle_hlt(enable: bool) {
+    if enable {
+        for c in 0..MAX_CPUS {
+            CPU_IN_HLT[c].store(false, Ordering::Relaxed);
+            IDLE_HLT_CALLS[c].store(0, Ordering::Relaxed);
+            IDLE_HLT_TSC[c].store(0, Ordering::Relaxed);
+        }
+    }
+    DESKTOP_IDLE_HLT_ACTIVE.store(enable, Ordering::SeqCst);
+}
+
+#[inline]
+pub fn idle_hlt_telemetry(online: usize) -> (u64, u64) {
+    let n = online.min(MAX_CPUS);
+    let mut calls = 0u64;
+    let mut cyc = 0u64;
+    for c in 0..n {
+        calls = calls.wrapping_add(IDLE_HLT_CALLS[c].load(Ordering::Relaxed));
+        cyc = cyc.wrapping_add(IDLE_HLT_TSC[c].load(Ordering::Relaxed));
+    }
+    (calls, cyc)
+}
+
+/// Park the calling idle CPU in hardware `HLT` (`sti; hlt` shadow) when desktop idle residency is
+/// active and all runqueues are empty, waking immediately on timer/IOAPIC/reschedule IPIs.
+pub fn idle_park_or_spin(cpu_idx: usize) {
+    if !DESKTOP_IDLE_HLT_ACTIVE.load(Ordering::Relaxed) {
+        core::hint::spin_loop();
+        return;
+    }
+    crate::vspace::tlb::poll_and_ack_pending_shootdown(cpu_idx);
+    cli();
+    CPU_IN_HLT[cpu_idx].store(true, Ordering::SeqCst);
+    let online = ONLINE_SCHED_CPUS.load(Ordering::Relaxed);
+    let has_work = PHASE_PENDING_THREADS.load(Ordering::Acquire) == 0
+        || crate::is_panicking()
+        || (0..online).any(|c| !cpu_rq(c).is_all_empty());
+    if has_work {
+        CPU_IN_HLT[cpu_idx].store(false, Ordering::Relaxed);
+        sti();
+        return;
+    }
+    let t0 = crate::arch::rdtsc();
+    // SAFETY: `CLI` is active on `cpu_idx`'s idle context with LAPIC timer running; `sti; hlt`
+    // atomically enables interrupts as `hlt` begins execution (zero lost-wakeup window).
+    unsafe {
+        core::arch::asm!("sti; hlt", options(nomem, nostack));
+    }
+    CPU_IN_HLT[cpu_idx].store(false, Ordering::Relaxed);
+    let dt = crate::arch::rdtsc().saturating_sub(t0);
+    IDLE_HLT_CALLS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+    IDLE_HLT_TSC[cpu_idx].fetch_add(dt, Ordering::Relaxed);
+}
+
 /// Wake `target` (`Blocked -> Waking -> Ready + rq.push`, or deposit `ParkToken::Notified`).
 ///
 /// Masks local interrupts (`irq_save_cli`) so an IRQ preemption on `preferred_cpu`'s peer can
@@ -755,6 +815,15 @@ pub fn wake_thread(target: ThreadId, preferred_cpu: usize) -> WakeOutcome {
         };
         let prio = w.prio.load(Ordering::Relaxed);
         w.sched.finish_waking_and_push(slot, prio, cpu_rq(dst_cpu));
+        if DESKTOP_IDLE_HLT_ACTIVE.load(Ordering::Relaxed)
+            && CPU_IN_HLT[dst_cpu].swap(false, Ordering::SeqCst)
+            && dst_cpu != current_cpu_idx()
+        {
+            crate::apic::send_fixed_ipi(
+                get_percpu_by_idx(dst_cpu).lapic_id,
+                crate::apic::VEC_RESCHED_WAKE,
+            );
+        }
     }
     irq_restore(saved_if);
     outcome
@@ -842,7 +911,7 @@ pub fn ap_scheduler_service_loop(cpu_idx: usize) {
                             crate::arch::halt_forever();
                         }
                         if !idle_dispatch_once(cpu_idx) {
-                            core::hint::spin_loop();
+                            idle_park_or_spin(cpu_idx);
                         }
                     }
                     stop_cpu_timer_for_phase(pcpu);

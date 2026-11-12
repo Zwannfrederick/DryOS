@@ -80,6 +80,7 @@ pub enum CapObjectKind {
     Framebuffer = 10,
     IrqLine = 11,
     IoPort = 12,
+    PowerCtrl = 13,
 }
 
 impl CapObjectKind {
@@ -98,6 +99,7 @@ impl CapObjectKind {
             10 => Self::Framebuffer,
             11 => Self::IrqLine,
             12 => Self::IoPort,
+            13 => Self::PowerCtrl,
             _ => Self::None,
         }
     }

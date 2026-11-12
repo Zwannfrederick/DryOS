@@ -11,7 +11,7 @@
 use crate::action::{ActionQueue, AppId, DesktopAction, APP_COUNT};
 use crate::gfx::{DirtyRegion, Rect, CURSOR_H, CURSOR_W};
 use crate::input::{InputEvent, InputEventKind, InputRingQueue, MOD_ALT, MOUSE_BTN_LEFT};
-use crate::keymap::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP};
+use crate::keymap::{KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP};
 use crate::surface::{SurfaceSnapshot, TERM_COLS, TERM_ROWS};
 
 pub const MAX_WINDOWS: usize = 8;
@@ -83,6 +83,26 @@ impl LayoutMode {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionVisualState {
+    Active = 0,
+    DisplayBlanked = 1,
+    SessionLocked = 2,
+}
+
+impl SessionVisualState {
+    #[inline]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Active),
+            1 => Some(Self::DisplayBlanked),
+            2 => Some(Self::SessionLocked),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitPart {
     TitleBar,
@@ -110,6 +130,8 @@ pub enum WmInputAction {
     WheelRouted(u32),
     KeyMoved(u32, usize, usize),
     DesktopActionQueued(DesktopAction),
+    DpmsWoke,
+    LockBlocked,
 }
 
 pub struct WindowSlot {
@@ -213,6 +235,9 @@ pub struct WindowManager {
     pub sup_wake_cap: u64,
     pub action_queue: ActionQueue<16>,
     pub layout: LayoutMode,
+    pub session_state: SessionVisualState,
+    pub blank_timeout_tsc: u64,
+    pub last_input_tsc: u64,
     pub high_contrast: bool,
     pub cursor_large: bool,
     pub cursor_x: usize,
@@ -233,6 +258,9 @@ pub struct WindowManager {
     pub focus_switches: u64,
     pub z_raises: u64,
     pub drag_moves: u64,
+    pub dpms_blank_count: u64,
+    pub dpms_wake_count: u64,
+    pub locked_blocked_events: u64,
 }
 
 impl WindowManager {
@@ -247,6 +275,9 @@ impl WindowManager {
             sup_wake_cap: 0,
             action_queue: ActionQueue::new(),
             layout: LayoutMode::Floating,
+            session_state: SessionVisualState::Active,
+            blank_timeout_tsc: 0,
+            last_input_tsc: 0,
             high_contrast: false,
             cursor_large: false,
             cursor_x: 640,
@@ -266,6 +297,9 @@ impl WindowManager {
             focus_switches: 0,
             z_raises: 0,
             drag_moves: 0,
+            dpms_blank_count: 0,
+            dpms_wake_count: 0,
+            locked_blocked_events: 0,
         }
     }
 
@@ -296,6 +330,51 @@ impl WindowManager {
         let pill_w = 112usize;
         let rx = (self.screen_w / 2).saturating_sub(pill_w / 2);
         Rect::new(rx, 4, pill_w, 20)
+    }
+
+    #[inline]
+    pub fn unlock_button_rect(&self) -> Rect {
+        let bw = 296usize;
+        let bh = 28usize;
+        Rect::new(
+            self.screen_w.saturating_sub(bw) / 2,
+            (self.screen_h / 2) + 46,
+            bw,
+            bh,
+        )
+    }
+
+    pub fn set_session_state(
+        &mut self,
+        next: SessionVisualState,
+        now_tsc: u64,
+        scene_dirty: &mut DirtyRegion,
+    ) {
+        if next != SessionVisualState::Active {
+            self.dragging_slot = None;
+        }
+        if next == SessionVisualState::DisplayBlanked
+            && self.session_state != SessionVisualState::DisplayBlanked
+        {
+            self.dpms_blank_count = self.dpms_blank_count.wrapping_add(1);
+        }
+        self.last_input_tsc = now_tsc;
+        self.session_state = next;
+        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+    }
+
+    #[inline]
+    pub fn next_dpms_recv_timeout_tsc(&self, now_tsc: u64) -> u64 {
+        if self.session_state != SessionVisualState::Active || self.blank_timeout_tsc == 0 {
+            return 0;
+        }
+        let base = if self.last_input_tsc == 0 {
+            now_tsc
+        } else {
+            self.last_input_tsc
+        };
+        let deadline = base.saturating_add(self.blank_timeout_tsc);
+        deadline.saturating_sub(now_tsc).max(1)
     }
 
     pub fn set_running_apps_mask(&mut self, mask: u8, dirty: &mut DirtyRegion) {
@@ -630,6 +709,76 @@ impl WindowManager {
         scene_dirty: &mut DirtyRegion,
         cursor_dirty: &mut DirtyRegion,
     ) -> WmInputAction {
+        let now_tsc = crate::rdtsc_user();
+        self.last_input_tsc = now_tsc;
+
+        if self.session_state == SessionVisualState::DisplayBlanked {
+            match ev.kind {
+                InputEventKind::KeyPress
+                | InputEventKind::MouseMove
+                | InputEventKind::MouseButtonDown
+                | InputEventKind::MouseScroll => {
+                    self.session_state = SessionVisualState::Active;
+                    self.dpms_wake_count = self.dpms_wake_count.wrapping_add(1);
+                    scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                    return WmInputAction::DpmsWoke;
+                }
+                _ => return WmInputAction::None,
+            }
+        }
+
+        if self.session_state == SessionVisualState::SessionLocked {
+            match ev.kind {
+                InputEventKind::MouseMove => {
+                    let old_c = self.cursor_rect();
+                    self.cursor_visible = true;
+                    self.desktop_mode = true;
+                    let max_x = (self.screen_w.saturating_sub(1)) as isize;
+                    let max_y = (self.screen_h.saturating_sub(1)) as isize;
+                    let raw_x = (self.cursor_x as isize) + (ev.dx as isize);
+                    let raw_y = (self.cursor_y as isize) + (ev.dy as isize);
+                    self.cursor_x = raw_x.clamp(0, max_x) as usize;
+                    self.cursor_y = raw_y.clamp(0, max_y) as usize;
+                    cursor_dirty.mark(old_c);
+                    cursor_dirty.mark(self.cursor_rect());
+                    return WmInputAction::CursorMoved;
+                }
+                InputEventKind::MouseButtonDown => {
+                    if !self.cursor_visible {
+                        self.cursor_visible = true;
+                        cursor_dirty.mark(self.cursor_rect());
+                    }
+                    self.buttons_down = ev.buttons;
+                    if (ev.scancode as u8) == MOUSE_BTN_LEFT
+                        && self.unlock_button_rect().contains(self.cursor_x, self.cursor_y)
+                    {
+                        self.session_state = SessionVisualState::Active;
+                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                        return self.queue_desktop_action(DesktopAction::UnlockSession);
+                    }
+                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
+                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
+                    return WmInputAction::LockBlocked;
+                }
+                InputEventKind::KeyPress => {
+                    if ev.keycode == KEY_ENTER {
+                        self.session_state = SessionVisualState::Active;
+                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                        return self.queue_desktop_action(DesktopAction::UnlockSession);
+                    }
+                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
+                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
+                    return WmInputAction::LockBlocked;
+                }
+                InputEventKind::MouseScroll => {
+                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
+                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
+                    return WmInputAction::LockBlocked;
+                }
+                _ => return WmInputAction::None,
+            }
+        }
+
         match ev.kind {
             InputEventKind::MouseMove => {
                 let old_c = self.cursor_rect();

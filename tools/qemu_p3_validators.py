@@ -12,6 +12,7 @@ from qemu_ipc_validators import _ppm_to_png_and_verify
 from qemu_log_validators import _parse_kv_ints
 from qemu_p1_validators import _count_diff_pixels
 from qemu_p2_validators import _DesktopSessionHarness
+from qemu_p3c_validators import run_p3c_suite
 
 ARTIFACT_DIR = pathlib.Path(
     "/home/zwannfrederick/.gemini/antigravity/brain/fcac1153-5c72-4469-803e-6ceaebf4f0cb"
@@ -193,7 +194,8 @@ def run_p3a_security_and_malformed_ipc_e2e(
         qmp.type_ascii("sec-audit")
         qmp.send_qcodes(["ret"])
         h.wait_for(
-            "[DRY-SHELL] CMD=sec-audit kill_eperm=true unauth_perm=true bad_ipc_inval=true vfs_rofs=true vfs_eperm=true",
+            "[DRY-SHELL] CMD=sec-audit kill_eperm=true unauth_perm=true bad_ipc_inval=true "
+            "vfs_rofs=true vfs_eperm=true pwr_eperm=true",
             start_idx=idx,
         )
 
@@ -450,4 +452,5 @@ def run_p3_suite(
         build_dir,
         root_dir,
     )
-    return 3
+    n_p3c = run_p3c_suite(esp_p3_std, ovmf_code, ovmf_vars, build_dir, root_dir)
+    return 3 + n_p3c

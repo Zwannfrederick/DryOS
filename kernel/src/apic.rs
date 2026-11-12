@@ -26,6 +26,7 @@ pub const VEC_PIC_SPURIOUS_SLAVE: u8 = 0x2f;
 pub const VEC_EXT_IRQ_BASE: u8 = 0x30;
 pub const EXT_IRQ_VECTOR_COUNT: usize = 16;
 pub const VEC_EXT_IRQ_LAST: u8 = VEC_EXT_IRQ_BASE + (EXT_IRQ_VECTOR_COUNT as u8) - 1;
+pub const VEC_RESCHED_WAKE: u8 = 0xed;
 pub const VEC_TLB_SHOOTDOWN: u8 = 0xee;
 pub const VEC_LAPIC_TIMER: u8 = 0xef;
 pub const VEC_APIC_SPURIOUS: u8 = 0xff;
@@ -468,9 +469,11 @@ fn measure_one_5ms_pit_ch2_sample() -> (u64, u64) {
         outb(0x42, (PIT_5MS_TICKS & 0xff) as u8);
         outb(0x42, (PIT_5MS_TICKS >> 8) as u8);
 
-        outb(0x61, (orig_61 & !0x02) | 0x01); // Raise GATE2=1 (starts Ch2 countdown)
         apic_write(MSR_X2APIC_TIMER_INIT, MMIO_TIMER_INIT, u32::MAX);
         let t0 = rdtsc();
+        // Arm `TIMER_INIT` and `t0` BEFORE raising `GATE2=1` (`0x61` PIO VM-exit): host vCPU
+        // preemption on `outb(0x61)` then cannot elapse PIT wall-clock time prior to `t0`.
+        outb(0x61, (orig_61 & !0x02) | 0x01); // Raise GATE2=1 (starts Ch2 countdown)
 
         let mut polls = 0u64;
         while (inb(0x61) & 0x20) == 0 {

@@ -187,6 +187,32 @@ pub const IPC_OP_ERR_NOSYS: u32 = 49;
 pub const IPC_OP_SUP_MINT_ROGUE_TEST: u32 = 50;
 pub const IPC_OP_SUP_QUERY_PREFS: u32 = 51;
 pub const IPC_OP_SUP_GET_VFS_CAP: u32 = 52;
+pub const IPC_OP_PWR_QUERY: u32 = 53;
+pub const IPC_OP_PWR_SHUTDOWN_S5: u32 = 54;
+pub const IPC_OP_PWR_REBOOT: u32 = 55;
+pub const IPC_OP_PWR_SUSPEND_S3: u32 = 56;
+
+pub const POWER_OP_QUERY: u64 = 0;
+pub const POWER_OP_SHUTDOWN_S5: u64 = 1;
+pub const POWER_OP_REBOOT: u64 = 2;
+pub const POWER_OP_SUSPEND_S3: u64 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserPowerInfo {
+    pub idle_hlt_calls: u64,
+    pub idle_hlt_tsc: u64,
+    pub elapsed_tsc: u64,
+    pub fadt_present: u8,
+    pub s5_supported: u8,
+    pub reset_supported: u8,
+    pub s3_aml_present: u8,
+    pub s3_supported: u8,
+    pub _pad: [u8; 3],
+    pub denied_ops: u64,
+}
+
+const _: () = assert!(size_of::<UserPowerInfo>() == 40);
 
 pub const BOOT_MANIFEST_OFFSET: u64 = 0x0100;
 
@@ -839,6 +865,26 @@ pub fn sys_proc_list(out: &mut [UserProcInfo]) -> Result<(usize, usize), isize> 
 pub fn sys_proc_kill(child_handle: u64) -> Result<(), isize> {
     let (r0, _) = raw_syscall6(SYS_PROC_KILL, child_handle, 0, 0, 0, 0, 0);
     if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_power_query(out: &mut UserPowerInfo) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(
+        SYS_POWER_CTL,
+        POWER_OP_QUERY,
+        (out as *mut UserPowerInfo) as u64,
+        0,
+        0,
+        0,
+        0,
+    );
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_power_ctl(op: u64, power_cap: u64) -> Result<isize, isize> {
+    let (r0, _) = raw_syscall6(SYS_POWER_CTL, op, power_cap, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(r0) }
 }
 
 /// Read unprivileged architectural `TSC` counter at `CPL=3` (zero SSE/SIMD instructions).

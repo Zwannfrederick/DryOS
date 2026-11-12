@@ -22,19 +22,21 @@ use dry_userspace::gfx::Rect;
 use dry_userspace::input::InputEvent;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::surface::{TERM_COLS, TERM_ROWS};
-use dry_userspace::wm::{WindowManager, WindowRole, WmInputAction, MAX_WINDOWS, SUP_BIT_WM_ACTION};
+use dry_userspace::wm::{
+    SessionVisualState, WindowManager, WindowRole, WmInputAction, MAX_WINDOWS, SUP_BIT_WM_ACTION,
+};
 use dry_userspace::wm_ipc::{emit_wm_exit_telemetry, handle_wm_admin_op, wm_log_line as log_line};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_query, sys_cap_revoke, sys_exit,
     sys_fb_map, sys_frame_alloc, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_send_inline,
     sys_notify_signal, sys_vspace_map, sys_write_debug, UserCapInfo, UserFbInfo, UserIpcRecvExt,
-    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN,
-    IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_FOCUS,
-    IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE,
-    IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY, IPC_OP_WIN_POLL_EVENT, IPC_OP_WIN_WAIT_EVENT,
-    IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_POLL_ACTION, MSG_FLAG_NON_BLOCKING,
-    RIGHT_RECV, VSPACE_MAP_OP_2M_RW, VSPACE_MAP_OP_4K_RO, VSPACE_MAP_OP_UNMAP_2M,
-    VSPACE_MAP_OP_UNMAP_4K,
+    BADGE_INPUT_SVC, BADGE_SUPERVISOR, ETIMEDOUT, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
+    IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SURFACE_ATTACH,
+    IPC_OP_SURFACE_FOCUS, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF,
+    IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY, IPC_OP_WIN_POLL_EVENT,
+    IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_POLL_ACTION,
+    MSG_FLAG_NON_BLOCKING, RIGHT_RECV, VSPACE_MAP_OP_2M_RW, VSPACE_MAP_OP_4K_RO,
+    VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const FB_MAP_VADDR: u64 = 0x1000_0000;
@@ -209,9 +211,26 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
     let mut pres2w_lat = LatencyRing::new();
 
     loop {
+        let recv_timeout = wm.next_dpms_recv_timeout_tsc(rdtsc_user());
         let mut ext = UserIpcRecvExt::default();
-        let (tag, reply_tok, mrs) = match sys_ipc_recv_ext(disp_ep_cap, 0, 0, &mut ext) {
+        let (tag, reply_tok, mrs) = match sys_ipc_recv_ext(disp_ep_cap, 0, recv_timeout, &mut ext) {
             Ok(v) => v,
+            Err(ETIMEDOUT) => {
+                let now_tsc = rdtsc_user();
+                if wm.session_state == SessionVisualState::Active && wm.blank_timeout_tsc > 0 {
+                    wm.set_session_state(
+                        SessionVisualState::DisplayBlanked,
+                        now_tsc,
+                        &mut comp.scene_dirty,
+                    );
+                    let (px, _) = comp.flush_all(wm);
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"[DRY-WM] DPMS_BLANK reason=idle px=");
+                    lb.push_u64(px);
+                    log_line(&lb);
+                }
+                continue;
+            }
             Err(_) => break,
         };
         let op = msg_tag_label(tag);
@@ -358,7 +377,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 };
                 match snap {
                     Ok((rmin, rmax, changed)) => {
-                        if changed {
+                        if changed && wm.session_state == SessionVisualState::Active {
                             let (gx, gy) = wm.windows[slot_idx].grid_origin();
                             comp.scene_dirty.mark(Rect::new(
                                 gx,
@@ -659,6 +678,18 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                         lb.push_u64(x as u64);
                         lb.push_bytes(b" y=");
                         lb.push_u64(y as u64);
+                        log_line(&lb);
+                    }
+                    WmInputAction::DpmsWoke => {
+                        let mut lb = LineBuilder::new();
+                        lb.push_bytes(b"[DRY-WM] DPMS_WAKE wakes=");
+                        lb.push_u64(wm.dpms_wake_count);
+                        log_line(&lb);
+                    }
+                    WmInputAction::LockBlocked => {
+                        let mut lb = LineBuilder::new();
+                        lb.push_bytes(b"[DRY-WM] LOCK_BLOCKED count=");
+                        lb.push_u64(wm.locked_blocked_events);
                         log_line(&lb);
                     }
                     _ => {}

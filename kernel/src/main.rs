@@ -17,6 +17,7 @@ mod limine;
 mod mem_verify;
 mod percpu;
 mod pmm;
+mod power;
 mod proc;
 mod sched;
 mod security;
@@ -193,6 +194,17 @@ extern "C" fn bsp_kmain() -> ! {
         acpi_madt.ioapic_phys,
         acpi_madt.ioapic_gsi_base,
         acpi_madt.iso_override_count
+    );
+    let acpi_pwr = acpi::acpi_power_info();
+    serial_println!(
+        "[DRY-ACPI-PWR] PASS: fadt={} pm1a={:#x} s5={} slp_typ_a={} reset_port={:#x} s3_aml={} facs={:#x}",
+        acpi_pwr.fadt_found,
+        acpi_pwr.pm1a_cnt_port,
+        acpi_pwr.s5_valid,
+        acpi_pwr.slp_typ_s5_a,
+        acpi_pwr.reset_reg_io_port,
+        acpi_pwr.s3_aml_present,
+        acpi_pwr.facs_phys
     );
 
     let force_xapic = cmdline.contains("apic_mode=xapic");

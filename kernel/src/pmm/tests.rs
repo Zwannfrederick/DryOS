@@ -29,7 +29,6 @@ use crate::sched::{
 use crate::security::{SecDomain, SecError, SecFlags, SecLabel};
 use crate::serial_println;
 
-const MAX_OOM_FRAMES: usize = 65_536;
 const LAT_SAMPLES: usize = 2_048;
 const BENCH_ROUNDS_PER_CPU: usize = 512;
 const BENCH_BATCH: usize = 16;
@@ -70,12 +69,6 @@ struct StaticScratch<T>(UnsafeCell<T>);
 // SAFETY: Used strictly inside single-threaded BSP checks before SMP PMM epochs.
 unsafe impl<T> Sync for StaticScratch<T> {}
 
-static OOM_HANDLES: StaticScratch<[FrameHandle; MAX_OOM_FRAMES]> = StaticScratch(UnsafeCell::new(
-    [FrameHandle {
-        pfn: 0,
-        generation: 0,
-    }; MAX_OOM_FRAMES],
-));
 static SAMPLE_BUF: StaticScratch<[u64; LAT_SAMPLES]> =
     StaticScratch(UnsafeCell::new([0u64; LAT_SAMPLES]));
 
@@ -266,17 +259,21 @@ fn verify_inventory_zeroing_and_oom(online_cpus: usize) {
     flush_all_magazines_quiescent(online_cpus);
 
     // Full-RAM OOM Exhaustion & 100% Reclaim Conservation Test.
+    // Link allocated `(pfn, generation)` handles intrusively inside the first 8 bytes of each owned
+    // 4 KiB HHDM page so OOM verification scales to arbitrary RAM (`512M..64G+`) with `0 B` `.bss`.
+    const NONE_PACKED: u64 = u64::MAX;
+    let mut head_packed = NONE_PACKED;
     let mut count = 0usize;
-    // SAFETY: Single-threaded BSP quiescent phase before SMP PMM workers.
-    let handles = unsafe { &mut *OOM_HANDLES.0.get() };
     while let Ok(h) = alloc_pages(
         PageOrder::Order4KiB,
         kern_lbl,
         AllocFlags::UNINIT_SAME_DOMAIN_OK,
     ) {
-        assert!(count < MAX_OOM_FRAMES, "Exceeded MAX_OOM_FRAMES");
         assert!(h.pfn >= LOW_MEM_GUARD_END_PFN && h.pfn < inv.max_tracked_pfn);
-        handles[count] = h;
+        let slot = resolve_frame_ptr(h, kern_lbl) as *mut u64;
+        // SAFETY: `h` is exclusively owned by `kern_lbl` on single-threaded BSP.
+        unsafe { write_volatile(slot, head_packed) };
+        head_packed = (h.pfn as u64) | ((h.generation as u64) << 32);
         count += 1;
     }
     assert_eq!(
@@ -288,8 +285,16 @@ fn verify_inventory_zeroing_and_oom(online_cpus: usize) {
         alloc_pages(PageOrder::Order4KiB, kern_lbl, AllocFlags::ZERO),
         Err(PmmError::OutOfMemory)
     );
-    for h in handles.iter().take(count) {
-        free_pages(*h, PageOrder::Order4KiB, kern_lbl);
+    while head_packed != NONE_PACKED {
+        let h = FrameHandle {
+            pfn: head_packed as u32,
+            generation: (head_packed >> 32) as u32,
+        };
+        let slot = resolve_frame_ptr(h, kern_lbl) as *const u64;
+        // SAFETY: Read intrusive predecessor link before returning `h` to `PMM`.
+        let next_packed = unsafe { read_volatile(slot) };
+        free_pages(h, PageOrder::Order4KiB, kern_lbl);
+        head_packed = next_packed;
     }
     flush_all_magazines_quiescent(online_cpus);
 

@@ -26,15 +26,16 @@ use dry_userspace::vfs_proto::{vfs_create_file, vfs_read_file, vfs_unlink_file};
 use dry_userspace::wm::{WindowRole, TITLE_KIND_TERMINAL};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
-    sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_proc_kill,
-    sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserProcInfo, UserSysInfo,
-    EBADCAP, EPERM, EPIPE, EREVOKED, EROFS, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
-    IPC_OP_ERR_PERM, IPC_OP_INPUT_EVENT, IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT,
-    IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_GET_VFS_CAP, IPC_OP_SUP_HELLO,
-    IPC_OP_SUP_MINT_ROGUE_TEST, IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_RECONNECT_INPUT,
-    IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT,
-    IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP,
-    RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_power_ctl,
+    sys_power_query, sys_proc_kill, sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug,
+    UserPowerInfo, UserProcInfo, UserSysInfo, EBADCAP, EPERM, EPIPE, EREVOKED, EROFS,
+    IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_INPUT_EVENT,
+    IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT, IPC_OP_PONG, IPC_OP_SUP_ACTION,
+    IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_GET_VFS_CAP, IPC_OP_SUP_HELLO, IPC_OP_SUP_MINT_ROGUE_TEST,
+    IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH,
+    IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED,
+    IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_TOGGLE_TILING, POWER_OP_REBOOT, POWER_OP_SHUTDOWN_S5,
+    RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SHELL_SURF_VADDR: u64 = 0x1800_0000;
@@ -161,16 +162,19 @@ fn run_live_p3_sec_probes(sup_ep_cap: u64, engine: &mut ShellEngine) {
         }
     }
 
+    let pwr_eperm = sys_power_ctl(POWER_OP_SHUTDOWN_S5, 0) == Err(EPERM)
+        && sys_power_ctl(POWER_OP_REBOOT, 0xdead_beef) == Err(EPERM);
+
     let mut lb = LineBuilder::new();
     lb.push_bytes(b"Security audit: kill_eperm=");
     lb.push_bytes(if kill_eperm { b"true" } else { b"false" });
     lb.push_bytes(b" unauth_perm=");
     lb.push_bytes(if unauth_perm { b"true" } else { b"false" });
-    lb.push_bytes(b" vfs_eperm=");
-    lb.push_bytes(if vfs_eperm { b"true" } else { b"false" });
+    lb.push_bytes(b" pwr_eperm=");
+    lb.push_bytes(if pwr_eperm { b"true" } else { b"false" });
     engine.push_line(
         lb.as_bytes(),
-        if kill_eperm && unauth_perm && bad_ipc_inval && vfs_rofs && vfs_eperm {
+        if kill_eperm && unauth_perm && bad_ipc_inval && vfs_rofs && vfs_eperm && pwr_eperm {
             STYLE_OK
         } else {
             STYLE_WARN
@@ -188,6 +192,8 @@ fn run_live_p3_sec_probes(sup_ep_cap: u64, engine: &mut ShellEngine) {
     slb.push_bytes(if vfs_rofs { b"true" } else { b"false" });
     slb.push_bytes(b" vfs_eperm=");
     slb.push_bytes(if vfs_eperm { b"true" } else { b"false" });
+    slb.push_bytes(b" pwr_eperm=");
+    slb.push_bytes(if pwr_eperm { b"true" } else { b"false" });
     debug_line(&slb);
 }
 
@@ -508,6 +514,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 let mut wants_shutdown = false;
                 let mut wants_self_exit = false;
                 let mut trigger_crash_after_present = false;
+                let mut post_present_action: Option<DesktopAction> = None;
 
                 match parse_command(cmd_slice) {
                     ShellCommand::Empty => {}
@@ -526,6 +533,10 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     cmd @ (ShellCommand::System | ShellCommand::SysInfo) => {
                         let _ = sys_sysinfo(&mut sys);
                         engine.format_system(&sys);
+                        let mut pwr = UserPowerInfo::default();
+                        if p3_mode && sys_power_query(&mut pwr).is_ok() {
+                            engine.format_power_telemetry(&pwr);
+                        }
                         let mut lb = LineBuilder::new();
                         lb.push_bytes(if cmd == ShellCommand::System {
                             b"[DRY-SHELL] CMD=system cpus="
@@ -539,6 +550,10 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         lb.push_u64(sys.total_ext_irqs);
                         lb.push_bytes(b" free_4k=");
                         lb.push_u64(sys.free_frames_4k as u64);
+                        if p3_mode {
+                            lb.push_bytes(b" hlt=");
+                            lb.push_u64(pwr.idle_hlt_calls);
+                        }
                         debug_line(&lb);
                     }
                     ShellCommand::Uptime => {
@@ -718,22 +733,31 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         }
                     }
                     ShellCommand::Blank => {
-                        let _ = call_sup_action(sup_ep_cap, DesktopAction::BlankDisplayNow);
                         engine.push_line(b"Display blank requested (any input wakes).", STYLE_OK);
+                        post_present_action = Some(DesktopAction::BlankDisplayNow);
                         let _ = sys_write_debug(b"[DRY-SHELL] CMD=blank ok=true\n");
                     }
                     ShellCommand::Lock => {
-                        let _ = call_sup_action(sup_ep_cap, DesktopAction::LockSession);
                         engine.push_line(
                             b"Session lock engaged (unauthenticated until DRY Vault auth).",
                             STYLE_OK,
                         );
+                        post_present_action = Some(DesktopAction::LockSession);
                         let _ = sys_write_debug(b"[DRY-SHELL] CMD=lock ok=true\n");
                     }
                     ShellCommand::Reboot => {
                         engine.push_line(b"Requesting controlled system reboot...", STYLE_WARN);
                         let _ = sys_write_debug(b"[DRY-SHELL] CMD=reboot ok=true\n");
                         let _ = call_sup_action(sup_ep_cap, DesktopAction::RequestReboot);
+                        break;
+                    }
+                    ShellCommand::Poweroff => {
+                        engine.push_line(
+                            b"Requesting controlled ACPI S5 hardware poweroff...",
+                            STYLE_WARN,
+                        );
+                        let _ = sys_write_debug(b"[DRY-SHELL] CMD=poweroff ok=true\n");
+                        let _ = call_sup_action(sup_ep_cap, DesktopAction::RequestPoweroffHw);
                         break;
                     }
                     ShellCommand::Suspend => {
@@ -824,6 +848,9 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     plb.push_bytes(b" blit_cyc=");
                     plb.push_u64(d_cyc);
                     debug_line(&plb);
+                }
+                if let Some(act) = post_present_action {
+                    let _ = call_sup_action(sup_ep_cap, act);
                 }
 
                 if trigger_crash_after_present {

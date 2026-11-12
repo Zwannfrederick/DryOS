@@ -7,7 +7,7 @@ use crate::surface::{
     SharedTerminalSurface, SurfaceCell, STYLE_ACCENT, STYLE_DEFAULT, STYLE_HEADER, STYLE_MUTED,
     STYLE_OK, STYLE_PROMPT, STYLE_WARN, TERM_COLS, TERM_ROWS,
 };
-use crate::{UserProcInfo, UserSysInfo};
+use crate::{UserPowerInfo, UserProcInfo, UserSysInfo};
 
 pub const SCROLLBACK_CAP: usize = 128;
 pub const HIST_CAP: usize = 16;
@@ -32,6 +32,7 @@ pub enum ShellCommand<'a> {
     Blank,
     Lock,
     Reboot,
+    Poweroff,
     Suspend,
     Echo(&'a [u8]),
     OverflowTest,
@@ -91,12 +92,13 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"blank" => ShellCommand::Blank,
         b"lock" => ShellCommand::Lock,
         b"reboot" => ShellCommand::Reboot,
+        b"poweroff" => ShellCommand::Poweroff,
         b"suspend" => ShellCommand::Suspend,
         b"echo" => ShellCommand::Echo(rest),
         b"overflow-test" => ShellCommand::OverflowTest,
         b"crash-input" => ShellCommand::CrashInput,
         b"sec-audit" => ShellCommand::SecAudit,
-        b"shutdown" | b"poweroff" | b"exit" => ShellCommand::Shutdown,
+        b"shutdown" | b"exit" => ShellCommand::Shutdown,
         _ => ShellCommand::Unknown(verb),
     }
 }
@@ -527,7 +529,7 @@ impl ShellEngine {
         self.push_line(b"  apps              Registered native apps & supervisor state", STYLE_DEFAULT);
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
-        self.push_line(b"  blank|lock|reboot|shutdown|suspend   Power & session lifecycle", STYLE_DEFAULT);
+        self.push_line(b"  blank|lock|reboot|poweroff|shutdown|suspend  Power & session", STYLE_DEFAULT);
         self.push_line(b"Keys: Up/Down history | PgUp/PgDn/Wheel scroll | Alt+1..4 apps", STYLE_MUTED);
     }
 
@@ -592,6 +594,18 @@ impl ShellEngine {
         l3.push_byte(b'/');
         l3.push_u64(info.irq12_delivered);
         self.push_line(l3.as_bytes(), STYLE_ACCENT);
+    }
+
+    pub fn format_power_telemetry(&mut self, pwr: &UserPowerInfo) {
+        let mut lp = LineBuilder::new();
+        lp.push_bytes(b"Power : HLT=");
+        lp.push_u64(pwr.idle_hlt_calls);
+        lp.push_bytes(b" calls | ACPI S5=");
+        lp.push_bytes(if pwr.s5_supported != 0 { b"ON" } else { b"OFF" });
+        lp.push_bytes(b" Reset=");
+        lp.push_bytes(if pwr.reset_supported != 0 { b"ON" } else { b"OFF" });
+        lp.push_bytes(b" S3=-ENOSYS");
+        self.push_line(lp.as_bytes(), STYLE_OK);
     }
 
     pub fn format_uptime(&mut self, info: &UserSysInfo) {

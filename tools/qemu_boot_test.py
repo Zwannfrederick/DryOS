@@ -24,6 +24,7 @@ from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_an
 from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
 from qemu_p2_validators import run_p2_suite
 from qemu_p3_validators import run_p3_suite
+from qemu_p3c_validators import run_p3_hardware_matrix
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -53,6 +54,7 @@ USERSPACE_MODS = (
     ("dry-vfs", "dry-vfs.elf"),
     ("dry-files", "dry-files.elf"),
     ("dry-settings", "dry-settings.elf"),
+    ("dry-power", "dry-power.elf"),
 )
 
 
@@ -463,6 +465,7 @@ def main() -> None:
     parser.add_argument("--irq-only", action="store_true", help="Sub-Stage A: verify only APIC timer IRQ + EOI + TrapFrame")
     parser.add_argument("--p1-only", action="store_true", help="Run only Milestone 2A-1 (P1) interactive & negative security suite")
     parser.add_argument("--p3-only", action="store_true", help="Run only Milestone 2A-3 native desktop & lifecycle suite")
+    parser.add_argument("--p3-matrix", action="store_true", help="Run Milestone 2A-3 SMP (1..20 vCPU) & RAM (256M..2G) desktop matrix")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -481,6 +484,13 @@ def main() -> None:
     if args.p3_only:
         n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p3} MILESTONE 2A-3 NATIVE DESKTOP & SECURITY CHECKS PASSED.")
+        return
+
+    if args.p3_matrix:
+        esp_p3_std = BUILD_DIR / "esp_p3_desktop_std.img"
+        write_mbr_esp_image(esp_p3_std, kernel_elf, "console=com1 desktop3=1")
+        run_p3_hardware_matrix(esp_p3_std, OVMF_CODE, OVMF_VARS, BUILD_DIR)
+        print("\n[QEMU-TEST] ALL 5 MILESTONE 2A-3 SMP/RAM MATRIX DESKTOP CONFIGURATIONS PASSED.")
         return
 
     if args.smp_only > 0:
