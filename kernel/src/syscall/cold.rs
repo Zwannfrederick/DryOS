@@ -137,7 +137,7 @@ fn sys_sysinfo_impl(user_out_ptr: u64) -> Result<isize, SysError> {
     let (tsc_mhz, uptime_ms, elapsed_tsc) = uptime_telemetry();
     let (ext_irqs, _, _, _) = irq_telemetry();
     let inv = inventory();
-    let free_frames = free_global_frames_snapshot();
+    let free_frames = free_global_frames_snapshot(online);
 
     let info = UserSysInfo {
         abi_version: DRY_SYSCALL_ABI_VERSION,

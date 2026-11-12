@@ -11,6 +11,8 @@ pub mod gfx;
 pub mod init_legacy;
 pub mod input;
 pub mod ioring;
+pub mod island_audit;
+pub mod island_proto;
 pub mod keymap;
 pub mod persist_fs;
 pub mod ps2;
@@ -254,6 +256,8 @@ pub struct RootInitBootInfo {
     pub vault_mod_cap: u64,
     pub pci_blk_cap: u64,
     pub vault_ctrl_cap: u64,
+    pub broker_mod_cap: u64,
+    pub mock_drv_mod_cap: u64,
 }
 
 const _: () = assert!(size_of::<RootInitBootInfo>() <= BOOT_MANIFEST_OFFSET as usize);

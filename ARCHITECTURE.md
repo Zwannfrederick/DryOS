@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 12 Kasım 2026 (`Milestone 2A-2` / `DRY Desktop Preview` Kapanışı)  
-> **Aşama:** Faz 1 (`1df3842`, `69522a3`) + Faz 2 `Milestone 2A-1` (`P1 First Interaction`) + **`Milestone 2A-2` (`DRY Desktop Preview`)** Tamamlandı (`79/79` QEMU/KVM Doğrulaması: Gerçek PS/2 Klavye [`IRQ1`] + PS/2 Fare [`IRQ12`] -> Birleşik Ring 3 `dry-input` -> Ring 3 Çok-Pencereli Compositor [`dry-display` + Yazılımsal İmleç + `Floating`/`SideBySideTiled` WM] -> Eşzamanlı İzole `dry-shell` & `dry-sysmon` Yeşil; `ADR-001` .. `ADR-013` Yürürlükte)  
+> **Durum Tarihi:** 12 Kasım 2026 (`Milestone 2C-0` / `Adaptive Driver Island PoC` Kapanışı)  
+> **Aşama:** Faz 1 (`1df3842`, `69522a3`) + Faz 2 `Milestone 2A-1` (`9dab7a6`), `2A-2` (`85ec902`), `2A-3` (`0da9d9d..2a361c3`), `2B` (`8c9bc25`) ve **`Milestone 2C-0` (`Device Broker` + `Mock Driver Island` PoC)** Tamamlandı (`90/90` QEMU/KVM Doğrulaması + `5/5` SMP/RAM Matrisi; `ADR-001` .. `ADR-016` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya otomatik testlerle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak deney/bare-metal ile yanlışlanmaya açık tasarım iddiası.  
@@ -18,7 +18,7 @@
 - **Global Kilit Yasağı:** Sıcak sistem çağrısı, IPC, bildirim (*notification*) ve zamanlayıcı uyandırma yollarında *Big Kernel Lock (BKL)* bulunmaz `[HİPOTEZ — Faz 0/1'de ölçülecek]`.
 - **Çift Düzlemli İletişim:**
   - **Kontrol Düzlemi:** Yetki devri, hata (*fault*) bildirimi ve yaşam döngüsü için senkron `Endpoint` IPC + Öncelik Bağışı (*Priority Donation*).
-  - **Veri Düzlemi:** `sDDF` / `io_uring` tarzı paylaşımlı bellek kilitsiz halkalar (`IoRing`) + yalnızca karşı taraf uyuyorsa çekirdeğe giren `Notification` kapı zili (*doorbell*) `[DOĞRULANDI: LionsOS/sDDF literatür kanıtı; DRY uyarlaması TEST EDİLMEDİ]`.
+  - **Veri Düzlemi:** `sDDF` / `io_uring` tarzı paylaşımlı bellek kilitsiz halkalar (`IoRing`) + yalnızca karşı taraf uyuyorsa çekirdeğe giren `Notification` kapı zili (*doorbell*) `[DOĞRULANDI: Milestone 2B dry-vfs <-> dry-blk ve Milestone 2C-0 batch=32 859 cyc/op ile kanıtlandı]`.
 - **Hibrit Sürücü Stratejisi:** Önyükleme ve çekirdek depolama/sanallaştırma yolları (`VirtIO`, `NVMe`, `GOP`) native Rust ile yazılır; geniş PCIe çevre birimi ekosistemi (Ethernet, USB xHCI, seçilmiş Wi-Fi) Linux kaynak kodundan izole `GPL-2.0-only` userspace *Driver Island* süreçlerine uyarlanır (`ADR-005`, `ADR-006`).
 
 ```
@@ -170,6 +170,13 @@
   - `DRYFS_v1`, çift A/B `CRC32` süperblok (`tx_seq`) ve 4 KiB Copy-on-Write veri blokları + çift `VIRTIO_BLK_T_FLUSH` bariyeriyle güç kesintilerine (`SIGKILL`) ve süperblok bozulmalarına karşı atomik kurtarma sağlar; her inode `ADR-007` `SecLabel` taşır ve çapraz bağlama/kompartman `link` yükseltmelerini (`-EXDEV` / `-EPERM`) reddeder (`INV-SEC-05`).
 - **Ring 3 `DRY Vault` (`dry-vault.elf` `0x0007`), Kriptografik `Session Lock` ve `DEV_WORKSPACE` (`0x002a`):**
   - Saf `no_std` tuzlu `PBKDF2-HMAC-SHA256` (`vault_crypto.rs`) doğrulayıcısı `/persist/vault.sec` (`RootSystem | NO_DELEGATE`) üzerinde saklanır (`0` düz metin parola); masaüstü `Session Lock` kalkanı gerçek parola doğrulamasıyla açılır ve `GLOBAL_LEASE_EPOCH` sayacını döndürür; masaüstü tercihleri `/persist/desktop.cfg` içinde yeniden başlatmalar boyunca yaşar; `DEV_WORKSPACE` kompartmanının donanım/DMA/Vault yetkilerine erişimi çekirdekte `-EPERM` ile engellenir.
+
+### 2.9. `Milestone 2C-0`: Minimal Adaptive Driver Island PoC — `Device Broker` & `Mock Driver Island` (`[DOĞRULANDI — 90/90 QEMU/KVM + 5/5 Matris]`)
+
+- **Sıfır Yeni Syscall ile Kontrol/Veri Düzlemi Ayrımı (`userspace/src/island_proto.rs`, `bin/{dry_broker,dry_mock_drv}.rs`):**
+  - **`Device Broker` (`SecDomain::RootSystem`, `0x0008`):** Yalnızca mevcut `Syscall ABI v0.1` (`0..=31`) ilkelleriyle istemci rozetini (`BADGE_BROKER_CLIENT` / `BADGE_BROKER_ADMIN`) denetler (`denied_ops`), `dry-mock-drv.elf` sürecini başlatır ve nesil-damgalı (`island_session_badge(gen)`) `Endpoint`, `IoRingSharedPage` (`Frame4K`) ve `Notification` (`sq_notif`, `cq_notif`) kiralamalarını devreder.
+  - **`Mock Driver Island` (`SecDomain::Userspace`, `0x0209`):** Ayrı `VSpace` + `CSpace` içinde çalışır (`sys_proc_kill(1) == -EPERM`), nesle bağlı deterministik `SplitMix64 + CRC32` dönüşümünü hem `Endpoint` hem `IoRingSharedPage` üzerinden yürütür, iş yokken `timeout_tsc = 0` ile sonsuz olay beklemesinde (`0` boşta syscall, `%99.38` donanım `HLT`) uyur ve `ISLAND_DOORBELL_RING` / `ISLAND_DOORBELL_CTL` ile uyanır (`w1_p50 = 16.056 cyc` [`5.16 µs`]).
+  - **Çökme Kurtarması ve Bayat Yetki Reddi:** `#UD` (`ud2`) çöküşünde `Device Broker` `sys_proc_wait` ile süreci toplar, `sys_cap_revoke` ile önceki neslin CDT alt-ağacını yıkar (`-EREVOKED` / `-EBADCAP`, `stale_revoked = 4`) ve `1.41 ms` (`p50`) içinde `gen + 1` adasını sızıntısız (`pmm_act = 31` çerçeve, `pmm_leak = 0`) ayağa kaldırır (`docs/EXPERIMENTS_2C0_ISLAND_POC.md`). Not: Bu prototip yaşam döngüsü kanıtıdır; gerçek Linux/Windows sürücü uyumluluğu içermez.
 
 ---
 

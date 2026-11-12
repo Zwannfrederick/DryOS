@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-3` / `Functional Desktop Foundation` Kapanışı)  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2C-0` / `Adaptive Driver Island PoC` Kapanışı — `90/90` QEMU + `5/5` Matris)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -88,3 +88,8 @@
 - **Durum:** `BOUNDED BY DESIGN` / `OPEN — P5 Bare-Metal` (`ADR-016`, `docs/COMPATIBILITY_ISLANDS_RESEARCH.md` Bölüm 8–9).
 - **Teknik Mekanizma:** (a) Uyuyan bir GPU MicroVM'in vCPU'ları `HLT` durumunda `%1.3` CPU tüketse bile VFIO/IOMMU DMA eşlemesinin misafir RAM'ini kalıcı sabitlemesi (`Exp-B2`: `256 MiB` misafir için `309.41 MiB` `VmRSS`); (b) TigerLake-H dizüstünde `01:00.0` RTX 3050 Ti Mobile cihazının muxless (`0302`) olması, IOMMU Grup 13'ü `00:01.0` PCIe Kök Portuyla paylaşması ve `D0` boşta bırakıldığında `~8–15 W` pil tüketmesi.
 - **Azaltma:** `Kademe 4` GPU MicroVM varsayılan açılışta kesinlikle çalıştırılmaz (*opt-in / on-demand*); birincil ekran taraması her zaman Intel `00:02.0` üzerinde yerel `dry-display` mülkiyetinde kalır; GPU kiralaması sona erdiğinde MicroVM kapatılıp cihaz `FLR` + ACPI `RTD3 D3cold` durumuna indirilir (`P5` fiziksel silikon kabul kapısı).
+
+### R-18: Önyükleme Modül Tablosu Tavanı (`MAX_LATCHED_MODULES = 16/16`) ve Deneysel Ada Altyapısı Sınırları (Yeni — 12 Kasım 2026)
+- **Durum:** `OPEN / PLANNED` (`Milestone 2A-4` / `2C-1` İlk Ön Koşulu).
+- **Teknik Mekanizma:** (a) `Milestone 2C-0` ile eklenen `dry-broker.elf` (`15`) ve `dry-mock-drv.elf` (`16`) sonrasında Limine önyükleme modül dizisi `16/16` dolu kapasiteye ulaşmıştır (`kernel/src/limine.rs:429` `MAX_LATCHED_MODULES = 16`, `kernel/src/irq/session.rs:202` `[CAP_NULL; 16]`, `userspace/src/vfs_mem.rs:14` `MAX_BOOT_ENTRIES = 20`); tavan artırılmadan 17. ELF64 modülü eklenirse modül önyüklemede sessizce kırpılır; (b) `dry-mock-drv.elf` saf CPU dönüşümü yapar (`0` `PciDev`/DMA/MSI-X) ve `IoRing` kontrol kapı zilinde hatalı istemciye karşı `50 ms` zaman aşımı bekçisi kullanır.
+- **Azaltma:** Sonraki milestone'da yeni bir kullanıcı alanı ikilisi eklenmeden **ilk adım** olarak `MAX_LATCHED_MODULES` (`16 -> 32`) ve `MAX_BOOT_ENTRIES` (`20 -> 36`) sabitleri senkron yükseltilip negatif taşma assertion'ı eklenecektir; gerçek donanım sürücü adalarında (`Faz 3`) `TCB`-bağlı birleşik `Endpoint + Notification` beklemesi (`Milestone 2A-4`) `50 ms` kontrol bekçisinin yerini alacaktır.

@@ -7,6 +7,7 @@
 
 use crate::action::{AppId, DesktopAction};
 use crate::init_legacy::{domain_spec, log_line, spawn_and_init_desktop_input};
+use crate::island_audit::{run_island_poc_benchmarks, run_island_poc_lifecycle_audit};
 use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
 pub use crate::sup_ctx::AppState;
@@ -133,7 +134,8 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         sys_exit(165);
     }
 
-    let mut sec_audit_done = boot.session_mode != 11 && boot.session_mode != 21;
+    let mut sec_audit_done =
+        !matches!(boot.session_mode, 11 | 21 | 25 | 26);
     let mut restarts = 0u64;
 
     loop {
@@ -164,13 +166,15 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                 true
             };
             if windows_ready {
-                let bad_ok =
-                    ctx.execute_action(DesktopAction::from_words(0xdead_beef, 999))
-                        == Err(IPC_OP_ERR_INVAL)
-                        && ctx.execute_action(DesktopAction::from_words(1, 99))
-                            == Err(IPC_OP_ERR_INVAL);
-                if let Err(code) = run_p3_sup_security_checks(sup_ep, disp_ep, pwr_ep, bad_ok) {
-                    sys_exit(code);
+                if boot.session_mode == 11 || boot.session_mode == 21 {
+                    let bad_ok =
+                        ctx.execute_action(DesktopAction::from_words(0xdead_beef, 999))
+                            == Err(IPC_OP_ERR_INVAL)
+                            && ctx.execute_action(DesktopAction::from_words(1, 99))
+                                == Err(IPC_OP_ERR_INVAL);
+                    if let Err(code) = run_p3_sup_security_checks(sup_ep, disp_ep, pwr_ep, bad_ok) {
+                        sys_exit(code);
+                    }
                 }
                 if boot.session_mode == 21 {
                     if let Err(code) = run_p4_security_and_fault_audit(
@@ -184,6 +188,24 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     ) {
                         let mut elb = LineBuilder::new();
                         elb.push_bytes(b"[DRY-P4-SEC-FAIL] code=");
+                        elb.push_u64(code as u64);
+                        log_line(&elb);
+                        sys_exit(code);
+                    }
+                } else if boot.session_mode == 25 {
+                    if let Err(code) =
+                        run_island_poc_lifecycle_audit(boot, vfs_sup_cap, vault_sup_cap)
+                    {
+                        let mut elb = LineBuilder::new();
+                        elb.push_bytes(b"[DRY-ISLAND-POC-FAIL] code=");
+                        elb.push_u64(code as u64);
+                        log_line(&elb);
+                        sys_exit(code);
+                    }
+                } else if boot.session_mode == 26 {
+                    if let Err(code) = run_island_poc_benchmarks(boot) {
+                        let mut elb = LineBuilder::new();
+                        elb.push_bytes(b"[DRY-ISLAND-BENCH-FAIL] code=");
                         elb.push_u64(code as u64);
                         log_line(&elb);
                         sys_exit(code);

@@ -664,8 +664,14 @@ pub(crate) fn release_contiguous_from_untyped(base_pfn: u32, frame_count: usize,
 }
 
 #[inline]
-pub fn free_global_frames_snapshot() -> u64 {
-    lock_global_pool_with_cli(|pool| pool.free_count)
+pub fn free_global_frames_snapshot(online_cpus: usize) -> u64 {
+    let free_global = lock_global_pool_with_cli(|pool| pool.free_count);
+    let mut free_cached = 0u64;
+    for cpu in 0..online_cpus {
+        // SAFETY: Diagnostic read of per-CPU magazine occupancy (`<= MAGAZINE_CAP`).
+        free_cached += unsafe { (*PER_CPU_MAGAZINES.0.get())[cpu].len as u64 };
+    }
+    free_global + free_cached
 }
 
 pub fn measure_fragmentation(online_cpus: usize) -> FragReport {

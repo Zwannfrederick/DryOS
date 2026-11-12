@@ -1,7 +1,7 @@
 # DRY OS — Mimari Karar Kayıtları (Architecture Decision Records)
 
 > **Tarih:** 10–12 Kasım 2026  
-> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-012`)
+> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-016`)
 
 ---
 
@@ -334,3 +334,4 @@
   2. **Kademe 2 — `< 400` Sembollü Sınırlı PCIe Cihazlar için Userspace `H2` DDE Sürücü Adaları (`GPL-2.0-only`):** `igc`, `e1000e`, `xHCI` USB ve seçilmiş Wi-Fi NIC sürücüleri (`< 10.000` LOC sınıf çalışma zamanı + gölge `vmemmap` `DmaArena` + `IoRing`, `0` VM RAM vergisi).
   3. **Kademe 3 — Sanal Makinesiz Userspace Uygulama Kişilikleri (`dry-linux-abi` & `dry-ntos`):** Linux ELF64 için `FaultEndpoint`/`SYSCALL` yönlendirmesi + `libdry_posix` (`futex` -> `Notification`, `mmap` -> `Pager`); Windows `PE32+` (`Faz 5`) için `GS_BASE` TEB + Wine `ntdll` `unixlib` + `DXVK`/`VKD3D-Proton` -> Vulkan (`0` çekirdek modu `.sys` sürücüsü / anti-cheat).
   4. **Kademe 4 — Yalnızca `> 1.000` Sembollü / `HMM` Ayrık GPU'lar için İsteğe Bağlı (*Opt-In*) Uyuyan Donanım MicroVM (`dry-vmm`):** Varsayılan masaüstü/sunucu açılışında kapalıdır (`0 B` RAM); yalnızca ayrık GPU/CUDA istendiğinde (`RTX 3050 Ti` `01:00.0` IOMMU Grup 13, muxless `0302`) başlatılır, toplu **VirtIO-GPU `Venus` (Vulkan)** komut halkaları ve paylaşımlı PRIME tarama tamponları üzerinden `dry-display` ile bütünleşir, kiralama bittiğinde kapatılıp cihaz `RTD3 D3cold` (`0 W`) durumuna çekilir.
+- **`Milestone 2C-0` Yaşam Döngüsü PoC Doğrulaması (`90/90` QEMU + `5/5` Matris, [`docs/EXPERIMENTS_2C0_ISLAND_POC.md`](docs/EXPERIMENTS_2C0_ISLAND_POC.md)):** `0` yeni syscall eklenerek `dry-broker.elf` (`0x0008`) ve `dry-mock-drv.elf` (`0x0209`) üzerinde yetenek kiralama, `HLT` uyku/uyanma (`brk_sys=0`, `isl_sys=0`, `w1_p50=16.056 cyc` [`5.16 µs`]), `#UD` çökme sonrası CDT `sys_cap_revoke` + yeniden başlatma (`p50=1.408 µs`, `stale_revoked=4`, `pmm_act=31` çerçeve, `pmm_leak=0`), doğrudan vs broker RPC (`5.309` vs `10.214 cyc`) ve `IoRing` gruplama (`batch=1` `5.272` -> `batch=32` `859 cyc/op`, `6.14x`) deneysel olarak doğrulandı.

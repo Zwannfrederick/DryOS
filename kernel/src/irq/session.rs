@@ -66,6 +66,8 @@ struct P1InitBootInfo {
     vault_mod_cap: u64,
     pci_blk_cap: u64,
     vault_ctrl_cap: u64,
+    broker_mod_cap: u64,
+    mock_drv_mod_cap: u64,
 }
 
 const _: () = assert!(size_of::<P1InitBootInfo>() <= BOOT_MANIFEST_OFFSET);
@@ -101,6 +103,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             22u64
         } else if cmdline.contains("p4_shutdown=1") {
             23u64
+        } else if cmdline.contains("island_poc=1") {
+            25u64
+        } else if cmdline.contains("island_bench=1") {
+            26u64
         } else {
             20u64
         }
@@ -164,6 +170,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             let power_cap = mint_boot_module_cap(cs, lbl, "dry-power.elf").unwrap_or(CapPtr::NULL);
             let blk_cap = mint_boot_module_cap(cs, lbl, "dry-blk.elf").unwrap_or(CapPtr::NULL);
             let vault_cap = mint_boot_module_cap(cs, lbl, "dry-vault.elf").unwrap_or(CapPtr::NULL);
+            let broker_cap =
+                mint_boot_module_cap(cs, lbl, "dry-broker.elf").unwrap_or(CapPtr::NULL);
+            let mock_drv_cap =
+                mint_boot_module_cap(cs, lbl, "dry-mock-drv.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -218,6 +228,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 vault_mod_cap: vault_cap.0,
                 pci_blk_cap: pci_blk_cap.0,
                 vault_ctrl_cap: vault_ctrl_cap.0,
+                broker_mod_cap: broker_cap.0,
+                mock_drv_mod_cap: mock_drv_cap.0,
             };
             // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
             unsafe {

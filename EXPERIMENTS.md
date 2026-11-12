@@ -923,3 +923,19 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 - **Özet Bulgular (`88/88` QEMU/KVM + `5/5` Matris Yeşil, `leaked_frames = 0`):**
   1. **Kalıcı `DRYFS_v1` ve `SIGKILL` Güç Kesintisi Kurtarması:** Ring 3 `dry-blk.elf` (`VirtIO 1.0 Modern`) + kilitsiz `IoRing` (`SQ`/`CQ` + `Notification`) üzerinde çift A/B `CRC32` süperblok ve 4 KiB CoW bloklarıyla `/persist` bağlama noktası doğrulandı; 2 ardışık önyükleme boyunca dosyalar, `hardlink`, `/persist/desktop.cfg` tercihleri ve `PBKDF2` parola doğrulayıcısı korundu (`p4a`); aktif süperblok bozulup `SIGKILL` uygulandığında karşı yuvadan otomatik kurtarma (`recovered=true`) kanıtlandı (`p4b`).
   2. **`DRY Vault`, `BME=0` DMA Susturma ve `DEV_WORKSPACE` Kısıtlaması:** Tuzlu `PBKDF2-HMAC-SHA256` (`/persist/vault.sec`, ham diskte `0` düz metin parola) ile gerçek parola doğrulamalı `Session Lock` (`docs/p4_vault_auth_lock.png`), $O(1)$ `GLOBAL_LEASE_EPOCH` iptali (`-EREVOKED`), `SEAL_RO_EXPORT` `W^X` zorlaması, `DEV_WORKSPACE` (`0x002a`) donanım/DMA reddi (`dma_denied=2`, `vault_denied=1`) ve canlı `dry-blk` `#UD` çöküşünde `PCI Command.BME = 0` donanım susturması (`pci_quiesce=2`) doğrulandı (`p4c`). Sıcak `rust_syscall_dispatch` yığın çerçevesi **`248 B` (`+0 B`)** korundu.
+
+---
+
+## Bölüm P — Faz 2 `Milestone 2C-0` (`Minimal Adaptive Driver Island PoC: Device Broker & Mock Driver Island`): Özeti
+
+- **Tarih:** 12 Kasım 2026 (`ADR-016`)
+- **Tam Ayrıntılı Tablolar, Metodoloji ve `EXP-B1`/`EXP-B4` Karşılaştırması:** [`docs/EXPERIMENTS_2C0_ISLAND_POC.md`](docs/EXPERIMENTS_2C0_ISLAND_POC.md) (Ham JSON: [`tools/compat_bench/results_poc_2c0_island.json`](tools/compat_bench/results_poc_2c0_island.json))
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  python3 tools/qemu_boot_test.py --island-only # 2/2 Milestone 2C-0 yaşam döngüsü + gecikme/batch benchmark paketi
+  python3 tools/qemu_boot_test.py --p3-matrix   # 5/5 SMP (1/2/4/8/20 vCPU) & RAM (256M..2G) matrisi
+  python3 tools/qemu_boot_test.py               # 90/90 tam deterministik regresyon paketi
+  ```
+- **Özet Bulgular (`90/90` QEMU/KVM + `5/5` Matris Yeşil, `0` Yeni Syscall, `leaked_frames = 0`):**
+  1. **Yaşam Döngüsü ve Bayat Capability Reddi (`p5a`):** `dry-broker.elf` (`0x0008`) yetkisiz çağrıları reddetti (`unauth_denied=3`); `dry-mock-drv.elf` (`0x0209`) `#UD` (`vec=6`) çöküşü sonrası CDT `sys_cap_revoke` + yeniden başlatma ile kurtarıldı (`restarts=1`), eski nesil `drv_ep`/`sq_notif`/`ring_cap`/nesil token'ları `4/4` reddedildi (`-EREVOKED` / `-EBADCAP`, `stale_revoked=4`), `/persist` ve `DRY Vault` etkilenmedi (`sv_ok=1`).
+  2. **Performans, `HLT` Uyanışı ve `IoRing` Gruplama (`p5b`, `3.114 GHz` TSC):** Doğrudan kiralık `Endpoint` `p50 = 5.309 cyc` (`1.70 µs`) vs Broker RPC `p50 = 10.214 cyc` (`3.28 µs`, `1.92x`); `HLT`'den uyanış `w1_p50 = 16.056 cyc` (`5.16 µs`, RTT `26.537 cyc`); `#UD` kurtarma `p50 = 1.408 µs` (`1.41 ms`); `100 ms` boşta `brk_sys = 0`, `isl_sys = 0`, `%99.38` `HLT` ikameti; aktif bellek `31` çerçeve (`124 KiB`, `pmm_leak = 0`); `IoRing` `batch=1` `5.272 cyc/op` -> **`batch=32` `859 cyc/op` (`6.14x` hızlanma)**. Not: Saf CPU mock dönüşümü gerçek PCIe MMIO/DMA/IRQ sürücü gecikmesini temsil etmez.

@@ -60,6 +60,14 @@ path = "src/bin/dry_blk.rs"
 name = "dry-vault"
 path = "src/bin/dry_vault.rs"
 
+[[bin]]
+name = "dry-broker"
+path = "src/bin/dry_broker.rs"
+
+[[bin]]
+name = "dry-mock-drv"
+path = "src/bin/dry_mock_drv.rs"
+
 [profile.dev]
 panic = "abort"
 
