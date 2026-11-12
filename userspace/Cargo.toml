@@ -24,6 +24,14 @@ path = "src/bin/dry_echo.rs"
 name = "dry-display"
 path = "src/bin/dry_display.rs"
 
+[[bin]]
+name = "dry-input"
+path = "src/bin/dry_input.rs"
+
+[[bin]]
+name = "dry-shell"
+path = "src/bin/dry_shell.rs"
+
 [profile.dev]
 panic = "abort"
 

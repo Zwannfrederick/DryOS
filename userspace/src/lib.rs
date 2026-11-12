@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Minimal `no_std` DRY Native Syscall ABI (`v0.2`) bindings for Ring 3 userspace binaries.
+//! Minimal `no_std` DRY Native Syscall ABI (`v0.2`) bindings & Ring 3 service support modules.
 
 #![no_std]
 
+pub mod gfx;
+pub mod input;
+pub mod keymap;
+pub mod ps2;
+pub mod shell;
+pub mod surface;
+
 use core::arch::asm;
+use core::mem::size_of;
 use core::panic::PanicInfo;
 
 pub const DRY_SYSCALL_ABI_VERSION: u64 = 0x0001_0000;
@@ -28,6 +36,12 @@ pub const SYS_CAP_REVOKE: u64 = 16;
 pub const SYS_PROC_SPAWN: u64 = 17;
 pub const SYS_PROC_WAIT: u64 = 18;
 pub const SYS_FB_MAP: u64 = 19;
+pub const SYS_IRQ_BIND: u64 = 20;
+pub const SYS_IRQ_ACK: u64 = 21;
+pub const SYS_IOPORT_RW: u64 = 22;
+pub const SYS_SYSINFO: u64 = 23;
+pub const SYS_FRAME_ALLOC: u64 = 24;
+pub const SYS_VSPACE_MAP: u64 = 25;
 
 pub const EPERM: isize = -1;
 pub const EBADCAP: isize = -9;
@@ -42,8 +56,30 @@ pub const EDEADLK: isize = -35;
 pub const ENOSYS: isize = -38;
 pub const EMSGSIZE: isize = -90;
 pub const EREVOKED: isize = -110;
+pub const EALREADY: isize = -114;
 pub const ETIMEDOUT: isize = -116;
 pub const ECANCELED: isize = -125;
+
+// IPC MsgTag / syscall flag bits (`kernel/src/ipc/mod.rs`)
+pub const MSG_FLAG_EXTRA_BUF: u8 = 1 << 0;
+pub const MSG_FLAG_GRANT_CAP: u8 = 1 << 1;
+pub const MSG_FLAG_NON_BLOCKING: u8 = 1 << 2;
+pub const MSG_FLAG_SHARED_DESC: u8 = 1 << 3;
+
+// IRQ / IoPort / VSpace map operation constants (`kernel/src/syscall/cold.rs`)
+pub const IRQF_ONESHOT: u64 = 1;
+pub const IRQ_ACK_UNMASK: u64 = 0;
+pub const IRQ_ACK_MASK: u64 = 1;
+pub const IRQ_ACK_UNBIND: u64 = 2;
+
+pub const IOPORT_OP_INB: u64 = 0;
+pub const IOPORT_OP_OUTB: u64 = 1;
+
+pub const VSPACE_MAP_OP_4K_RO: u64 = 0;
+pub const VSPACE_MAP_OP_4K_RW: u64 = 1;
+pub const VSPACE_MAP_OP_2M_RO: u64 = 2;
+pub const VSPACE_MAP_OP_2M_RW: u64 = 3;
+pub const VSPACE_MAP_OP_UNMAP_4K: u64 = 4;
 
 // Capability right bits (`kernel/src/security.rs`)
 pub const RIGHT_READ: u16 = 1 << 0;
@@ -62,7 +98,7 @@ pub const RIGHT_REPLY: u16 = 1 << 12;
 pub const RIGHT_WAIT: u16 = 1 << 13;
 pub const RIGHT_SPAWN: u16 = 1 << 14;
 
-// IPC opcodes shared across `dry-init`, `dry-echo`, and `dry-display`
+// IPC opcodes shared across `dry-init`, `dry-echo`, `dry-display`, `dry-input`, and `dry-shell`
 pub const IPC_OP_PING_TRACE: u32 = 1;
 pub const IPC_OP_PING_SILENT: u32 = 2;
 pub const IPC_OP_PONG: u32 = 3;
@@ -70,7 +106,22 @@ pub const IPC_OP_CRASH_UD2: u32 = 4;
 pub const IPC_OP_EXIT_CLEAN: u32 = 5;
 pub const IPC_OP_DISPLAY_DONE: u32 = 6;
 
-/// Boot capability table mapped read-only into `dry-init` at `arg0`.
+pub const IPC_OP_INPUT_INIT_PORT: u32 = 10;
+pub const IPC_OP_INPUT_WAIT: u32 = 11;
+pub const IPC_OP_INPUT_EVENT: u32 = 12;
+pub const IPC_OP_INPUT_OVERFLOW_TEST: u32 = 13;
+
+pub const IPC_OP_SURFACE_ATTACH: u32 = 20;
+pub const IPC_OP_SURFACE_PRESENT: u32 = 21;
+pub const IPC_OP_SURFACE_MOVE: u32 = 22;
+pub const IPC_OP_SURFACE_FOCUS: u32 = 23;
+
+pub const IPC_OP_SUP_HELLO: u32 = 30;
+pub const IPC_OP_SUP_RECONNECT_INPUT: u32 = 31;
+pub const IPC_OP_SUP_SHUTDOWN: u32 = 32;
+
+/// Boot capability table mapped read-only into `dry-init` at `arg0` (`0x0070_0000`).
+/// Legacy Milestone 1C zeroes the trailing 5 qwords (`session_mode == 0`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RootInitBootInfo {
@@ -78,11 +129,16 @@ pub struct RootInitBootInfo {
     pub echo_mod_cap: u64,
     pub display_mod_cap: u64,
     pub fb_cap: u64,
+    pub input_mod_cap: u64,
+    pub shell_mod_cap: u64,
+    pub irq1_cap: u64,
+    pub i8042_port_cap: u64,
+    pub session_mode: u64,
 }
 
 pub const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954; // "DRY_INIT"
 
-/// Sanitized capability metadata returned by `SYS_CAP_QUERY` (zero kernel pointers or PFNs).
+/// Sanitized capability metadata returned by `SYS_CAP_QUERY` (`32` bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct UserCapInfo {
@@ -96,6 +152,8 @@ pub struct UserCapInfo {
     pub badge: u64,
     pub abi_reserved: u64,
 }
+
+const _: () = assert!(size_of::<UserCapInfo>() == 32);
 
 /// Sanitized linear framebuffer metadata returned by `SYS_FB_MAP`.
 #[repr(C)]
@@ -115,6 +173,58 @@ pub struct UserFbInfo {
     pub _pad: [u8; 3],
     pub mapped_bytes: u64,
 }
+
+/// Sanitized 80-byte system telemetry POD returned by `SYS_SYSINFO` (zero kernel pointers/PFNs).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserSysInfo {
+    pub abi_version: u64,
+    pub online_cpus: u32,
+    pub apic_mode: u8,
+    pub ioapic_present: u8,
+    pub fb_present: u8,
+    pub _pad0: u8,
+    pub tsc_mhz: u64,
+    pub uptime_ms: u64,
+    pub elapsed_tsc: u64,
+    pub timer_irqs: u64,
+    pub total_ext_irqs: u64,
+    pub total_syscalls: u64,
+    pub total_ctx_switches: u64,
+    pub usable_frames_4k: u32,
+    pub free_frames_4k: u32,
+}
+
+const _: () = assert!(size_of::<UserSysInfo>() == 80);
+
+/// Extended IPC send/grant descriptor (`48` bytes POD, matches `kernel::ipc::UserIpcSendExt`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserIpcSendExt {
+    pub extra_buf_ptr: u64,
+    pub grant_cap: u64,
+    pub grant_rights: u16,
+    pub _pad: u16,
+    pub grant_lease: u32,
+    pub grant_badge: u64,
+    pub shared_region_cap: u64,
+    pub shared_offset_and_len: u64,
+}
+
+const _: () = assert!(size_of::<UserIpcSendExt>() == 48);
+
+/// Extended IPC receive descriptor (`40` bytes POD, matches `kernel::ipc::UserIpcRecvExt`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserIpcRecvExt {
+    pub extra_buf_ptr: u64,
+    pub extra_buf_cap: u64,
+    pub sender_badge: u64,
+    pub reply_token: u64,
+    pub transferred_cap: u64,
+}
+
+const _: () = assert!(size_of::<UserIpcRecvExt>() == 40);
 
 #[inline(always)]
 pub const fn pack_msg_tag(label: u32, flags: u8, words: u8, extra_len: u16) -> u64 {
@@ -327,6 +437,30 @@ pub fn sys_ipc_recv_inline(
 }
 
 #[inline]
+pub fn sys_ipc_recv_ext(
+    ep_cap: u64,
+    flags: u64,
+    timeout: u64,
+    ext: &mut UserIpcRecvExt,
+) -> Result<(u64, u64, [u64; 4]), isize> {
+    let (r0, aux, mrs) = raw_ipc_syscall(
+        SYS_IPC_RECV,
+        ep_cap,
+        flags,
+        timeout,
+        (ext as *mut UserIpcRecvExt) as u64,
+        0,
+        0,
+        [0; 4],
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok((r0 as u64, aux, mrs))
+    }
+}
+
+#[inline]
 pub fn sys_ipc_call_inline(
     ep_cap: u64,
     tag: u64,
@@ -342,6 +476,55 @@ pub fn sys_ipc_call_inline(
 }
 
 #[inline]
+pub fn sys_ipc_call_with_grant(
+    ep_cap: u64,
+    label: u32,
+    mrs: [u64; 4],
+    grant_cap: u64,
+    grant_rights: u16,
+    grant_badge: u64,
+    timeout: u64,
+) -> Result<(u64, u64, [u64; 4]), isize> {
+    let flags = if grant_cap != 0 { MSG_FLAG_GRANT_CAP } else { 0 };
+    let tag = pack_msg_tag(label, flags, 4, 0);
+    let send_ext = UserIpcSendExt {
+        extra_buf_ptr: 0,
+        grant_cap,
+        grant_rights,
+        _pad: 0,
+        grant_lease: 0,
+        grant_badge,
+        shared_region_cap: 0,
+        shared_offset_and_len: 0,
+    };
+    let mut recv_ext = UserIpcRecvExt::default();
+    let (r0, aux, out_mrs) = raw_ipc_syscall(
+        SYS_IPC_CALL,
+        ep_cap,
+        tag,
+        timeout,
+        if grant_cap != 0 {
+            (&raw const send_ext) as u64
+        } else {
+            0
+        },
+        (&raw mut recv_ext) as u64,
+        0,
+        mrs,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        let cap_or_badge = if recv_ext.transferred_cap != 0 {
+            recv_ext.transferred_cap
+        } else {
+            aux
+        };
+        Ok((r0 as u64, cap_or_badge, out_mrs))
+    }
+}
+
+#[inline]
 pub fn sys_ipc_reply_inline(
     ep_cap: u64,
     reply_token: u64,
@@ -349,6 +532,45 @@ pub fn sys_ipc_reply_inline(
     mrs: [u64; 4],
 ) -> Result<(), isize> {
     let (r0, _, _) = raw_ipc_syscall(SYS_IPC_REPLY, ep_cap, reply_token, tag, 0, 0, 0, mrs);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_ipc_reply_with_grant(
+    ep_cap: u64,
+    reply_token: u64,
+    label: u32,
+    mrs: [u64; 4],
+    grant_cap: u64,
+    grant_rights: u16,
+    grant_badge: u64,
+) -> Result<(), isize> {
+    let flags = if grant_cap != 0 { MSG_FLAG_GRANT_CAP } else { 0 };
+    let tag = pack_msg_tag(label, flags, 4, 0);
+    let send_ext = UserIpcSendExt {
+        extra_buf_ptr: 0,
+        grant_cap,
+        grant_rights,
+        _pad: 0,
+        grant_lease: 0,
+        grant_badge,
+        shared_region_cap: 0,
+        shared_offset_and_len: 0,
+    };
+    let (r0, _, _) = raw_ipc_syscall(
+        SYS_IPC_REPLY,
+        ep_cap,
+        reply_token,
+        tag,
+        if grant_cap != 0 {
+            (&raw const send_ext) as u64
+        } else {
+            0
+        },
+        0,
+        0,
+        mrs,
+    );
     if r0 < 0 { Err(r0) } else { Ok(()) }
 }
 
@@ -430,6 +652,81 @@ pub fn sys_fb_map(fb_cap: u64, user_vaddr: u64, out: &mut UserFbInfo) -> Result<
     } else {
         Ok(r0 as usize)
     }
+}
+
+#[inline]
+pub fn sys_irq_bind(irq_cap: u64, notif_cap: u64, flags: u64) -> Result<u8, isize> {
+    let (r0, _) = raw_syscall6(SYS_IRQ_BIND, irq_cap, notif_cap, flags, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(r0 as u8) }
+}
+
+#[inline]
+pub fn sys_irq_ack(irq_cap: u64, action: u64) -> Result<u64, isize> {
+    let (r0, count) = raw_syscall6(SYS_IRQ_ACK, irq_cap, action, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(count) }
+}
+
+#[inline]
+pub fn sys_ioport_inb(ioport_cap: u64, port: u16) -> Result<u8, isize> {
+    let (r0, _) = raw_syscall6(
+        SYS_IOPORT_RW,
+        ioport_cap,
+        IOPORT_OP_INB,
+        port as u64,
+        0,
+        0,
+        0,
+    );
+    if r0 < 0 { Err(r0) } else { Ok(r0 as u8) }
+}
+
+#[inline]
+pub fn sys_ioport_outb(ioport_cap: u64, port: u16, val: u8) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(
+        SYS_IOPORT_RW,
+        ioport_cap,
+        IOPORT_OP_OUTB,
+        port as u64,
+        val as u64,
+        0,
+        0,
+    );
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_sysinfo(out: &mut UserSysInfo) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(SYS_SYSINFO, (out as *mut UserSysInfo) as u64, 0, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_frame_alloc(order: u64) -> Result<u64, isize> {
+    let (r0, cap) = raw_syscall6(SYS_FRAME_ALLOC, order, 0, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(cap) }
+}
+
+#[inline]
+pub fn sys_vspace_map(frame_cap: u64, vaddr: u64, op: u64) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(SYS_VSPACE_MAP, frame_cap, vaddr, op, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+/// Read unprivileged architectural `TSC` counter at `CPL=3` (zero SSE/SIMD instructions).
+#[inline]
+pub fn rdtsc_user() -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: `rdtsc` is unprivileged when `CR4.TSD == 0`.
+    unsafe {
+        asm!(
+            "rdtsc",
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((high as u64) << 32) | (low as u64)
 }
 
 /// Read live architectural `CS` and `SS` segment selectors at CPL=3 to prove hardware Ring 3.
