@@ -2,15 +2,18 @@
 //! `dry-broker` — Isolated Ring 3 (`CPL=3`, `SecDomain::RootSystem`, `0x0008`) Adaptive Driver
 //! Island `Device Broker` (`Milestone 2C-0` — `ADR-016`).
 //!
-//! Responsibilities:
+//! Responsibilities (`ADR-016` Control-Plane-Only Contract):
+//! - Strictly control-plane: normal client driver data traffic NEVER flows through `dry-broker`
+//!   (`BADGE_BROKER_CLIENT` data-forwarding attempts are rejected with `-EPERM`; clients use
+//!   leased `Endpoint`s and batched `IoRingSharedPage` directly).
 //! - Enforces capability badge authorization (`BADGE_BROKER_CLIENT` / `BADGE_BROKER_ADMIN`) and
 //!   rejects unauthorized/rogue requests (`-EPERM`, `denied_ops` counter).
 //! - Spawns, supervises, and tracks the lifecycle (`generation`, `restarts`, `state`) of the
 //!   isolated `SecDomain::Userspace` `Mock Driver Island` (`dry-mock-drv.elf`, `0x0209`).
 //! - Delegates revocable per-generation `Endpoint`, `Notification`, and `IoRingSharedPage`
 //!   capabilities; upon island `#UD` crash or restart, reaps the dead process, revokes the entire
-//!   prior generation capability subtree (`SYS_CAP_REVOKE`), and forbids stale capability or stale
-//!   generation reuse (`-EBADCAP` / `IPC_OP_ERR_STALE_GEN`).
+//!   prior generation capability subtree (`SYS_CAP_REVOKE` `op = 0` / `op = 2`), and forbids stale
+//!   capability or stale generation reuse (`-EBADCAP` / `IPC_OP_ERR_STALE_GEN`).
 
 #![no_std]
 #![no_main]
@@ -161,6 +164,7 @@ impl IslandInstance {
 
     fn revoke_generation_caps(&mut self) {
         if self.ring_cap != 0 {
+            let _ = sys_cap_revoke(self.ring_cap, 0);
             let _ = sys_cap_revoke(self.ring_cap, 1);
             self.ring_cap = 0;
         }
@@ -291,6 +295,14 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                 }
             }
             BROKER_OP_FORWARD_TRANSFORM => {
+                // Control-plane-only invariant (`ADR-016`): normal client data traffic MUST NOT
+                // traverse `Device Broker`. Only `BADGE_BROKER_ADMIN` diagnostic benchmark probes
+                // may invoke the 2-hop reference path.
+                if !is_admin {
+                    denied_ops = denied_ops.wrapping_add(1);
+                    reply_err(broker_ep, tok, IPC_OP_ERR_PERM, EPERM, denied_ops);
+                    continue;
+                }
                 let expected_gen = mrs[3];
                 if expected_gen != 0 && expected_gen != island.generation {
                     stale_rejects = stale_rejects.wrapping_add(1);

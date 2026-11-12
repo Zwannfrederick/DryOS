@@ -30,7 +30,8 @@ use dry_userspace::{
     sys_notify_signal, sys_notify_wait, sys_proc_kill, sys_sysinfo, sys_vspace_map,
     UserIpcRecvExt, UserSysInfo, BADGE_SUPERVISOR, EAGAIN, EINVAL, EPERM,
     EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN,
-    IPC_OP_PONG, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW,
+    IPC_OP_PONG, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE,
+    VSPACE_MAP_OP_4K_RW,
 };
 
 const ISLAND_RING_VADDR: u64 = 0x2400_0000;
@@ -181,7 +182,11 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 log_line(&lb);
 
                 if tok != 0 {
-                    let ring_rights = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT;
+                    // Grant `RIGHT_REVOKE` to `Device Broker` so Broker can deterministically
+                    // revoke + unmap all transitive client `IoRing` leases on generation rotation
+                    // even before process exit (`ADR-016` control-plane ownership).
+                    let ring_rights =
+                        RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT | RIGHT_REVOKE;
                     if sys_ipc_reply_with_grant(
                         drv_ep_cap,
                         tok,

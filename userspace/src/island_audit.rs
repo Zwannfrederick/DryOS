@@ -7,10 +7,10 @@ use crate::ioring::IoRingSharedPage;
 use crate::island_proto::{
     mock_island_transform, pack_mock_sqe, LatencySamples64, BADGE_BROKER_ADMIN,
     BADGE_BROKER_CLIENT, BADGE_BROKER_ROGUE, BROKER_OP_ACQUIRE_EP, BROKER_OP_ACQUIRE_RING,
-    BROKER_OP_CRASH_AND_RECOVER, BROKER_OP_FORWARD_TRANSFORM, BROKER_OP_SET_PARK_MODE,
-    BROKER_OP_SHUTDOWN, COMP_ID_DEV_BROKER, COMP_ID_MOCK_ISLAND, IPC_OP_ERR_STALE_GEN,
-    ISLAND_DOORBELL_RING, MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE, POC_TEST_SEED, POC_TEST_WORD0,
-    POC_TEST_WORD1,
+    BROKER_OP_CRASH_AND_RECOVER, BROKER_OP_FORWARD_TRANSFORM, BROKER_OP_QUERY_STATE,
+    BROKER_OP_SET_PARK_MODE, BROKER_OP_SHUTDOWN, COMP_ID_DEV_BROKER, COMP_ID_MOCK_ISLAND,
+    IPC_OP_ERR_STALE_GEN, ISLAND_DOORBELL_RING, MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE,
+    POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1,
 };
 use crate::shell::LineBuilder;
 use crate::vfs_proto::{vfs_create_file, vfs_read_file, vfs_sync, vfs_write_small};
@@ -147,12 +147,12 @@ pub fn run_island_poc_lifecycle_audit(
 
     let bh = BrokerHarness::spawn(boot)?;
 
-    // 1. Unauthorized badge & non-admin privilege escalation checks (`-EPERM`).
+    // 1. Unauthorized badge, privilege escalation, & control-plane-only checks (`-EPERM`).
     let mut unauth_denied = 0u64;
     if let Ok((rt, _, _)) = sys_ipc_call_inline(
         bh.rogue_cap,
-        pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0),
-        [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1],
+        pack_msg_tag(BROKER_OP_QUERY_STATE, 0, 1, 0),
+        [0; 4],
         0,
     ) {
         if msg_tag_label(rt) == IPC_OP_ERR_PERM {
@@ -176,24 +176,23 @@ pub fn run_island_poc_lifecycle_audit(
             unauth_denied += 1;
         }
     }
-    if unauth_denied < 3 {
-        return Err(225);
-    }
-
-    // 2. `gen = 1` brokered + direct leased `Endpoint` + batched `IoRingSharedPage` verification.
-    let (ftag, _, fmrs) = sys_ipc_call_inline(
+    // Normal client MUST NOT route data traffic through `Device Broker` (`ADR-016` `-EPERM`).
+    if let Ok((rt, _, _)) = sys_ipc_call_inline(
         bh.client_cap,
         pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0),
         [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1],
         0,
-    )
-    .map_err(|_| 225)?;
-    let exp_gen1 = mock_island_transform(POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1);
-    if msg_tag_label(ftag) != IPC_OP_PONG || fmrs[0] != exp_gen1 {
+    ) {
+        if msg_tag_label(rt) == IPC_OP_ERR_PERM {
+            unauth_denied += 1;
+        }
+    }
+    if unauth_denied < 4 {
         return Err(225);
     }
-    let gen1_digest = fmrs[0];
 
+    // 2. `gen = 1` direct leased `Endpoint` + batched `IoRingSharedPage` data-plane verification.
+    let exp_gen1 = mock_island_transform(POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1);
     let (etag, gen1_drv_ep, emrs) =
         sys_ipc_call_with_grant(bh.client_cap, BROKER_OP_ACQUIRE_EP, [0; 4], 0, 0, 0, 0)
             .map_err(|_| 226)?;
@@ -211,6 +210,7 @@ pub fn run_island_poc_lifecycle_audit(
     if msg_tag_label(dtag) != IPC_OP_PONG || dmrs[0] != exp_gen1 {
         return Err(226);
     }
+    let gen1_digest = dmrs[0];
 
     let (gen1_ring_cap, gen1_sq_notif, gen1_cq_notif, ring) =
         acquire_client_ring(bh.client_cap, CLIENT_ISLAND_RING_VADDR)?;
@@ -260,7 +260,8 @@ pub fn run_island_poc_lifecycle_audit(
         return Err(232);
     }
 
-    // 4. Verify stale capabilities & stale generation tokens from `gen = 1` are deterministically rejected!
+    // 4. Verify ALL prior-generation capabilities (`drv_ep`, `sq_notif`, `cq_notif`, `ring_cap`)
+    //    and stale generation tokens (`expected_gen = 1`) are deterministically rejected!
     let stale_ep_badcap = matches!(
         sys_ipc_call_inline(
             gen1_drv_ep,
@@ -275,32 +276,49 @@ pub fn run_island_poc_lifecycle_audit(
         Err(EREVOKED | EBADCAP)
     );
     let mut cinfo = UserCapInfo::default();
+    let stale_cq_badcap = matches!(sys_cap_query(gen1_cq_notif, &mut cinfo), EREVOKED | EBADCAP);
     let stale_ring_badcap = matches!(sys_cap_query(gen1_ring_cap, &mut cinfo), EREVOKED | EBADCAP);
-    let _ = sys_cap_revoke(gen1_cq_notif, 1);
 
-    let (stag, _, smrs) = sys_ipc_call_inline(
-        bh.client_cap,
-        pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0),
+    // 5. Lease fresh `gen = 2` direct `Endpoint`, verify stale generation token (`expected_gen = 1`)
+    //    is rejected on both data plane & admin diagnostic probe, then verify `gen = 2` transform!
+    let (e2tag, gen2_drv_ep, e2mrs) =
+        sys_ipc_call_with_grant(bh.client_cap, BROKER_OP_ACQUIRE_EP, [0; 4], 0, 0, 0, 0)
+            .map_err(|_| 233)?;
+    if msg_tag_label(e2tag) != IPC_OP_PONG || gen2_drv_ep == 0 || e2mrs[0] != 2 {
+        return Err(233);
+    }
+    let (s_dtag, _, s_dmrs) = sys_ipc_call_inline(
+        gen2_drv_ep,
+        pack_msg_tag(MOCK_OP_TRANSFORM, 0, 4, 0),
         [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1], // stale `expected_gen = 1`!
         0,
     )
     .map_err(|_| 233)?;
-    let stale_gen_revoked =
-        msg_tag_label(stag) == IPC_OP_ERR_STALE_GEN && smrs[0] == (-EREVOKED) as u64;
-
-    // 5. Verify fresh `gen = 2` operation succeeds cleanly, then verify storage & Vault integrity!
-    let (f2tag, _, f2mrs) = sys_ipc_call_inline(
-        bh.client_cap,
+    let (s_btag, _, s_bmrs) = sys_ipc_call_inline(
+        bh.admin_cap,
         pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0),
+        [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1], // admin diag stale `expected_gen = 1`!
+        0,
+    )
+    .map_err(|_| 233)?;
+    let stale_gen_revoked = msg_tag_label(s_dtag) == IPC_OP_ERR_STALE_GEN
+        && s_dmrs[0] == (-EREVOKED) as u64
+        && msg_tag_label(s_btag) == IPC_OP_ERR_STALE_GEN
+        && s_bmrs[0] == (-EREVOKED) as u64;
+
+    let (d2tag, _, d2mrs) = sys_ipc_call_inline(
+        gen2_drv_ep,
+        pack_msg_tag(MOCK_OP_TRANSFORM, 0, 4, 0),
         [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 2],
         0,
     )
     .map_err(|_| 234)?;
     let exp_gen2 = mock_island_transform(POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 2);
-    if msg_tag_label(f2tag) != IPC_OP_PONG || f2mrs[0] != exp_gen2 {
+    if msg_tag_label(d2tag) != IPC_OP_PONG || d2mrs[0] != exp_gen2 {
         return Err(235);
     }
-    let gen2_digest = f2mrs[0];
+    let gen2_digest = d2mrs[0];
+    let _ = sys_cap_revoke(gen2_drv_ep, 1);
 
     bh.shutdown_and_reclaim()?;
 
@@ -325,7 +343,13 @@ pub fn run_island_poc_lifecycle_audit(
         }
     }
 
-    if !stale_ep_badcap || !stale_notif_badcap || !stale_ring_badcap || !stale_gen_revoked || !storage_vault_intact {
+    if !stale_ep_badcap
+        || !stale_notif_badcap
+        || !stale_cq_badcap
+        || !stale_ring_badcap
+        || !stale_gen_revoked
+        || !storage_vault_intact
+    {
         return Err(236);
     }
 
@@ -349,6 +373,8 @@ pub fn run_island_poc_lifecycle_audit(
     lb.push_u64(u64::from(stale_ep_badcap));
     lb.push_bytes(b" ntf_rev=");
     lb.push_u64(u64::from(stale_notif_badcap));
+    lb.push_bytes(b" cq_rev=");
+    lb.push_u64(u64::from(stale_cq_badcap));
     lb.push_bytes(b" rng_rev=");
     lb.push_u64(u64::from(stale_ring_badcap));
     lb.push_bytes(b" gen_rev=");
@@ -415,11 +441,13 @@ pub fn run_island_poc_benchmarks(boot: &RootInitBootInfo) -> Result<(), i32> {
         }
     }
 
+    // Admin-only A/B diagnostic reference loop (`BADGE_BROKER_ADMIN`) measuring why normal data
+    // traffic is strictly banned from traversing `Device Broker` (`2x` 2-hop IPC penalty).
     let mut broker_lat = LatencySamples64::new();
     for i in 0..72u64 {
         let t0 = rdtsc_user();
         let _ = sys_ipc_call_inline(
-            bh.client_cap,
+            bh.admin_cap,
             pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0),
             [POC_TEST_SEED, POC_TEST_WORD0 ^ i, POC_TEST_WORD1, 1],
             0,

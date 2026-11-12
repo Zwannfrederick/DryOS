@@ -17,11 +17,11 @@ pub const BADGE_BROKER_ROGUE: u64 = 0x0008_dead;
 
 // Unforgeable capability badges on `drv_ep` (`dry-mock-drv.elf`)
 pub const BADGE_ISLAND_BROKER: u64 = 0x0209_0001;
-pub const BADGE_ISLAND_SESSION_BASE: u64 = 0x0209_1000;
+pub const BADGE_ISLAND_SESSION_BASE: u64 = 0x0209_1000_0000_0000;
 
 #[inline]
 pub const fn island_session_badge(generation: u64) -> u64 {
-    BADGE_ISLAND_SESSION_BASE | (generation & 0xff)
+    BADGE_ISLAND_SESSION_BASE | (generation & 0xffff_ffff)
 }
 
 // `Notification` doorbell bits on `sq_notif`
@@ -41,7 +41,9 @@ pub const MOCK_OP_SET_PARK_MODE: u32 = 154;
 // Error reply opcode when client supplies a stale/revoked generation token (`-EREVOKED`)
 pub const IPC_OP_ERR_STALE_GEN: u32 = 159;
 
-// `Device Broker` (`dry-broker.elf`) IPC opcodes
+// `Device Broker` (`dry-broker.elf`) control-plane IPC opcodes (`ADR-016`: normal client data
+// traffic NEVER flows through `Device Broker`; `BROKER_OP_FORWARD_TRANSFORM` is restricted to
+// `BADGE_BROKER_ADMIN` A/B benchmark diagnostics and returns `-EPERM` to `BADGE_BROKER_CLIENT`).
 pub const BROKER_OP_QUERY_STATE: u32 = 160;
 pub const BROKER_OP_FORWARD_TRANSFORM: u32 = 161;
 pub const BROKER_OP_ACQUIRE_EP: u32 = 162;

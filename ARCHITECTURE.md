@@ -171,12 +171,16 @@
 - **Ring 3 `DRY Vault` (`dry-vault.elf` `0x0007`), Kriptografik `Session Lock` ve `DEV_WORKSPACE` (`0x002a`):**
   - Saf `no_std` tuzlu `PBKDF2-HMAC-SHA256` (`vault_crypto.rs`) doğrulayıcısı `/persist/vault.sec` (`RootSystem | NO_DELEGATE`) üzerinde saklanır (`0` düz metin parola); masaüstü `Session Lock` kalkanı gerçek parola doğrulamasıyla açılır ve `GLOBAL_LEASE_EPOCH` sayacını döndürür; masaüstü tercihleri `/persist/desktop.cfg` içinde yeniden başlatmalar boyunca yaşar; `DEV_WORKSPACE` kompartmanının donanım/DMA/Vault yetkilerine erişimi çekirdekte `-EPERM` ile engellenir.
 
-### 2.9. `Milestone 2C-0`: Minimal Adaptive Driver Island PoC — `Device Broker` & `Mock Driver Island` (`[DOĞRULANDI — 90/90 QEMU/KVM + 5/5 Matris]`)
+### 2.9. `Milestone 2C-0`: Minimal Adaptive Driver Island PoC — Yalnızca Kontrol Düzlemi `Device Broker` & `Mock Driver Island` (`[DOĞRULANDI — 90/90 QEMU/KVM + 5/5 Matris]`)
 
-- **Sıfır Yeni Syscall ile Kontrol/Veri Düzlemi Ayrımı (`userspace/src/island_proto.rs`, `bin/{dry_broker,dry_mock_drv}.rs`):**
-  - **`Device Broker` (`SecDomain::RootSystem`, `0x0008`):** Yalnızca mevcut `Syscall ABI v0.1` (`0..=31`) ilkelleriyle istemci rozetini (`BADGE_BROKER_CLIENT` / `BADGE_BROKER_ADMIN`) denetler (`denied_ops`), `dry-mock-drv.elf` sürecini başlatır ve nesil-damgalı (`island_session_badge(gen)`) `Endpoint`, `IoRingSharedPage` (`Frame4K`) ve `Notification` (`sq_notif`, `cq_notif`) kiralamalarını devreder.
-  - **`Mock Driver Island` (`SecDomain::Userspace`, `0x0209`):** Ayrı `VSpace` + `CSpace` içinde çalışır (`sys_proc_kill(1) == -EPERM`), nesle bağlı deterministik `SplitMix64 + CRC32` dönüşümünü hem `Endpoint` hem `IoRingSharedPage` üzerinden yürütür, iş yokken `timeout_tsc = 0` ile sonsuz olay beklemesinde (`0` boşta syscall, `%99.38` donanım `HLT`) uyur ve `ISLAND_DOORBELL_RING` / `ISLAND_DOORBELL_CTL` ile uyanır (`w1_p50 = 16.056 cyc` [`5.16 µs`]).
-  - **Çökme Kurtarması ve Bayat Yetki Reddi:** `#UD` (`ud2`) çöküşünde `Device Broker` `sys_proc_wait` ile süreci toplar, `sys_cap_revoke` ile önceki neslin CDT alt-ağacını yıkar (`-EREVOKED` / `-EBADCAP`, `stale_revoked = 4`) ve `1.41 ms` (`p50`) içinde `gen + 1` adasını sızıntısız (`pmm_act = 31` çerçeve, `pmm_leak = 0`) ayağa kaldırır (`docs/EXPERIMENTS_2C0_ISLAND_POC.md`). Not: Bu prototip yaşam döngüsü kanıtıdır; gerçek Linux/Windows sürücü uyumluluğu içermez.
+- **Sıfır Yeni Syscall ile Kesin Kontrol/Veri Düzlemi Ayrımı (`userspace/src/island_proto.rs`, `bin/{dry_broker,dry_mock_drv}.rs`, `ADR-016`):**
+  - **`Device Broker` Yalnızca Kontrol Düzlemidir (`SecDomain::RootSystem`, `0x0008`):** Yalnızca mevcut `Syscall ABI v0.1` (`0..=31`) ilkelleriyle istemci rozetini (`BADGE_BROKER_CLIENT` / `BADGE_BROKER_ADMIN`) doğrular, `dry-mock-drv.elf` sürecini başlatır/izler ve daraltılmış nesil-damgalı (`island_session_badge(gen)` — 32-bit nesil) `Endpoint` (`READ|SEND|CALL`), `IoRingSharedPage` (`READ|WRITE|MAP`, `GRANT` yok) ve `Notification` (`sq_notif: READ|SIGNAL`, `cq_notif: READ|WAIT`) kiralamalarını devreder (`INV-ISL-04`). **Normal istemci veri trafiğinin `Broker` üzerinden geçmesi deterministik olarak `-EPERM` ile reddedilir (`INV-ISL-01`, `unauth_denied = 4`)**; ölçüm kanıtı olarak `Broker` sıçraması `b_p50 = 10.165 cyc` (`3.27 µs`) iken doğrudan kiralık `Endpoint` `d_p50 = 5.270 cyc` (`1.69 µs`, `1.93x`) ve `batch=32` `IoRing` **`804 cyc/op` (`0.26 µs/op`, `12.64x` kazanç)** sağlar (`docs/EXPERIMENTS_2C0_ISLAND_POC.md`).
+  - **`Mock Driver Island` (`SecDomain::Userspace`, `0x0209`):** Ayrı donanım `VSpace` + `CSpace` içinde çalışır (`sys_proc_kill(1) == -EPERM`, `INV-ISL-02`), nesle bağlı deterministik `SplitMix64 + CRC32` dönüşümünü doğrudan kiralanmış `Endpoint` ve `IoRingSharedPage` üzerinden yürütür, iş yokken `timeout_tsc = 0` ile sonsuz olay beklemesinde (`0` boşta syscall, `> %99.8` donanım `HLT`) uyur ve kapı ziliyle uyanır (`w1_p50 = 13.707 cyc` [`4.40 µs`]).
+  - **Tam Önceki-Nesil Yetki İptali ve Çökme Kurtarması (`INV-ISL-03`):** Ada `ring_cap` yetkisini `Device Broker`'a `RIGHT_REVOKE` ile devreder. `#UD` (`ud2`) çöküşünde veya nesil dönüşümünde `Device Broker` `sys_proc_wait` ile süreci toplar, `sys_cap_revoke(ring_cap, 0)` (`cspace_revoke_children` + istemci `VSpace` `unmap` + senkron SMP TLB shootdown) ve `sys_cap_revoke(..., 2)` ile önceki neslin **tüm** kiralık yetkilerini (`drv_ep`, `sq_notif`, `cq_notif`, `ring_cap`) ve bayat nesil damgalarını geçersiz kılar (`stale_revoked = 5/5`) ve `1.42 ms` (`p50`) içinde `gen + 1` adasını sızıntısız (`pmm_act = 31` çerçeve, `pmm_leak = 0`) başlatır.
+- **Kesinleştirilmiş `Milestone 2A-4a` Çekirdek Önkoşul Sözleşmeleri (`PLANNED — Sonraki İlk Adım`):**
+  1. **Modül Kapasitesi (`R-18`, `0` yeni syscall):** `kernel/src/limine.rs` `MAX_LATCHED_MODULES: 16 -> 32`, `kernel/src/irq/session.rs` `[CAP_NULL; 32]`, `userspace/src/vfs_mem.rs` `MAX_BOOT_ENTRIES: 20 -> 36` ve sessiz kırpma yerine açık önyükleme sınır kontrolü.
+  2. **FPU/SIMD Bağlam İzolasyonu (`0` yeni syscall):** `CR4.OSFXSR | CR4.OSXMMEXCPT | CR4.OSXSAVE`, `TCB` başına 64 B hizalı `FpuState` alanı, `finish_post_switch` sınırında `XSAVEOPT64`/`XRSTOR64` (`FXSAVE64` *fallback*) ve yeni süreçte temiz `MXCSR = 0x1F80` başlatma (`0` çapraz-süreç XMM sızıntısı).
+  3. **`FaultEndpoint` + `TCB`-Bağlı `Notification`:** Tek iş parçacıklı sunucular/adalar için `Endpoint + Notification` birleşik beklemesi (`50 ms` bekçi zaman aşımını ortadan kaldırır) ve Ring 3 `#PF` / yabancı kişilik `SYSCALL` tuzaklarını yetkili Ring 3 sayfalayıcı/kişilik sunucusuna yönlendiren `FaultEndpoint` sözleşmesi.
 
 ---
 
@@ -197,14 +201,18 @@
 
 ---
 
-## 5. Linux Sürücü Adası ve Uyumluluk Mimarisi (`H2` Özeti)
+## 5. Linux Sürücü Adası ve Ring 3 Uyumluluk Katmanı Mimarisi (`H2` & `ADR-016`)
 
-- **İzolasyon Birimi (*Driver Island*):** Upstream C sürücüsü (`GPL-2.0-only`) + sürücü sınıfına özel daraltılmış `libdry_lx_<sınıf>` çalışma zamanı aynı userspace sürecinde derlenir; dış dünyayla yalnızca DRY `IoRing` (CPU paylaşımlı bellek) üzerinden konuşur `[DOĞRULANDI — Faz 0 H2: 18.528 satır igc %0 değişiklik ve 3.468 satır runtime ile derlendi/test edildi]`.
-- **Gölge `vmemmap` ve Kalıcı IOVA Arena:** `igc.ko` ikili analizinde `[DOĞRULANDI]` görülen `vmemmap_base` ve `page_offset_base` satır-içi pointer aritmetiğini karşılamak ve paket başına IOTLB shootdown maliyetinden kaçınmak için 64-bit userspace adres alanında sabit bir `DmaArena` ve ona doğrusal indekslenen gölge `struct page[]` dizisi ayrılır `[FONKSİYONEL PoC DOĞRULANDI; fiziksel silikon IOMMU güvenliği TEST EDİLMEDİ]`.
-- **Uygulama Uyumluluğu Ayrımı:**
-  - *Linux ELF Uygulamaları:* Userspace personality sunucusu + `FaultEndpoint`/`SYSCALL` yönlendirme trampolini (çekirdek ABI'sine POSIX eklenmez).
-  - *Windows PE/NT (Faz 5):* Userspace `ntdll` -> `dry-ntos` sunucusu + Wine DLL + `DXVK` (çekirdek modu anti-cheat kapsam dışıdır).
-  - *GPU:* Faz 2–3'te yalnızca UEFI `GOP` ve `VirtIO-GPU`; `amdgpu` (~1.107 dış sembol, ~30.5 MiB ELF `[DOĞRULANDI]`) ve `nvidia-open` (`nvidia-uvm` `HMM`/`mmu_notifier` bağımlılığı `[DOĞRULANDI]`) çeviri kapsamı dışındadır.
+- **Linux API Uyumluluk Katmanının Kesin Konumu (`%100 Ring 3`, `0` Çekirdek Satırı — `INV-ISL-05`):**
+  - **`dry-kernel` (`Ring 0`) Linux ABI, POSIX veya `LinuxKPI` sembolleriyle asla kirletilmez.**
+  - **Sürücü Uyumluluğu (`Kademe 2`):** Daraltılmış `libdry_lx_<sınıf>` (`libdry_lx_net`, `libdry_lx_usb`; `< 5.000` LOC C çalışma zamanı) doğrudan ilgili izole **`GPL-2.0-only` Ring 3 Driver Island sürecinin içine** bağlanır; monolitik paylaşımlı `LinuxKPI` yasaktır (`ADR-006`).
+  - **Uygulama Uyumluluğu (`Kademe 3A`):** Linux ELF64 sistem çağrısı çevirisi tamamen Ring 3 **`dry-linux-abi`** kişilik sunucusu ve salt-okunur (`SEAL_RO_EXPORT`) **`libdry_posix`** kütüphanesinde tutulur; çekirdek yalnızca jenerik `FaultEndpoint`, `XSAVEOPT` ve `FS_BASE`/`GS_BASE` ilkellerini sunar.
+- **`Mock Driver Island` (`Milestone 2C-0`) ile Gerçek `Linux Driver Island` (`Milestone 2C-1` / `Faz 3B`) Arasındaki Kesin Fark:**
+  - **`Mock Driver Island` (`2C-0` — `DONE`):** Saf `no_std` Rust (`dry-mock-drv.elf`), `0` Linux C kodu, `0` `PciDev` BAR MMIO, `0` DMA ve `0` donanım kesmesi içerir; yalnızca `Device Broker` kontrol düzlemini, doğrudan `Endpoint` + `IoRing` veri düzlemini, `HLT` uyku/uyanmayı ve `#UD` sonrası tam nesil `revoke`/kurtarma mekanizmasını kanıtlar.
+  - **Gerçek `Linux Driver Island` (`2C-1` / `Faz 3B` — `PLANNED`):** Değiştirilmemiş upstream Linux C sürücü bileşeni (`H2`: örn. `e1000e` `200` sembol veya `igc` `247` sembol, `GPL-2.0-only`) + aynı Ring 3 kompartmanı içinde `libdry_lx_net` C çalışma zamanı + `CapObjectKind::PciDev` (`SYS_DEV_MAP` `USER_MMIO_UC` BAR) + sabitlenmiş `DmaArena` (`SYS_DMA_ALLOC`, gölge `vmemmap` `struct page[]`, çöküşte `PCI Command.BME = 0` + PCIe `FLR`) + `IrqCap`/MSI-X -> `Notification` + `TCB`-bağlı olay döngüsü + `IoRing` paket halkalarından oluşur (`INV-ISL-06`).
+- **Uygulama ve GPU Sınırı:**
+  - *Linux ELF Uygulamaları (`Faz 3A`):* Ring 3 `dry-linux-abi` + `FaultEndpoint`/`SYSCALL` yönlendirmesi; *Windows PE/NT (`Faz 5`):* Ring 3 `dry-ntos` + Wine `ntdll` + `DXVK` (`0` çekirdek `.sys` sürücüsü / anti-cheat).
+  - *GPU (`ADR-016` Kademe 1 & 4):* Birincil ekran taraması yerel `dry-display` (`GOP`/`VirtIO-GPU`) mülkiyetindedir; `> 1.000` sembollü / `HMM` ayrık GPU'lar (`RTX 3050 Ti` `01:00.0`) çevrilmez, yalnızca `P5` bare-metal doğrulaması sonrasında isteğe bağlı (*opt-in*) uyuyan `dry-vmm` + toplu `Venus` halkasıyla çalıştırılır.
 
 ---
 

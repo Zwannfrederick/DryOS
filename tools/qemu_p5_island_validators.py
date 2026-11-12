@@ -93,11 +93,12 @@ def run_p5a_driver_island_broker_lifecycle_and_stale_cap_e2e(
             )
         if (
             pkv.get("mac") != 1
-            or pkv.get("unauth", 0) < 3
+            or pkv.get("unauth", 0) < 4
             or pkv.get("vec") != 6
             or pkv.get("restarts", 0) < 1
             or pkv.get("ep_rev") != 1
             or pkv.get("ntf_rev") != 1
+            or pkv.get("cq_rev") != 1
             or pkv.get("rng_rev") != 1
             or pkv.get("gen_rev") != 1
             or pkv.get("batch") != 1
@@ -136,7 +137,7 @@ def run_p5a_driver_island_broker_lifecycle_and_stale_cap_e2e(
 
         print(
             f"[PASS] {name}: gen1_ok=1 crash_vec=6 restarts={pkv['restarts']} "
-            f"unauth_denied={pkv['unauth']} stale_revoked=4 leaked_frames=0 ({time.monotonic() - t0:.2f}s)."
+            f"unauth_denied={pkv['unauth']} stale_revoked=5 leaked_frames=0 ({time.monotonic() - t0:.2f}s)."
         )
     finally:
         h.close()

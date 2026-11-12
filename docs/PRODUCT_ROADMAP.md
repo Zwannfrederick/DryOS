@@ -42,7 +42,7 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 | **`P0` — Mikroçekirdek Temeli** | **`DONE` (QEMU `56/56`)** | `Faz 0` (`H1`, `H2`), `Milestone 1A`, `1B-A..1B-D`, `1C` (`1df3842`), `Opt Pass v1` (`69522a3`) | SMP (`1..20 vCPU`), `H1`, `PMM`, `VSpace`, `CSpace`/`ADR-007`, Ring 3 ELF64, IPC, kök servisler ve ilk Ring 3 GOP ekranı |
 | **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1..2C-0`: `DONE`, `90/90` QEMU + `5/5` Matris)* | `Faz 2 — Milestone 2A-1..2B` & `2C-0` (`DONE`) + `2A-4/2C` (`PLANNED`) | PS/2 klavye/fare, Ring 3 `dry-vfs` (`/boot` + uçucu `/ram` + kalıcı CoW `/persist` `DRYFS_v1`), `dry-blk` (`VirtIO-Blk` + `IoRing`), `dry-power` (`DONE`); USB HID, NVMe (`PLANNED`) |
 | **`P2` — DRY Desktop Alpha/Beta** | **`IN PROGRESS`** *(`Milestone 2A-2..2B`: `DONE`, `90/90` QEMU)* | `Faz 2 — Milestone 2A-2..2B` (`DONE`) + `2A-4/2C` (`PLANNED`) | Hibrit WM, `Launcher` + 4 yerel uygulama, kalıcı `/persist/desktop.cfg`, `DRY Vault` tuzlu `PBKDF2-SHA256` kimlik doğrulamalı `Session Lock` + $O(1)$ `lease_epoch` (`DONE`); `liquid-glass`, `Clean/Diagnostic Boot` (`PLANNED`) |
-| **`P3` — Linux & Windows Uyumluluğu** | **`PLANNED`** *(`H2` PoC & `2C-0` Broker/Island Yaşam Döngüsü PoC: `DONE`)* | `Faz 2 — 2C-0` (`DONE`), `Faz 3` (Linux ELF + Sürücü Adaları) & `Faz 5` (Seçilmiş Win32) | Önce Linux ELF/ABI/POSIX/VFS + `H2` sürücü adaları (`ADR-016`); ardından seçilmiş Windows PE/Win32 uygulamaları |
+| **`P3` — Linux & Windows Uyumluluğu** | **`PLANNED`** *(`H2` PoC & `2C-0` Kontrol-Düzlemi Broker/Island PoC: `DONE`)* | `2C-0` (`DONE`) -> `2A-4a` Önkoşulları -> `2C-1` Gerçek Linux Island PoC -> `Faz 3` (Linux ELF/Adalar) -> `Faz 5` (Win32) | Ring 3 `libdry_lx_*` & `dry-linux-abi` (`0` çekirdek Linux ABI kodu); kanıta dayalı genişleme |
 | **`P4` — Paketleme ve Dağıtım** | **`PLANNED`** | `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) | Tasarım-öncelikli `drypkg` + `DRY Store`, isteğe bağlı runtime, imzalı paket, `Desktop`/`Server` kurulum profilleri, atomik *rollback* |
 | **`P5` — Production Readiness** | **`PLANNED`** | `Faz 4` (Bare-Metal, IOMMU, Soak, Benchmark) | Gerçek donanım + USB live boot, Desktop/Server iş yükü testleri, adil Linux A/B benchmarkları, 72s+ soak/fuzz ve açık raporlar |
 
@@ -72,7 +72,7 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
   - Fare / işaretçi girdisi (Tek `i8042` sahibi `dry-input.elf` içinde PS/2 IntelliMouse 4-bayt tekerlek protokolü, `MouseMove`/`MouseButtonDown`/`MouseButtonUp`/`MouseScroll`, imleç hız çarpanı ve `1x`/`2x` yazılımsal imleç): **`DONE` (`PS/2 AUX + IntelliMouse`)** / **`PLANNED` (`VirtIO-Input`, USB `xHCI` HID)**
   - İzole Ring 3 dosya sistemi ve kalıcı depolama (`dry-vfs.elf` + `dry-blk.elf`: salt-okunur `/boot` + uçucu `/ram` + çift A/B `CRC32` CoW kalıcı `/persist` `DRYFS_v1` `VirtIO-Blk` `IoRing`): **`DONE` (`/boot` + `/ram` + kalıcı `VirtIO-Blk` `/persist`)** / **`PLANNED` (Native `NVMe` arka ucu — `Milestone 2C`)**
   - Canlı tuş/fare girdisi -> `4 MiB` (`2 x Frame2M` WB) + `DirtyRegion` GOP ekran güncellemesi ve `1/2/4/8/20 vCPU` & `256M..2G` RAM donanım matrisi doğrulaması: **`DONE`**
-  - Yüksek bant genişlikli blok/sürücü veri düzlemi (`IoRingSharedPage` `CAP=32`, `Milestone 2B` & `2C-0` `batch=32` `859 cyc/op`): **`DONE` (4 KiB SPSC `IoRing`)** / **`PLANNED` (Piksel `Order2MiB` `IoRing`, `TCB`-bağlı `Notification`, `FaultEndpoint`, FPU `XSAVEOPT` — `Milestone 2A-4`)**
+  - Yüksek bant genişlikli blok/sürücü veri düzlemi (`IoRingSharedPage` `CAP=32`, `Milestone 2B` & `2C-0` `batch=32` `804 cyc/op`, `Device Broker` kontrol düzleminden tamamen ayrık): **`DONE` (4 KiB SPSC `IoRing`)** / **`PLANNED` (`Milestone 2A-4a` modül tavanı `16->32` + `XSAVEOPT` + `FaultEndpoint`/`TCB`-bağlı `Notification`; `2A-4b` piksel `Order2MiB` `IoRing`)**
 - **Bağımlılıklar:** `P0` (`DONE`); `Milestone 2A-1..2B` etkileşim, kalıcı `VirtIO-Blk` `/persist` ve güç/kasa yaşam döngüsü tamamlandı; piksel halkaları ve `XSAVEOPT`/`FaultEndpoint` `Milestone 2A-4`'e bağlıdır.
 - **Azaltılan & Açık Riskler:** `IRQF_ONESHOT` fırtına kelepçesi (`R-14`), birleşik `i8042` + sıfır-UB atomik yüzey (`R-15`), `248 B` sıcak syscall yığın bütçesi (`R-11`), `PCI Command.BME = 0` çöküş susturması (`R-03`) ve kriptografik `DRY Vault` / kalıcı `/persist` / dürüst `S3 = -ENOSYS` sınırları (`R-16`) `90/90` QEMU testiyle doğrulandı.
 
@@ -92,14 +92,15 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P3` — Linux ve Windows Uyumluluğu — Durum: `PLANNED` *(`H2` Ağ Sürücü Adası PoC: `DONE`)*
+### `P3` — Linux ve Windows Uyumluluğu — Durum: `PLANNED` *(`H2` Konak PoC & `Milestone 2C-0` Kontrol/Veri Düzlemi Yaşam Döngüsü PoC: `DONE`)*
 
-- **Alt Hedefler (Kesin Öncelik Sırasıyla — `ADR-011`):**
-  1. **Öncelik 1 — Linux ELF / Linux ABI / POSIX / VFS (`PLANNED`):** `FaultEndpoint` / `SYSCALL` yönlendirme trampolini, izole userspace Linux personality sunucusu, etiketli VFS/soket köprüsü ve değiştirilmemiş gerçek Linux CLI/geliştirici/sunucu uygulamalarının doğrulaması.
-  2. **Sürücü ve Sistem Servisi Entegrasyonu (`PLANNED`, PoC `DONE`):** `H2` `igc`/`e1000e`/USB `xHCI` `GPL-2.0-only` sürücü adalarının DRY `PciCap` + `DmaArena` + `IoRing` yığınına bağlanması.
-  3. **Öncelik 2 — Seçilmiş Windows PE / Win32 Uygulamaları (`PLANNED` — Uzun Vadeli):** Linux katmanı kararlılığa ulaştıktan sonra seçilmiş kullanıcı alanı Win32 iş yükleri için `dry-ntos` + Wine DLL + `DXVK` çalışma zamanı.
-- **Bağımlılıklar:** `P1`/`P2` (`FaultEndpoint`, dinamik ELF/`mmap`, etiketli `VFS`, ağ/depolama servisleri, FPU `XSAVE`).
-- **Teknik Riskler & Dürüst Sınır:** `fork`/`clone`/`futex`/`epoll` semantik uç durumları; **Linux ve Windows uygulamalarının `%100`'ünün çalışacağı vaat edilmez** (çekirdek modu anti-cheat ve belgesiz çekirdek sürücüleri kapsam dışıdır — `R-13`).
+- **Kesin Uygulama Sırası ve Ring 3 Mimari Sınırı (`ADR-011`, `ADR-016`):**
+  1. **Adım 1 — `Milestone 2A-4a` Çekirdek Önkoşulları (`PLANNED`):** Önyükleme modül tavanı (`16 -> 32`), FPU/SIMD `XSAVEOPT`/`XRSTOR` bağlam izolasyonu ve `FaultEndpoint` + `TCB`-bağlı `Notification` sözleşmeleri.
+  2. **Adım 2 — `Milestone 2C-1` En Küçük Gerçek Linux Driver Island PoC (`PLANNED`):** En küçük gerçek Linux kaynaklı sürücü bileşeninin (`H2` sınırlı PCIe NIC: `e1000e`/`igc`) Ring 3 `libdry_lx_net` + kontrol-düzlemi `Device Broker` + doğrudan kiralık `Endpoint`/`IoRing` + `PciDev`/`DmaArena` üzerinde çalıştırılması (`dry-kernel` içinde `0` satır Linux ABI kodu).
+  3. **Adım 3 — Genişletilmiş Linux ELF ABI / Sürücü Uyumluluğu (`PLANNED`):** `2C-1` kanıtlarına göre Ring 3 `dry-linux-abi` + `libdry_posix` (`musl`/temel `glibc` ELF64) ve ek `< 400` sembollü sürücü adaları (`xHCI`).
+  4. **Adım 4 — Fiziksel DMA/IOMMU (`P5`) ve Uzun Vadeli Seçilmiş Win32 (`Faz 5`, `PLANNED`):** Fiziksel `VT-d`/`AMD-Vi` IOMMU + isteğe bağlı ayrık GPU MicroVM (`P5`) doğrulaması; Linux katmanı kararlılığa ulaştıktan sonra seçilmiş kullanıcı alanı Win32 iş yükleri için Ring 3 `dry-ntos` + Wine DLL + `DXVK`.
+- **Bağımlılıklar:** `Milestone 2A-4a` (`MAX_LATCHED_MODULES = 32`, `XSAVEOPT`, `FaultEndpoint`), dinamik ELF/`mmap`, etiketli `VFS`.
+- **Teknik Riskler & Dürüst Sınır:** `Mock Driver Island` (`2C-0`) yalnızca kontrol/veri yaşam döngüsü kanıtıdır, gerçek Linux sürücüsü değildir (`R-18`); `fork`/`clone`/`futex`/`epoll` uç durumları ve **Linux/Windows uygulamalarının `%100` çalışmama sınırı** (`0` çekirdek modu `.sys` / anti-cheat — `R-13`) şeffaf tutulur.
 
 ---
 
