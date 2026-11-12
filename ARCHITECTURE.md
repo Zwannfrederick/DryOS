@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
-> **Aşama:** Faz 1 (`Milestone 1A`, `1B-A..1B-D`, `1C` [`1df3842`]) & `Low-Level Optimization Pass v1` (`69522a3`) Tamamlandı (`56/56` QEMU/KVM Doğrulaması + İlk Ring 3 Grafik Ekranı Yeşil; `ADR-001` .. `ADR-011` Yürürlükte)  
+> **Durum Tarihi:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Kapanışı)  
+> **Aşama:** Faz 1 (`1df3842`, `69522a3`) + Faz 2 `Milestone 2A-1` (`P1 First Interaction`) Tamamlandı (`65/65` QEMU/KVM Doğrulaması + Canlı PS/2 Klavye -> Ring 3 `dry-input` -> IPC -> `dry-shell` -> Dinamik GOP Compositor Yeşil; `ADR-001` .. `ADR-012` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya otomatik testlerle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak deney/bare-metal ile yanlışlanmaya açık tasarım iddiası.  
@@ -114,6 +114,18 @@
 - **Yetenek-Kapılı Ring 3 UEFI GOP Grafik Ekranı (`display.rs`, `dry_display.rs`):**
   - Limine GOP doğrusal çerçeve tamponu (`1280x800x32`, `pitch=5120`, `FrameState::ReservedOrMmio` doğrulaması ve `pitch * height` taşma kontrolü) Ring 0 HHDM dışında tutulur; yalnızca `CapObjectKind::Framebuffer` yetkisi ve `SYS_FB_MAP (19)` üzerinden `PTE_USER | PTE_WRITABLE | PTE_PWT | PTE_PCD | PTE_NX | PTE_SW_MMIO` bayraklarıyla `dry-display.elf` kullanıcı adres alanına eşlenir, `revoke` veya çıkışta SMP TLB shootdown ile tamamen sökülür ve `-vga none` başsız (*headless*) kipte sistem hatasız devam eder.
 
+### 2.5. `Milestone 2A-1` (`P1 First Interaction`) Yetenek-Kapılı IOAPIC IRQ, Dar Port G/Ç ve Ring 3 Etkileşimli Boru Hattı (`[DOĞRULANDI — 65/65 QEMU/KVM]`)
+
+- **ACPI MADT Keşfi ve `IrqCap` / `IoPortCap` Donanım Sınırı (`kernel/src/acpi.rs`, `kernel/src/irq/`):**
+  - `acpi.rs`, Limine Base Revision 3 altında HHDM dışında kalabilen `ACPI_NVS` / `RESERVED` RSDP ve XSDT/RSDT tablolarını `PML4[384]` üzerinde geçici `RO + NX` 3-sayfalık önyükleme penceresiyle güvenli okur; `MADT` (`APIC`) içinden `IOAPIC` taban adresini (`0xfec0_0000`, `FrameState::ReservedOrMmio`) ve `Interrupt Source Override` kayıtlarını (ISA `IRQ 0..15 -> GSI`, polarite ve tetikleme kipi) uydurma varsayım olmadan çıkarır ve pencereyi `INVLPG` ile söker.
+  - Harici donanım kesmeleri `IDT` vektör `0x30..=0x3F` (`GSI 0..15`) aralığına yönlendirilir. Üst-yarı kesme işleyicisi (`handle_external_irq`), `IoApicHwCache` üzerinden sayfa tablosu yürüyüşü yapmadan hattı anında maskeler (`IRQF_ONESHOT`), `LAPIC EOI` gönderir, kesme fırtınası sayacını (`>= 256 IRQ / ~20 ms` -> `storm_clamped`) denetler ve bağlı `Notification` nesnesine bloklanmadan `notif_signal` tetikler (`irq_top p50 = 13.014 cyc`, `irq_ack p50 = 7.788 cyc`, `irq_wake p50 = 15.981 cyc`).
+  - `CapObjectKind::IoPort` (`12`) ve `SYS_IOPORT_RW (22)` (`op=0` `inb`, `op=1` `outb`): `RFLAGS.IOPL == 0` değişmezi asla gevşetilmez; yalnızca ayrık beyaz listedeki cihaz portları (`i8042` `0x60`/`0x64` ve `COM2` `0x2F8`) `RootSystem` sürücüsüne verilebilir; PIC (`0x20`/`0xA0`), PIT (`0x40..0x43`), PCI (`0xCF8..0xCFF`), CMOS (`0x70..0x71`) ve QEMU çıkış portları sert kara listededir.
+  - Yeni P1 sistem çağrıları (`syscall/{mod,cold}.rs`, sıcak `rust_syscall_dispatch` çerçevesi `248 B` korundu): `SYS_IRQ_BIND (20)`, `SYS_IRQ_ACK (21)` (`40 B` çerçeve, çift-ack `-EALREADY` reddi), `SYS_IOPORT_RW (22)`, `SYS_SYSINFO (23)` (`UserSysInfo` 80 B canlı telemetri), `SYS_FRAME_ALLOC (24)` ve `SYS_VSPACE_MAP (25)`.
+- **İzole Ring 3 `dry-input -> dry-shell -> dry-display` Zinciri (`userspace/src/{input,keymap,ps2,gfx,surface,shell}.rs`):**
+  - **`dry-input.elf` (`SecDomain::RootSystem`, `0x0003`):** `i8042` denetleyici kurulumu ve Set-1 / `0xE0` tarama kodu çözümlemesi tamamen Ring 3'te çalışır; cihazdan bağımsız `InputEvent` yapısı 64-olaylık taşma-korumalı halkada (`InputRingQueue<64>`) tutulur ve 4 yazmaçlı (`R12..R15`) IPC ile aboneye aktarılır. `KeymapLayout::UsQwerty` tam uygulanmıştır; `KeymapLayout::TurkishQ` genişletme arayüzü tanımlı olup dürüstçe `Err(LayoutNotImplemented)` döner (`[PLANNED]`).
+  - **`dry-shell.elf` (`SecDomain::Userspace`, `0x0102`):** Sıfır donanım ve sıfır `Framebuffer` yetkisiyle çalışır (`ADR-007`). Girdi düzenleyici (`InputEditor`), ayrıştırıcı (`parse_command`), 64-satırlık kaydırma tamponu (`ShellEngine`) ve `SharedTerminalSurface` (`3.904 B <= Frame4K`) projeksiyonu ayrıştırılmıştır; `help`, `clear`, `system`, `uptime`, `echo`, `overflow-test`, `crash-input` ve `shutdown` komutlarını gerçek telemetriyle yürütür.
+  - **`dry-display.elf` (`SecDomain::RootSystem`, `0x0004`):** `Order2MiB` (`Frame2M`) önbellekli (`WB`) RAM arka tamponu tutar, `dry-shell`'in `SharedTerminalSurface` sayfasını salt-okunur (`USER_RO`) eşler ve yalnızca `DirtyRegion` dikdörtgenlerini 64-bit yazımlarla GOP MMIO'ya aktarır (tek-satır tuş vuruşu `10.240 px = ~15.3k cyc` [`~5 µs`]; tam pencere `276.224 px = ~463k cyc` [`~149 µs`]; `Alt+Ok` ile gerçek taşınabilir floating pencere doğrulandı).
+
 ---
 
 ## 3. Zamanlayıcı Mimarisi (`H1` Özeti)
@@ -146,7 +158,7 @@
 
 ## 6. Ürün Katmanı, Kurulum Profilleri, Açılış Hattı ve Paketleme Mimarisi (`ADR-008` .. `ADR-011`, `[PLANNED]`)
 
-> **Kapsam Notu:** Aşağıdaki ürün ve kullanıcı alanı bileşenleri mimari olarak kesinleştirilmiş tasarım hedefleridir (`PLANNED`); `Milestone 1C` itibarıyla yalnızca kök süpervizör (`dry-init.elf`), örnek IPC servisi (`dry-echo.elf`) ve ilk statik GOP çerçeve tamponu çizicisi (`dry-display.elf`) uygulanmıştır (`[DOĞRULANDI]`). Ayrıntılı yol haritası `docs/PRODUCT_ROADMAP.md`, masaüstü/kabuk spesifikasyonu ise `docs/DRY_DESKTOP_SPEC.md` içindedir.
+> **Kapsam Notu:** Aşağıdaki ürün ve kullanıcı alanı bileşenleri mimari olarak kesinleştirilmiş tasarım hedefleridir (`PLANNED`); `Milestone 2A-1` (`P1 First Interaction`) itibarıyla kök süpervizör (`dry-init.elf`), örnek IPC servisi (`dry-echo.elf`), Ring 3 PS/2 girdi sürücüsü (`dry-input.elf`), izole etkileşimli kabuk (`dry-shell.elf`) ve çift-tamponlu dinamik GOP masaüstü compositor temeli (`dry-display.elf`) uygulanıp `65/65` QEMU testiyle doğrulanmıştır (`[DOĞRULANDI]`). Ayrıntılı yol haritası `docs/PRODUCT_ROADMAP.md`, masaüstü/kabuk spesifikasyonu ise `docs/DRY_DESKTOP_SPEC.md` içindedir.
 
 - **Tek Çekirdek, İki Kurulum Profili (`ADR-008` — *One Microkernel, Multiple Experiences*):**
   - Aynı `dry-kernel` ikilisi, aynı `Endpoint`/`Notification`/`IoRing` IPC katmanı, aynı `ADR-007` güvenlik alanları ve aynı `drypkg` altyapısı üzerinde iki ayrı profil kurulur:

@@ -1,7 +1,7 @@
 # DRY OS — Mimari Karar Kayıtları (Architecture Decision Records)
 
-> **Tarih:** 10–11 Kasım 2026  
-> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-011`)
+> **Tarih:** 10–12 Kasım 2026  
+> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-012`)
 
 ---
 
@@ -34,6 +34,7 @@
   - **MSR & Giriş/Çıkış Kapısı:** Her CPU üzerinde `IA32_EFER.SCE = 1`, `IA32_STAR = (0x0010 << 48) | (0x0008 << 32)`, `IA32_LSTAR = dry_syscall_entry` ve `IA32_FMASK` (`TF | IF | DF | IOPL | NT | AC` temizleme) programlandı. `dry_syscall_entry`, `swapgs` + `gs:[200]`/`gs:[192]` ile yığın değiştirir, 144 baytlık `SyscallFrame` kurar, dönüşte `validate_user_context` ile kanonik alt-yarı `RCX`/`RSP` ve `RFLAGS` doğrulaması yaparak `SYSRETQ` (`#GP` açığı kapalı) veya `IRETQ` yedek yolunu seçer ve `RDI, RSI, R8, R9, R10` yazmaçlarını sıfırlar.
   - **Sürümleme ve İlk 6 Çağrı (`ABI v0.1 = 0x0001_0000`):** `SYS_ABI_PING (0)`, `SYS_WRITE_DEBUG (1)`, `SYS_YIELD (2)`, `SYS_EXIT (3)`, `SYS_GET_TID (4)`, `SYS_CAP_QUERY (5)`; geçersiz çağrılar deterministik `-38` (`ENOSYS`), hatalı pointer'lar `-14` (`EFAULT`), geçersiz/yetkisiz capability `-9` (`EBADCAP`) döner.
   - **`Milestone 1C` IPC, Süpervizör ve Çerçeve Tamponu Uzantısı (`6..19`):** `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)`, `SYS_IPC_REPLY_RECV (11)`, `SYS_NOTIF_CREATE (12)`, `SYS_NOTIF_SIGNAL (13)`, `SYS_NOTIF_WAIT (14)`, `SYS_CAP_DERIVE (15)`, `SYS_CAP_REVOKE_OR_DEL (16)`, `SYS_PROC_SPAWN (17)`, `SYS_PROC_WAIT (18)` ve `SYS_FB_MAP (19)` eklendi. `R12..R15` kopyasız satır-içi 4 mesaj yazmacı, tek-atımlık nesil-korumalı `ReplyToken`, `CSpace::cspace_transfer` yetki devri ve `-95` (`EIRQCTX`) / `-35` (`EDEADLK`) / `-32` (`EPIPE`) deterministik hata kodları yürürlüğe alındı.
+  - **`Milestone 2A-1` (`P1 First Interaction`) Donanım IRQ, Dar Port G/Ç ve Yüzey Uzantısı (`20..25`):** Sıcak `rust_syscall_dispatch` çerçevesini (`248 B`) hiç büyütmeden soğuk `sys_cold_dispatch` (`216 B`) ve hızlı `irq` yolu üzerinden `SYS_IRQ_BIND (20)`, `SYS_IRQ_ACK (21)` (çift-ack `-114` `EALREADY` reddi), `SYS_IOPORT_RW (22)` (`IOPL=0` korunarak dar `IoPortCap` kontrolü), `SYS_SYSINFO (23)` (`UserSysInfo` 80 B), `SYS_FRAME_ALLOC (24)` ve `SYS_VSPACE_MAP (25)` eklendi (`ADR-012`).
   - **Donanım `SMAP` + İstisna Tablosu (`extable`):** `CPUID` ile `CR4.SMAP = 1` etkinleştirildi; `copy_from_user`/`copy_to_user` alt-yarı `U/S = 0` sayfaları reddeder ve daraltılmış `STAC..CLAC` bölgesi içindeki `#PF` tuzaklarını `-14` (`EFAULT`)'a çevirirken bölge dışındaki her Ring 0 `#PF` çekirdeği deterministik panikletir.
 
 ---
@@ -209,5 +210,32 @@
      - İhtiyaç duyulmayan hiçbir yabancı runtime (Linux ABI veya Win32 katmanı) önceden yüklenmez; yalnızca ilgili türde ilk paket kurulduğunda isteğe bağlı (*on-demand*) indirilir ve salt-okunur (`READ_ONLY_EXPORT`) paylaşılır.
      - **Dürüst Uyumluluk Sınırı:** Linux veya Windows uygulamalarının tamamının çalışacağı **asla vaat edilmez** (ör. çekirdek modu anti-cheat veya belgesiz çekirdek sürücüsü isteyen yazılımlar kapsam dışıdır). Her paketin uyumluluk sınıfı, beklenen başarım düzeyi ve bilinen kısıtlamaları `drypkg` ve `DRY Store` arayüzünde açıkça görünür tutulur.
   4. **Uygulama Öncesi Tasarım Kapısı:** Paket arşiv formatı, imza güven zinciri, servis bağımlılık şeması ve uyumluluk ABI sözleşmeleri kodlamaya geçilmeden önce ayrı bir teknik spesifikasyon olarak yazılıp denetlenecektir.
+
+---
+
+## ADR-012: Yetenek-Kapılı Harici Kesmeler (`IrqCap` One-Shot + `IoApicHwCache`), Dar `IoPortCap` (`IOPL=0`) ve Ring 3 Etkileşim Mimarisi
+
+- **Durum:** Kabul Edildi ve `Milestone 2A-1` (`P1 First Interaction`) ile Uygulandı (`65/65` QEMU/KVM, 12 Kasım 2026)
+- **Bağlam:** Kullanıcıdan gerçek klavye/cihaz girdisi alıp grafik ekranı dinamik güncellemek için harici donanım kesmelerine (`IOAPIC`/`ISA IRQ1`), cihaz yazmaç erişimine (`i8042` `0x60`/`0x64`), etkileşimli bir komut kabuğuna ve dinamik çerçeve tamponu çizimine ihtiyaç vardır. Ancak `RFLAGS.IOPL = 3` açmak, geniş I/O izin bit-haritası vermek, çekirdek kesme işleyicisinde protokol çözümlemek veya her kullanıcı sürecine doğrudan GOP `Framebuffer` eşlemek mikroçekirdek izolasyonunu bozar.
+- **Karar:**
+  1. **Gerçek ACPI MADT Keşfi ve Tek-Atımlık (`IRQF_ONESHOT`) `IrqCap` (`CapObjectKind::IrqLine = 11`):**
+     - `IOAPIC` tabanı ve ISA `Interrupt Source Override` (`IRQ -> GSI`, polarite, tetikleme) kayıtları uydurulmaz; Limine RSDP -> XSDT/RSDT -> `MADT` üzerinden doğrulanarak keşfedilir (`acpi.rs`).
+     - Harici vektörler (`0x30..=0x3F`) tetiklendiğinde çekirdek üst-yarısı (`handle_external_irq`) hiçbir protokol baytı okumaz ve bloklanan IPC yapmaz: hattı `IOAPIC` üzerinde anında maskeler (`masked_pending_ack = true`), `LAPIC EOI` yazar, kesme fırtınası eşiğini (`>= 256 IRQ / ~20 ms`) kontrol eder ve bağlı `Notification` nesnesine `notif_signal` gönderir.
+     - Sürücü `SYS_IRQ_ACK (21)` çağırana dek hat maskeli kalır; ikinci ardışık `SYS_IRQ_ACK` `-114` (`EALREADY`) ile reddedilir (`0` çift-EOI, `0` kayıp uyandırma). `CSpace::revoke` veya sürücü çöküşünde hat atomik olarak maskelenip bağ çözülür.
+  2. **Sıcak Kesme Yolunda `IoApicHwCache` (Sayfa Tablosu Yürüyüşü Elemesi):**
+     - `IOAPIC` MMIO sayfası bir kez `KERNEL_VSPACE` içine `UC + NX` eşlendikten sonra `IOREGSEL`/`IOWIN` sanal adresleri ve her `GSI` girişinin yüksek/maskeli/açık 32-bit yönlendirme kelimeleri `IoApicHwCache` içinde önbelleklenir (`irq_top p50: 30.292 -> 13.014 cyc` [`-%57.0`], `irq_ack p50: 24.867 -> 7.788 cyc` [`-%68.7`]).
+  3. **`RFLAGS.IOPL == 0` ve Ayrık Beyaz Listeli `IoPortCap` (`CapObjectKind::IoPort = 12`):**
+     - Ring 3 süreçlerine hiçbir koşulda `IOPL > 0` veya genel port erişimi verilmez. `SYS_IOPORT_RW (22)` yalnızca `SecDomain::RootSystem` sürücüsünün elindeki `(base_port, port_count)` capability aralığını doğrular; PIC, PIT, PCI Config (`0xCF8..0xCFF`), CMOS ve QEMU çıkış portları çekirdekte sert kara listededir.
+  4. **Üç Katmanlı Ring 3 Etkileşim Ayrımı (`dry-input` -> `dry-shell` -> `dry-display`):**
+     - **`dry-input` (`RootSystem`):** Donanım arka ucu (`ps2.rs`) ile cihazdan bağımsız `InputEvent` kuyruğunu (`input.rs`, 64-olay taşma sayacı) ve tuş haritasını (`keymap.rs`: `UsQwerty` aktif, `TurkishQ` açık genişletme arayüzü) ayırır.
+     - **`dry-shell` (`Userspace`, kompartman `0x0102`):** Sıfır donanım ve sıfır `Framebuffer` yetkisine sahiptir. `ADR-007` uyarınca ortak IPC uç noktaları `Userspace` kompartman etiketiyle oluşturulur (`RootSystem` sunucuları `RECV | REPLY` yapabilirken `Userspace` istemcisi `RootSystem` nesnelerine yazamaz).
+     - **`dry-display` (`RootSystem`):** `dry-shell`'in `SharedTerminalSurface` (`Frame4K`) sayfasını salt-okunur (`USER_RO`) eşler, `Order2MiB` (`WB`) RAM arka tamponunda birleştirir ve yalnızca `DirtyRegion` dikdörtgenlerini GOP MMIO'ya 64-bit yazımlarla aktarır.
+- **Test Edilebilir Güvenlik Invariant'ları (`INV-IRQ-01` .. `INV-IRQ-05`):**
+  1. **`INV-IRQ-01 (AlwaysIoplZero)`:** Tüm Ring 3 `TrapFrame` ve `SyscallFrame` dönüşlerinde `RFLAGS.IOPL == 0` zorunludur.
+  2. **`INV-IRQ-02 (DiscretePortAllowlist)`:** Beyaz liste dışı veya kara listedeki hiçbir x86 I/O portuna capability üretilemez ve erişilemez.
+  3. **`INV-IRQ-03 (SingleOwnerOneShotIrq)`:** Her `GSI` aynı anda en fazla bir canlı `IrqCap` sahibine bağlanabilir; kesme anında maskelenir ve çift `SYS_IRQ_ACK` reddedilir.
+  4. **`INV-IRQ-04 (RevokeMasksHardwareLine)`:** `IrqCap` iptal edildiğinde veya sahip süreç sonlandığında donanım hattı maskelenir ve eşzamanlı kesmeler panik/UAF üretmeden düşürülür.
+  5. **`INV-IRQ-05 (NoFramebufferInShell)`:** `SecDomain::Userspace` içindeki kabuk/uygulama süreçleri doğrudan `CapObjectKind::Framebuffer` yetkisi alamaz (`Err(TransferEscalation)`).
+
 
 

@@ -1,6 +1,6 @@
 # DRY OS — Teknik Çekirdek ve Altyapı Yol Haritası (`ROADMAP.md`)
 
-> **Son Güncelleme:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Kapanışı)  
 > **Durum Etiketleri:** `DONE` (tamamlandı & doğrulandı), `IN PROGRESS` (aktif geliştirme), `PLANNED` (tasarlandı/sırada), `BLOCKED` (dış/donanım engelli).  
 > **Ürün Eşlemesi:** Kullanıcı deneyimi, `DRY Desktop` / `DRY Server` kurulum profilleri ve `P0..P5` ürün aşamaları için ayrı belge: `docs/PRODUCT_ROADMAP.md` (bu belgedeki teknik milestone numaraları değiştirilmeden korunur).  
 > **Temel İlke (`ADR-006`):** **DRY Kernel gelişimi (Faz 1–2), Linux sürücü çevirisinin (`H2`) tüm sürücü sınıflarında başarılı olmasına BAĞIMLI DEĞİLDİR.**
@@ -23,16 +23,18 @@
   - **`Milestone 1B-D` (`29002d3` — `DONE`):** Gerçek `CPL=3` statik ELF64 süreçleri (`user-hello.elf`, `user-peer.elf`), `Syscall ABI v0.1`, `CR4.SMAP` + `#PF` `extable` `uaccess`, `NMI/#DF` MSR-doğrulamalı `swapgs` ve sıralı/idempotent süreç geri kazanımı (`50/50` QEMU testi).
   - **`Milestone 1C` (`1df3842` — `DONE`):** Senkron `Endpoint` (`send/recv/call/reply/reply_recv`) + asenkron `Notification`, 4-sıçramalı Öncelik Bağışı, `CPL=3` kök süpervizör (`dry-init.elf`), çökme/yeniden başlatma doğrulamalı `dry-echo.elf` ve yetenek-kapılı ilk Ring 3 UEFI GOP grafik çıktısı (`dry-display.elf`, `1280x800x32`, `56/56` QEMU testi + canlı QMP `screendump`).
   - **`Low-Level Optimization Pass v1` (`69522a3` — `DONE`):** Koşullu APIC One-Shot yeniden kurma (`0` gönüllü VM-exit), `STR` VM-exit elemesi, `248 B` çerçeveli `rust_syscall_dispatch` (`null_sys = 231 cyc`), birleşik `ep_reply_recv` (`call_reply = 1.952 cyc`, `12.8x` kazanç), `tzcnt` `active_mask` runqueue ve `-16 KiB` yerleşik meta küçültme (`56/56` QEMU testi).
-- **Faz 2 / `P1..P5` Aşamalarına Devredilen Açık Çekirdek Maddeleri (`PLANNED`):**
-  - `CapObjectKind::IoRing` sıfır-kopyalı paylaşımlı bellek veri düzlemi, `FaultEndpoint` userspace pager yönlendirmesi ve donanım IRQ/IOAPIC -> `Notification` bağlaması (`dry_irq_ctrl`) -> **Faz 2A (`PLANNED`)**.
+- **Faz 2 / `P1..P5` Aşamalarına Devredilen Açık Çekirdek Maddeleri:**
+  - Donanım IRQ/IOAPIC -> `Notification` bağlaması (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoPortCap`) -> **`Milestone 2A-1` ile TAMAMLANDI (`DONE — 65/65 QEMU`)**.
+  - `CapObjectKind::IoRing` sıfır-kopyalı paylaşımlı bellek veri düzlemi, `TCB`-bağlı `Notification`, `FaultEndpoint` userspace pager yönlendirmesi ve FPU/SIMD `XSAVEOPT` -> **Faz 2 `Milestone 2A-2` (`PLANNED`)**.
   - Fiziksel bare-metal önyükleme ve gerçek Intel VT-d / AMD-Vi IOMMU silikon doğrulaması -> **Faz 4 / `P5` (`PLANNED`)**.
 
 ---
 
-## Faz 2: DRY OS Temel Native Ekosistem, Etkileşimli Sistem, VFS Etiketleme ve `DRY Vault` — `PLANNED` (Sıradaki Faz)
+## Faz 2: DRY OS Temel Native Ekosistem, Etkileşimli Sistem, VFS Etiketleme ve `DRY Vault` — `IN PROGRESS` (`Milestone 2A-1: DONE`)
 - **Hedef:** Yabancı sürücü çevirisine bağımlı olmadan etkileşimli (`P1`), grafik temel altyapılı (`P2` çekirdek servisleri) ve `ADR-007` alanlarıyla korunan kendi kendine yeten mikroçekirdek işletim sistemi katmanı.
-- **Kapsam (`PLANNED`):**
-  - **Milestone 2A (Etkileşim, IRQ, `IoRing` & `FaultEndpoint`):** IOAPIC/MSI-X -> `Notification` (`dry_irq_ctrl`), `PS/2` + `VirtIO-Input` klavye/fare girdi servisi, IPC üzerinden etkileşimli Ring 3 terminal/kabuk (`dry-term`/`dry-cli`), `CapObjectKind::IoRing` veri düzlemi, `FaultEndpoint` userspace pager ve FPU/SIMD `XSAVEOPT`/`XRSTOR` bağlam izolasyonu.
+- **Kapsam ve Alt Kilometre Taşları (Tarihsel Faz 0/1 Numaraları Korunmuştur):**
+  - **`Milestone 2A-1` (`P1 First Interaction` — `DONE`, 12 Kasım 2026, `65/65` QEMU):** ACPI MADT/IOAPIC keşfi (`acpi.rs`), `IrqCap` (`0x30..=0x3F`, `IRQF_ONESHOT` maske + fırtına koruması + `IoApicHwCache`) ve dar `IoPortCap` (`IOPL=0`), Ring 3 `PS/2 i8042` girdi sürücüsü (`dry-input.elf`), izole `SecDomain::Userspace` etkileşimli kabuk (`dry-shell.elf`: `help`, `clear`, `system`, `uptime`, `echo`, `overflow-test`, `crash-input`, `shutdown`), çift-tamponlu (`WB Frame2M` + `DirtyRegion`) dinamik `dry-display.elf` GOP compositor + taşınabilir floating terminal penceresi (`Alt+Ok`), canlı `#UD` sürücü çökme/yeniden başlatma kurtarması ve gerçek QMP `send-key` + `screendump` (`docs/p1_interactive_shell.png`) doğrulaması.
+  - **`Milestone 2A-2` (Gelişmiş Girdi, `IoRing`, `FaultEndpoint` & `XSAVE` — `PLANNED`, Sıradaki):** `PS/2 AUX` fare + `VirtIO-Input`/USB HID arka uçları, `KeymapLayout::TurkishQ` tam eşlemesi, `CapObjectKind::IoRing` veri düzlemi, `TCB`-bağlı `Notification`, `FaultEndpoint` userspace pager ve FPU/SIMD `XSAVEOPT`/`XRSTOR` bağlam izolasyonu.
   - **Milestone 2B (`DRY Vault`, `Policy Broker` & Etiketli `VFS`):** İzole `ROOT_SYSTEM` `dry-vault` (oturum kiralaması `lease_epoch`), `dry-policy`, `ADR-007` etiket miraslı `dry-vfs` (`rename`/`symlink`/`hardlink`/`mount` yetki yükseltmeme garantisi: `INV-SEC-05`), `READ_ONLY_EXPORT` kütüphane paylaşımı ve `DEV_WORKSPACE`.
   - **Milestone 2C (Native Sürücüler, Görsel Servis & `Low-Level Optimization Pass v2`):** `DmaArena` (`iommu_pin_count`) üzerinde native Rust `VirtIO-Blk`, `VirtIO-Net`, temel `NVMe`, `VirtIO-GPU` 2D/çift-tamponlu ekran sunucusu; ayrıca `Optimization Pass v2` (`CR4.PCIDE`/`INVPCID`, doğrudan IPC thread switch, `IA32_TSC_DEADLINE`).
 - **Çıkış Kapısı (Gate 2):** Etkileşimli klavye -> Ring 3 kabuk -> canlı ekran döngüsü; NVMe/`VirtIO-Blk` diskten önyükleme ve ağ bağlantısı; `INV-SEC-01..08` VFS/kiralama negatif testlerinin `%100` geçmesi.

@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 11 Kasım 2026 (Gün Sonu Kapanışı)  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Kapanışı)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -9,7 +9,7 @@
 ## P0 — Varoluşsal / Mimariyi Kırabilecek Riskler
 
 ### R-01: Zamanlayıcıda `switch_to`, Zayıf Bellek Sıralaması veya `active_mask` Kaynaklı Stack Ezilmesi / Kayıp Uyandırma
-- **Durum:** `MITIGATED (QEMU/Formal)` — Sürekli regresyon koruması altında (`formal/h1/DrySched.tla`, `loom_sched`, `56/56` QEMU).
+- **Durum:** `MITIGATED (QEMU/Formal)` — Sürekli regresyon koruması altında (`formal/h1/DrySched.tla`, `loom_sched`, `65/65` QEMU).
 - **Teknik Mekanizma:** (a) `RSP` geçişinden önce `prev` yığınının serbest bırakılması; (b) `prepare_park` ile `Notification::signal` arasında açık `fence(Ordering::SeqCst)` unutulması; (c) `PerCpuRunQueue::pop_masked` içinde `active_mask` biti temizlenirken eşzamanlı `push` yarışında kuyruğun yetim kalması.
 - **Uygulanan Savunma:** Merkezi assembly `dry_switch_to -> finish_post_switch` sınırı (`stack_owner` yalnızca yeni yığında bırakılır), zorunlu `SeqCst` çitleri ve `pop_masked` içinde Dekker yeniden kontrolü (`fetch_and` sonrası `!rings[p].is_empty()` ise `fetch_or`). **Bu bölgelere dokunan her değişiklik negatif yarış testi gerektirir.**
 
@@ -29,7 +29,12 @@
 ### R-11: `16 KiB` Sabit Çekirdek Yığını Bütçesi ve Derleyici Satır-İçi (*Inlining*) Yığın Taşması (Yeni — 11 Kasım 2026)
 - **Durum:** `MITIGATED (QEMU)` — Yeni kod eklenirken aktif dikkat gerektirir!
 - **Kanıt:** `Optimization Pass v1` sırasında `verify_cpu_stack_canaries_fast`, `bsp_kmain` (`5.448 B`) -> `verify_userspace_and_syscalls` içine gömülen `run_stage_g_benchmarks` (`8.192 B` tampon) + `on_process_terminating` (`1.816 B` `[WakeBatchItem; 64]`) zincirinin `16.384 B` yığın tavanını aştığını (`16.680 B`) yakaladı.
-- **Azaltma:** Soğuk/test/benchmark fonksiyonları `#[inline(never)]` ile izole edilerek `CPU 0` yığınında `+7.704 B` boşluk açıldı (`proc/bench.rs`, `proc/tests.rs`). **Kural:** Çekirdekte `>= 1 KiB` yığın dizisi ayırmak yasaktır veya mutlaka `#[inline(never)]` yaprak fonksiyon / per-CPU statik kazıma alanı kullanılmalıdır; Faz 2'de çekirdek yığınları koruma sayfalı (*guard-paged*) sanal aralıklara taşınacaktır.
+- **Azaltma:** Soğuk/test/benchmark fonksiyonları `#[inline(never)]` ile izole edilerek `CPU 0` yığınında `+7.704 B` boşluk açıldı (`proc/bench.rs`, `proc/tests.rs`); `Milestone 2A-1` (`P1`) çağrıları da ayrı `syscall/cold.rs` (`216 B` çerçeve) içine alınarak sıcak `rust_syscall_dispatch` (`248 B`) hiç büyütülmedi. **Kural:** Çekirdekte `>= 1 KiB` yığın dizisi ayırmak yasaktır veya mutlaka `#[inline(never)]` yaprak fonksiyon / per-CPU statik kazıma alanı kullanılmalıdır; Faz 2'de çekirdek yığınları koruma sayfalı (*guard-paged*) sanal aralıklara taşınacaktır.
+
+### R-14: Harici Donanım Kesme Fırtınası (`IRQ Storm`), `Revoke` Yarışı ve Port I/O Ayrıcalık Sızıntısı (Yeni — 12 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU)` — `Milestone 2A-1` (`P1`, `ADR-012`, `9` yeni donanım/güvenlik testiyle doğrulandı).
+- **Teknik Mekanizma:** (a) Geveze veya arızalı bir cihazın kesme fırtınasıyla CPU'ları kilitlemesi; (b) `CSpace::revoke` veya sürücü çöküşü sırasında gelen kesmenin bayat `Notification` nesnesine erişmesi; (c) Ring 3 sürücüsüne `IOPL=3` veya geniş port erişimi verilmesiyle PIC/PIT/PCI Config yazmaçlarının bozulması.
+- **Uygulanan Savunma:** Üst-yarı `handle_external_irq` içinde anında `IOAPIC` maskeleme (`IRQF_ONESHOT`) + `>= 256 IRQ / ~20 ms` fırtına kelepçesi (`storm_clamped=1`), `IrqSlotState` spinlock altında atomik `revoke` maskelemesi (`revoke_race_ok=true`, `lost_wakeups=0`), çift `SYS_IRQ_ACK` reddi (`-EALREADY`) ve `RFLAGS.IOPL == 0` korunarak yalnızca ayrık beyaz listedeki portlara (`0x60`/`0x64`, `0x2F8`) izin veren `IoPortCap`.
 
 ---
 
@@ -51,7 +56,7 @@
 ### R-12: `DRY Desktop` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Yeni)
 - **Durum:** `OPEN / PLANNED` (`ADR-009`, `P2`).
 - **Teknik Mekanizma:** `liquid-glass` üst çubuk, bulanıklık/gölge efektleri ve `Floating + Tiling + Stacking/Tabbed` pencere geçişlerinin yazılımsal GOP veya giriş seviyesi iGPU'larda kare hızı düşüşü (*frame drop*) yaratması ya da UI mantığının çekirdeğe sızdırılması.
-- **Azaltma:** Tüm görsel/WM mantığı Ring 3 compositor içinde tutulur (`0` çekirdek UI kodu); bulanıklık/animasyon maliyetini donanım yeteneğine göre otomatik kapatan *Low-End Fallback* katmanı ve `Floating` diyalogların `Tiling` ağacını bozmamasını garanti eden ayrık sahne grafı zorunludur (`docs/DRY_DESKTOP_SPEC.md`).
+- **Azaltma:** Tüm görsel/WM mantığı Ring 3 compositor içinde tutulur (`0` çekirdek UI kodu); `Milestone 2A-1` ile `Order2MiB` (`WB`) RAM arka tamponu + `DirtyRegion` 64-bit GOP aktarımı devreye alınarak tek-satır tuş vuruşunun yalnızca `~15.3k cyc` (`~5 µs`) sürdüğü doğrulandı; `P2`'de bulanıklık/animasyon maliyetini donanım yeteneğine göre otomatik kapatan *Low-End Fallback* katmanı ve `Floating` diyalogların `Tiling` ağacını bozmamasını garanti eden ayrık sahne grafı zorunludur (`docs/DRY_DESKTOP_SPEC.md`).
 
 ### R-13: `drypkg` Runtime Şişmesi ve Linux/Windows Uyumluluğunda Aşırı Vaat Riski (Yeni)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).

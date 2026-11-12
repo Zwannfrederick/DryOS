@@ -1,6 +1,6 @@
 # DRY OS — Ürün Vizyonu, Kurulum Profilleri ve Ürün Yol Haritası (`P0` – `P5`)
 
-> **Belge Tarihi:** 11 Kasım 2026 (Gün Sonu Dokümantasyon Kapanışı)  
+> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Güncellemesi)  
 > **Başlangıç Referansları:** `Milestone 1C` (`1df3842e3ff1676c46349f072c623836a56f846a`) & `Low-Level Optimization Pass v1` (`69522a3482d3000dc796a6717446dbc8bb1cb25e`)  
 > **Durum Sözleşmesi:** Bu belgedeki her hedef açıkça **`DONE`**, **`IN PROGRESS`**, **`PLANNED`** veya **`BLOCKED`** olarak işaretlenmiştir. `ROADMAP.md` içindeki mevcut teknik milestone numaraları (`Faz 0..5`, `Milestone 1A..1C`) değiştirilmeden korunmuş ve Bölüm 3'te ürün aşamalarıyla eşlenmiştir.
 
@@ -40,7 +40,7 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 | Ürün Aşaması | Durum | Eşleşen Teknik Milestone (`ROADMAP.md`) | Temel Çıktı ve Doğrulama Kapısı |
 | :--- | :---: | :--- | :--- |
 | **`P0` — Mikroçekirdek Temeli** | **`DONE` (QEMU `56/56`)** | `Faz 0` (`H1`, `H2`), `Milestone 1A`, `1B-A..1B-D`, `1C` (`1df3842`), `Opt Pass v1` (`69522a3`) | SMP (`1..20 vCPU`), `H1`, `PMM`, `VSpace`, `CSpace`/`ADR-007`, Ring 3 ELF64, IPC, kök servisler ve ilk Ring 3 GOP ekranı |
-| **`P1` — Etkileşimli DRY OS** | **`PLANNED`** *(Sıradaki)* | `Faz 2 — Milestone 2A` + `2B` çekirdeği | Gerçek klavye/fare girdisi, IRQ->`Notification`, IPC üzerinden Ring 3 terminal, canlı komut/ekran ve temel servisler |
+| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1`: `DONE`, `65/65` QEMU)* | `Faz 2 — Milestone 2A-1` (`DONE`) + `2A-2` & `2B` (`PLANNED`) | PS/2 klavye (`IRQ1`), `dry-input` -> IPC -> `dry-shell` -> dinamik GOP ekranı (`DONE`); fare/USB HID, `IoRing`, `VFS` (`PLANNED`) |
 | **`P2` — DRY Desktop Alpha/Beta** | **`PLANNED`** | `Faz 2 — Milestone 2B/2C` + Ring 3 UI servisleri | Display/input servisi, paylaşımlı yüzeyler + compositor, Floating/Tiling/Stacking/Tabbed WM, `DRY Shell`, `Clean/Diagnostic Boot`, Login |
 | **`P3` — Linux & Windows Uyumluluğu** | **`PLANNED`** *(`H2` PoC: `DONE`)* | `Faz 3` (Linux ELF + Sürücü Adaları) & `Faz 5` (Seçilmiş Win32) | Önce Linux ELF/ABI/POSIX/VFS + `H2` sürücü adaları; ardından seçilmiş Windows PE/Win32 uygulamaları |
 | **`P4` — Paketleme ve Dağıtım** | **`PLANNED`** | `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) | Tasarım-öncelikli `drypkg` + `DRY Store`, isteğe bağlı runtime, imzalı paket, `Desktop`/`Server` kurulum profilleri, atomik *rollback* |
@@ -64,17 +64,17 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P1` — Etkileşimli DRY OS — Durum: `PLANNED` *(12 Kasım 2026 Sabahı Başlangıç Aşaması)*
+### `P1` — Etkileşimli DRY OS — Durum: `IN PROGRESS` *(`Milestone 2A-1 / P1 First Interaction: DONE` — `65/65` QEMU; Kalan Cihaz/Servis Dilimleri: `PLANNED`)*
 
-- **Alt Hedefler:**
-  - Donanım IRQ yönlendirme ilkeli (`dry_irq_ctrl`: IOAPIC/ISA/MSI-X -> `Notification`, tek sahip + mask/ack): **`PLANNED`**
-  - Gerçek klavye girdisi (`PS/2 i8042` ve `VirtIO-Input` Ring 3 sürücüsü): **`PLANNED`**
-  - Fare / işaretçi girdisi (`PS/2 AUX` / `VirtIO-Input` göreli ve mutlak koordinat olayları): **`PLANNED`**
-  - IPC üzerinden çalışan etkileşimli Ring 3 terminal (`dry-term.elf`) ve temel komut kabuğu (`dry-cli.elf`): **`PLANNED`**
-  - Canlı tuş vuruşu -> komut yürütme -> çift-tamponlu/hasar-dikdörtgenli GOP ekran güncellemesi: **`PLANNED`**
-  - Temel donanım/sistem servisleri (`IoRing` paylaşımlı bellek veri düzlemi, `FaultEndpoint`, saat/zamanlayıcı servisi, başlangıç salt-okunur/RAM tabanlı etiketli `VFS`): **`PLANNED`**
-- **Bağımlılıklar:** `P0` (`DONE`); `dry_irq_ctrl` ve sınırlı I/O-port / MMIO capability yetkisi olmadan Ring 3 klavye/fare sürücüsü kesme alamaz.
-- **Teknik Riskler:** Kesme fırtınası altında `IRQF_ONESHOT` maskeleme disiplini; GOP MMIO (`WC/UC`) üzerine doğrudan tek-piksel yazmanın yavaşlığı nedeniyle Ring 3 arka tampon (*backbuffer*) + kirli bölge (*dirty rect*) kopyasının zorunlu olması; `16 KiB` çekirdek yığını sınırı (`R-11`).
+- **Alt Hedefler (Dürüst Bileşen Durumu):**
+  - Donanım IRQ yönlendirme ilkeli (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoApicHwCache`: ACPI MADT `IOAPIC`/ISA -> `Notification`, tek sahip + `IRQF_ONESHOT` mask/ack + fırtına kelepçesi) ve dar `IoPortCap` (`IOPL=0`): **`DONE` (`IOAPIC`/ISA)** / **`PLANNED` (`MSI-X`)**
+  - Gerçek klavye girdisi (QEMU `PS/2 i8042` `IRQ1` -> Ring 3 `dry-input.elf`, US QWERTY + `0xE0` + 64-olay taşma koruması; `TurkishQ` genişletme arayüzü tanımlı): **`DONE` (`PS/2` US QWERTY)** / **`PLANNED` (`VirtIO-Input`, USB HID, `TurkishQ` tablosu)**
+  - Fare / işaretçi girdisi (`MouseEvent` veri modeli `input.rs` içinde hazır; gerçek `PS/2 AUX` / `VirtIO-Input` donanım sürücüsü): **`PLANNED`**
+  - Capability IPC üzerinden çalışan izole Ring 3 interaktif terminal ve komut kabuğu (`dry-shell.elf`, `SecDomain::Userspace` `0x0102`, sıfır donanım/FB yetkisi; `help`, `clear`, `system`, `uptime`, `echo`, `overflow-test`, `crash-input`, `shutdown`): **`DONE`**
+  - Canlı tuş vuruşu -> komut yürütme -> çift-tamponlu (`Order2MiB` WB RAM backbuffer) + kirli dikdörtgenli (`DirtyRegion`) GOP ekran güncellemesi, taşınabilir ilk floating pencere prototipi (`Alt+Ok`) ve QMP `screendump` piksel kanıtı (`docs/p1_interactive_shell.png`): **`DONE`**
+  - Temel donanım/sistem servisleri (`IoRing` paylaşımlı bellek veri düzlemi, `TCB`-bağlı `Notification`, `FaultEndpoint`, FPU `XSAVEOPT` ve başlangıç etiketli `VFS`): **`PLANNED` (`Milestone 2A-2` / `2B`)**
+- **Bağımlılıklar:** `P0` (`DONE`); `Milestone 2A-1` klavye/kabuk/ekran zinciri tamamlandı; fare etkileşimi ve yüksek bant genişlikli veri düzlemi `Milestone 2A-2`'ye bağlıdır.
+- **Azaltılan & Açık Riskler:** `IRQF_ONESHOT` fırtına kelepçesi (`R-14`), `WB Frame2M` arka tampon + `DirtyRegion` aktarımı (`10.240 px = ~15.3k cyc`, `R-12`) ve `248 B` sıcak syscall yığın bütçesi (`R-11`) `65/65` QEMU testiyle doğrulandı.
 
 ---
 

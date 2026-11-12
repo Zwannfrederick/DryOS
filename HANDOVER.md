@@ -1,181 +1,131 @@
 # DRY OS — Kapsamlı Mühendislik Devir Teslim Kılavuzu (`HANDOVER.md`)
 
-- **Son Güncelleme:** 11 Kasım 2026 (Gün Sonu Dokümantasyon Kapanışı — `Milestone 1C` + `Optimization Pass v1` + `ADR-008..011` Ürün/Mimari Devir Teslimi)
-- **Mevcut Durum (`P0 — DONE`):** Faz 0 (`H1` & `H2`), `ADR-007` güvenlik mimarisi, Faz 1'in tüm kilometre taşları (`1A`, `1B-A`, `1B-B`, `1B-C`, `1B-D`, `1C`: `1df3842`) ve `Low-Level Optimization Pass v1` (`69522a3`) `%100` tamamlandı; `0` Clippy uyarısı ve `56/56` otomatik QEMU/KVM senaryosu (`leaked_frames = 0`, `stale_tlb_reads = 0`, `uaf_errors = 0`, canlı QMP `screendump` piksel kanıtı) ile doğrulandı.
-- **Bu Belgenin Amacı:** 12 Kasım 2026 sabahı ve izleyen oturumlarda görevi devralacak coding agent'ın sıfır bağlam kaybıyla, mevcut değişmezleri ve yığın/eşzamanlılık sınırlarını kırmadan doğrudan `P1` (`Milestone 2A` — Etkileşimli DRY OS: IRQ -> Input -> IPC -> Ring 3 Shell -> Display) geliştirmesine başlamasını sağlamak.
+- **Tarih & Son Güncelleme:** **12 Kasım 2026** (`Milestone 2A-1` / `P1 First Interaction` Kapanışı)
+- **Mevcut Durum (`P0 — DONE`, `P1 — IN PROGRESS [Milestone 2A-1: DONE]`):** Faz 0 (`H1` & `H2`), Faz 1 (`1A..1C`: `1df3842`), `Optimization Pass v1` (`69522a3`) ve **Faz 2 `Milestone 2A-1` (`P1 First Interaction`)** `%100` tamamlandı; `0` Clippy uyarısı ve **`65/65` otomatik QEMU/KVM senaryosu** (`56/56` eski regresyon + `9/9` yeni P1 gerçek QMP klavye E2E, canlı `screendump` piksel farkı ve negatif güvenlik testi; `leaked_frames = 0`, `stale_tlb_reads = 0`, `uaf_errors = 0`) ile doğrulandı.
+- **Bu Belgenin Amacı:** İzleyen oturumda görevi devralacak mühendis veya coding agent'ın sıfır bağlam kaybıyla, mevcut güvenlik/yığın/eşzamanlılık değişmezlerini kırmadan doğrudan **`Milestone 2A-2`** (Fare/`VirtIO-Input`/USB HID, Türkçe Q klavye haritası, `IoRing` sıfır-kopya veri düzlemi, `FaultEndpoint` ve `XSAVEOPT`) aşamasına başlamasını sağlamak.
 
 ---
 
 ## 1. Git Commit Zinciri ve Kilometre Taşı Özeti
 
-| Aşama | Commit Hash | Kapsam Özeti | Doğrulama |
-| :--- | :---: | :--- | :---: |
-| `ADR-007` | `a443e6c` | `KERNEL (0)` / `ROOT_SYSTEM (1)` / `USERSPACE (2)` izolasyonu, `SecLabel` (8B), `DRY Vault` kiralama | Mimari + Öz-test |
-| `1A-B/C` | `bc46907` | Limine UEFI 64-bit boot, HHDM, `COM1` seri konsol, deterministik `isa-debug-exit` (`33`/`35`) | QEMU Boot |
-| `1A-D` | `7ecf5b2` | Per-CPU `GDT`, `TSS` (`IST1` `#DF` yığını), 256-girişli `TrapFrame` `IDT`, canlı `#BP`/`#UD`/`#PF` | `6/6` QEMU |
-| `1A-E` | `0ae3a94` | Limine MP `1/2/4/20 vCPU` SMP, özel 16 KiB `.bss` yığınları, `IA32_GS_BASE`, 4 negatif SMP testi | `10/10` QEMU |
-| `1A-F` | `b6ad2e9` | İşbirlikçi `H1` zamanlayıcı (`AtomicU32`, `SeqCst` çit, `PerCpuRunQueue`, `dry_switch_to`) | `15/15` QEMU |
-| `1A-G` | `fad423b` | Preemptive `H1`, `x2APIC`/`xAPIC` 3-pencereli PIT kalibrasyonu, `preempt_count`, 5 yarış testi | `21/21` QEMU |
-| `1B-A` | `78ac64b` | `BootstrapAllocator` mühürleme, `16 B` `FrameMeta` `PMM` (`Order4KiB`/`Order2MiB`), `Untyped` | `26/26` QEMU |
-| `1B-B` | `6445641` | 4-seviye `VSpace`, `W^X`, `KERNEL_VSPACE` devri (`~53 MiB` geri kazanım), SMP TLB shootdown (`0xEE`) | `35/35` QEMU |
-| `1B-C` | `b4ca6f8` | Korumalı `CSpace` (`64 B` `CapSlot`), çift-nesil ABA kalkanı, CDT $O(k)$ `revoke`, TLB borç onarımı | `46/46` QEMU |
-| `1B-D` | `29002d3` | Gerçek `CPL=3` ELF64 süreçleri, `Syscall ABI v0.1`, `CR4.SMAP` + `extable` `uaccess`, sıralı `reclaim` | `50/50` QEMU |
-| `1C` | `1df3842` | `Endpoint`/`Notification` IPC, 4-sıçrama Öncelik Bağışı, `dry-init`/`dry-echo`/`dry-display` GOP ekranı | `56/56` QEMU + PNG |
-| `Opt v1` | `69522a3` | `Low-Level Optimization Pass v1` (`null_sys 231 cyc`, `call_reply 1.952 cyc` [`12.8x`], `-16 KiB` meta) | `56/56` QEMU + Asm |
-| `Docs` | *HEAD* | Ürün vizyonu, `ADR-008..011`, `PRODUCT_ROADMAP.md`, `DRY_DESKTOP_SPEC.md` ve 12 Kasım Handover | Dokümantasyon |
+| Aşama | Referans / Kapsam | Doğrulama |
+| :--- | :--- | :---: |
+| `ADR-007` (`a443e6c`) | `KERNEL (0)` / `ROOT_SYSTEM (1)` / `USERSPACE (2)` izolasyonu, `SecLabel` (8 B), `DRY Vault` kiralama | Öz-test |
+| `1A-B..1A-G` (`bc46907..fad423b`) | Limine UEFI SMP (`1..20 vCPU`), per-CPU `GDT`/`TSS`/`IST1`, preemptive `H1`, `x2APIC`/`xAPIC` kalibrasyonu | `21/21` QEMU |
+| `1B-A..1B-D` (`78ac64b..29002d3`) | `PMM` (`16 B` `FrameMeta`), 4-seviye `VSpace` (`W^X`), SMP TLB shootdown, `CSpace` CDT `revoke`, `CPL=3` ELF64 + `SMAP` | `50/50` QEMU |
+| `1C` (`1df3842`) | `Endpoint`/`Notification` IPC, 4-sıçrama Öncelik Bağışı, `dry-init`/`dry-echo` ve ilk Ring 3 GOP ekranı | `56/56` QEMU |
+| `Opt v1` (`69522a3`) | `null_sys 231 cyc`, birleşik `ep_reply_recv` (`call_reply 1.952 cyc` [`12.8x`]), `248 B` sıcak syscall çerçevesi | `56/56` QEMU |
+| `Docs` (`cdfb567`) | Ürün vizyonu, `ADR-008..011`, `PRODUCT_ROADMAP.md`, `DRY_DESKTOP_SPEC.md` başlangıç devir teslimi | Doküman |
+| **`2A-1 / P1`** *(12 Kasım 2026)* | **ACPI MADT IOAPIC, `IrqCap`/`IoPortCap` (`IOPL=0`), `dry-input`, `dry-shell`, dinamik GOP compositor + taşınabilir pencere** | **`65/65` QEMU + PNG** |
+
+> **Önemli Çalışma Ağacı Notu:** Faz 0'dan kalma `experiments/h1-sched/src/runqueue.rs` ve `experiments/h1-sched/src/sync.rs` dosyalarındaki önceden mevcut yerel değişiklikler kasıtlı olarak korunmuş ve commit dışında bırakılmıştır; **bu iki dosyayı `git add` yapma, silme veya geri alma (`git checkout`).**
 
 ---
 
-## 2. Kesinleşen Mimari ve Ürün Kararları (`DECISIONS.md`)
+## 2. Depo ve Alt-Sistem Haritası (Tüm Dosyalar `< 1.000` Satır Tavanı Altında)
 
-1. **ADR-001 (Boot — `DONE`):** Limine Base Revision 3 (UEFI `OVMF` + doğrudan 64-bit SMP AP başlatma + HHDM + Boot Modules + GOP Framebuffer).
-2. **ADR-002 (Syscall ABI — `DONE` v0.1/v0.2):** `x86-64` `SYSCALL`/`SYSRETQ` (`RDI, RSI, RDX, R10, R8, R9` kontrol + `R12..R15` kopyasız 4 mesaj yazmacı + isteğe bağlı `<= 256 B` ek tampon; `RAX` birincil dönüş / negatif `SysError`, `RDX` ikincil dönüş).
-3. **ADR-003 (CSpace — `DONE` Düz Tablo, `PLANNED` Radiks):** Sabit boyutlu korumalı düz tablo (`MAX_CSPACES = 32` [`0` çekirdek rezervi, `1..=31` kullanıcı], `CNODE_SLOTS = 256`, `64 B/slot`); `CapPtr` 64-bit düzeni (`guard:8 | radix:8 | slot_gen:32 | slot_idx:16`) Faz 3'te ABI kırmadan 2-seviyeli radiks ağacına genişler.
-4. **ADR-004 (Scheduler — `DONE` Temel `H1`, `PLANNED` Topolojik):** TLC (`formal/h1/DrySched.tla`, `84.351` güvenlik + `54.095` canlılık durumu, `0` ihlal) ve Rust `loom` (`39.135` permütasyon + `>24M` 20-CPU stres geçişi) ile kanıtlanan `H1` protokolü + 8 öncelik seviyeli (`active_mask` `tzcnt`) `PerCpuRunQueue` + 4-sıçramalı IPC Öncelik Bağışı.
-5. **ADR-005 (Lisans — `DONE`):** DRY Kernel ve native servisler `MIT OR GPL-2.0-only`; Linux *Driver Island* ikilileri ve `experiments/h2-island` katmanı `GPL-2.0-only` (saf `Apache-2.0` ve `GPL-3.0` sürücü adalarında yasaktır).
-6. **ADR-006 (Bağımsızlık — `DONE`):** `Gate 0` (`H1` + `H2` `igc` `v6.12`/`v6.18` `%0` upstream farkla `3.468` satır runtime + `vfio-pci` `e1000e` DMA PoC) geçilmiştir; çekirdek gelişimi `H2` çeviri kapsamına bağımlı değildir.
-7. **ADR-007 (Güvenlik & `DRY Vault` — Çekirdek `DONE`, Ring 3 Servisler `PLANNED`):** `KERNEL (0)`, `ROOT_SYSTEM (1)` ve `USERSPACE (2)` alan duvarları; 8-bayt `SecLabel`; path-bağımsız `CapRights + SecLabel + lease_epoch` ortak denetimi (`authorize_cspace_fast`); `ROOT_SYSTEM` süreçlerinin bile `KERNEL` belleğine erişememesi; `READ_ONLY_EXPORT` için `CSpace` + `VSpace` + `PMM` 3-katmanlı salt-okunur kalkanı.
-8. **ADR-008 (Ürün Felsefesi & Profiller — `PLANNED`):** Tek `dry-kernel` ikilisi üzerinde iki birinci sınıf kurulum profili: etkileşim/enerji odaklı **`DRY Desktop`** ve varsayılan başsız (*headless*), sıfır GUI bağımlılıklı, CPU yakınlığı/NUMA/*throughput*/AI inference odaklı **`DRY Server`** (çift yönlü kurulum sonrası geçiş destekli; KVM mikrobenchmarkları Linux'tan hızlı olunduğunun kanıtı sayılmaz).
-9. **ADR-009 (`DRY Desktop` / `DRY Shell` & `Action API` — `PLANNED`):** Tek Ring 3 compositor üzerinde varsayılan `Floating` + tek tık `Tiling` + `Stacking/Tabbed` pencere yönetimi (`Tiling` düzenini bozmayan `Floating` diyaloglar ve kip geçişlerinde yerleşim korunumu), `liquid-glass` üst bar, `Normal`/`Compact UI`, düşük donanım *fallback* ve fare/klavye/menü/komut paletini birleştiren ortak **`Action API`** (`0` çekirdek UI kodu).
-10. **ADR-010 (Çift Açılış & Kimlik Sınırı — `PLANNED`):** Tek yapılandırılmış `BootEvent` akışını kullanan iki görünüm (**`Clean Boot`** varsayılan ve **`Diagnostic Boot`**, `Esc` ile canlı geçiş, sahte yüzde yasağı) + `Login / Authentication Manager` (`RootSystem`) ile `User Password Manager` (`Userspace`) bileşenlerinin kesin TCB ayrımı.
-11. **ADR-011 (`drypkg`, `DRY Store` & Kademeli Uyumluluk — `PLANNED`):** Ortak GUI+CLI paket motoru (*Bul -> Kur -> Çalıştır*), uygulama öncesi zorunlu tasarım kapısı, isteğe bağlı (*on-demand*) runtime kurulumu ve kesin öncelik sırası: **(1) Native DRY -> (2) Linux ELF/ABI -> (3) Seçilmiş Windows PE/Win32** (görünür uyumluluk sınırlarıyla; `%100` uyumluluk vaat edilmez).
+### 2.1. Çekirdek (`kernel/src/`)
+- **Önyükleme, ACPI, Donanım ve Per-CPU:** `main.rs`, `limine.rs` (Base Rev 3 HHDM/SMP/Modül/GOP/**RSDP**), `acpi.rs` (geçici `PML4[384]` `RO+NX` 3-sayfa penceresiyle `RSDP -> XSDT/RSDT -> MADT` `IOAPIC` & `ISO` keşfi), `arch.rs`, `gdt_tss.rs`, `percpu.rs` (`256 B` `PerCpuData`), `idt.rs` (`0x30..=0x3F` harici IRQ vektörleri dahil 256-girişli `TrapFrame`), `apic.rs` (`x2APIC`/`xAPIC`, `uptime_telemetry`), `smp.rs`, `serial.rs`, `security.rs` (`ADR-007`), `uaccess.rs` (`CR4.SMAP = 1` + `extable`), `display.rs` (`CapObjectKind::Framebuffer`).
+- **Donanım Kesme ve Port G/Ç (`kernel/src/irq/` — YENİ):** `mod.rs` (`IOAPIC` `UC+NX` eşleme, `IoApicHwCache`, `IrqSlotState`, `handle_external_irq`, `sys_irq_bind`, `sys_irq_ack`, fırtına kelepçesi), `ioport.rs` (`RFLAGS.IOPL == 0` altında beyaz/kara listeli `sys_ioport_rw`), `bench.rs`, `tests.rs` (öz-testler, 4 negatif `irq_fault=` testi ve `interactive=1` oturum başlatıcısı).
+- **Zamanlayıcı, Bellek, Yetki, Süreç, Syscall ve IPC:** `sched/{state,runqueue,context,preempt,donate,mod,tests,preempt_tests}.rs`; `pmm/{meta,mod,huge_reclaim,untyped,tests}.rs`; `vspace/{pte,mod,huge,tlb,tlb_debt,kernel_handover,tests}.rs`; `cspace/{cap,mod,revoke,objects,tests,bench,fault_tests}.rs` (`CapObjectKind::IrqLine = 11`, `IoPort = 12`); `proc/{elf,mod,supervisor,tests,bench}.rs`; `syscall/{entry,mod,cold}.rs` (`rust_syscall_dispatch = 248 B`, `sys_cold_dispatch = 216 B`, çağrılar `0..=25`); `ipc/{mod,endpoint_state,endpoint,notif,tests,bench}.rs`.
+
+### 2.2. Kullanıcı Alanı (`userspace/`) ve Test Araçları (`tools/`)
+- **Kütüphane Modülleri (`userspace/src/`):** `lib.rs` (Syscall `0..=25`, `UserSysInfo`, `RootInitBootInfo`, IPC sabitleri), `input.rs` (`InputEvent`, `MouseEvent`, `InputRingQueue<64>`), `keymap.rs` (`KeymapLayout::UsQwerty` + `TurkishQ` genişletme arayüzü), `ps2.rs` (`i8042` kurulum + Set-1/`0xE0` çözücü), `gfx.rs` (`Rect`, `DirtyRegion`, 95-glif 8x16 ASCII font), `surface.rs` (`SharedTerminalSurface` `3.904 B <= Frame4K`), `shell.rs` (`InputEditor`, `parse_command`, 64-satır `ShellEngine`, `project_to_surface`).
+- **Ring 3 Servis İkilileri (`userspace/src/bin/`):** `user_hello.rs`, `user_peer.rs`, `dry_init.rs` (Milestone 1C + P1 oturum ve çökme süpervizörü), `dry_echo.rs`, `dry_input.rs` (`RootSystem` `0x0003` PS/2 `IRQ1` sürücüsü), `dry_shell.rs` (`Userspace` `0x0102` etkileşimli kabuk), `dry_display.rs` (`RootSystem` `0x0004` `Order2MiB` çift-tamponlu GOP masaüstü compositor).
+- **Otomasyon (`tools/`):** `qemu_boot_test.py` (`65` senaryo, `--p1-only`, `--smp-only`, `--build-only`), `qemu_p1_validators.py` (canlı QMP `send-key`, dinamik `screendump` piksel farkı ve `docs/p1_interactive_shell.png` üretimi), `qemu_{log,user,ipc}_validators.py`.
 
 ---
 
-## 3. Depo ve Alt-Sistem Haritası (Tüm Dosyalar `< 1.000` Satır Tavanı Altında)
+## 3. Tüm Yeni `Milestone 2A-1` (`P1`) İkili Sözleşmeleri ve ABI Referansı
 
-### 3.1. Çekirdek (`kernel/src/`)
-- **Önyükleme, Donanım ve Per-CPU:** `main.rs` (`bsp_kmain`), `limine.rs` (Base Rev 3 HHDM/SMP/Modül/GOP), `arch.rs`, `gdt_tss.rs` (per-CPU `GDT`/`TSS`/`IST1`, `verify_cpu_stack_canaries_fast`), `percpu.rs` (`256 B` `PerCpuData`), `idt.rs` (256-girişli `TrapFrame`, MSR-doğrulamalı `NMI/#DF` `swapgs`, `#PF` `extable`), `apic.rs` (`x2APIC`/`xAPIC`, `rearm_oneshot_tick_count_only`), `smp.rs`, `serial.rs`, `security.rs` (`ADR-007`), `uaccess.rs` (`CR4.SMAP = 1` + `extable`), `display.rs` (`CapObjectKind::Framebuffer`).
-- **Zamanlayıcı (`kernel/src/sched/`):** `state.rs` (`H1` `AtomicU32` + `SeqCst` çitler), `runqueue.rs` (`active_mask` `tzcnt` `PerCpuRunQueue`), `context.rs` (`dry_switch_to`), `preempt.rs` (`timer_needs_rearm`), `donate.rs` (4-sıçramalı Öncelik Bağışı), `mod.rs` (`60` TCB yuvası, özel 16 KiB `.bss` yığınları), `tests.rs`, `preempt_tests.rs`.
-- **Fiziksel ve Sanal Bellek (`kernel/src/pmm/`, `vspace/`):** `pmm/{meta.rs,mod.rs,huge_reclaim.rs,untyped.rs,tests.rs}` (`16 B` `FrameMeta`, `PerCpuFrameCache`, `Order4KiB`/`Order2MiB`, `Untyped`); `vspace/{pte.rs,mod.rs,huge.rs,tlb.rs,tlb_debt.rs,kernel_handover.rs,tests.rs}` (`MAX_VSPACES = 32`, `W^X`, `map_4k`/`map_mmio_4k`/`unmap_4k_batch`, `active_cpus` SMP TLB shootdown).
-- **Yetki, Süreç, Syscall ve IPC (`cspace/`, `proc/`, `syscall/`, `ipc/`):** `cspace/{cap.rs,mod.rs,revoke.rs,objects.rs,tests.rs,bench.rs,fault_tests.rs}` (`cspace_lookup_fast`, `with_pinned_cap`, CDT `revoke`); `proc/{elf.rs,mod.rs,supervisor.rs,tests.rs,bench.rs}` (`MAX_PROCESSES = 24`, `ET_EXEC` ELF64, `reclaim_process`); `syscall/{entry.rs,mod.rs}` (`248 B` çerçeveli `rust_syscall_dispatch`, `0..=19`); `ipc/{mod.rs,endpoint_state.rs,endpoint.rs,notif.rs,tests.rs,bench.rs}` (`ep_send_or_call`, `ep_recv`, `ep_reply`, birleşik `ep_reply_recv`, `notif_signal`/`notif_wait`).
+### 3.1. IDT Harici Kesme Vektörleri ve `IOAPIC` / `IoApicHwCache` Sözleşmesi (`kernel/src/idt.rs`, `irq/mod.rs`)
+- **IDT Haritası:**
+  - `0x00..=0x1F`: Mimari x86-64 istisnaları (`#DF = 8` münhasır `IST1`; `#PF = 14` `SMAP`/`extable` kontrolü).
+  - `0x20`: Yerel APIC One-Shot Preemptive Zamanlayıcı Kesmesi (`TIMER_VECTOR`).
+  - **`0x30..=0x3F` (`EXT_IRQ_BASE_VEC .. EXT_IRQ_BASE_VEC + 15`):** Harici `IOAPIC` kesmeleri (`vec = 0x30 + gsi`, `MAX_EXT_GSIS = 16`). QEMU Q35/PC MADT tablosunda `ISA IRQ 1` (PS/2 klavye) -> `GSI 1` -> **`vec = 0x31`**.
+  - `0xEE`: SMP TLB Shootdown IPI; `0xEF`: Zamanlayıcı Yeniden Planlama IPI; `0xFF`: Sahte (*Spurious*) APIC Vektörü.
+- **`IRQF_ONESHOT` ve EOI Sözleşmesi:**
+  1. Kesme anında `handle_external_irq(vec)` `IoApicHwCache` üzerinden tek `IOREGSEL + IOWIN` yazımıyla `GSI` hattını **anında maskeler** (`masked_pending_ack = true`), ardından yerel APIC `EOI` yazar.
+  2. Pencere başına (`STORM_WINDOW_TSC = 64.000.000`, `~20 ms`) `>= 256` kesme gelirse hat `storm_clamped = true` ile kilitlenir.
+  3. Bağlı `Notification` nesnesine bloklanmadan `notif_signal(badge)` gönderilir.
+  4. Ring 3 sürücüsü cihaz FIFO'sunu boşalttıktan sonra `SYS_IRQ_ACK(irq_cap, IRQ_ACK_UNMASK=1)` çağırır; hat zaten açıksa `-114` (`EALREADY`) döner (çift-EOI/ack imkânsızdır). Sürücü maskeyi açtıktan hemen sonra `0x64` `OBF` bitini bir kez daha kontrol ederek kenar-tetiklemeli (*edge-triggered*) mandallanma yarışını kapatır.
 
-### 3.2. Kullanıcı Alanı (`userspace/`), Araçlar (`tools/`) ve Belgeler (`docs/`)
-- `userspace/src/lib.rs` ve `userspace/src/bin/{user_hello,user_peer,dry_init,dry_echo,dry_display}.rs`.
-- `tools/`: `bootstrap_phase1.py`, `qemu_boot_test.py` (`56` senaryo + QMP `screendump`), `qemu_{log,user,ipc}_validators.py`.
-- Mimari & Ürün Belgeleri: `ARCHITECTURE.md`, `DECISIONS.md`, `EXPERIMENTS.md` (`804` satır — geçmiş ölçüm kaydı, dokunulmaz), `ROADMAP.md` (teknik), `RISK_REGISTER.md`, `docs/PRODUCT_ROADMAP.md` (`P0..P5` ürün yol haritası), `docs/DRY_DESKTOP_SPEC.md` (`DRY Desktop`/`DRY Shell` spesifikasyonu).
+### 3.2. `DRY Native Syscall ABI` (`0..=25` — `kernel/src/syscall/{mod,cold}.rs`)
+- **Yazmaçlar:** `RAX = nr`, `RDI = a0`, `RSI = a1`, `RDX = a2`, `R10 = a3`, `R8 = a4`, `R9 = a5`; kopyasız IPC yazmaçları `R12..R15 = mr0..mr3`; dönüş `RAX` (`>= 0` veya negatif `SysError`: eklenen `-114 = EALREADY`), ikincil dönüş `RDX`.
+- **Çağrı Tablosu (`0..=19` Faz 1 + `20..=25` P1):**
+  - `0..=5`: `SYS_ABI_PING (0)`, `SYS_WRITE_DEBUG (1)`, `SYS_YIELD (2)`, `SYS_EXIT (3)`, `SYS_GET_TID (4)`, `SYS_CAP_QUERY (5)`.
+  - `6..=14`: `SYS_EP_CREATE (6)`, `SYS_IPC_SEND (7)`, `SYS_IPC_RECV (8)`, `SYS_IPC_CALL (9)`, `SYS_IPC_REPLY (10)`, `SYS_IPC_REPLY_RECV (11)`, `SYS_NOTIFY_CREATE (12)`, `SYS_NOTIFY_SIGNAL (13)`, `SYS_NOTIFY_WAIT (14)`.
+  - `15..=19`: `SYS_CAP_DERIVE (15)`, `SYS_CAP_REVOKE (16)`, `SYS_PROC_SPAWN (17)`, `SYS_PROC_WAIT (18)`, `SYS_FB_MAP (19)`.
+  - **`20 = SYS_IRQ_BIND(irq_cap, notif_cap, badge, flags=0)`:** `IrqLine` (`WRITE | SIGNAL`) yetkisini `Notification` (`SIGNAL`) nesnesine bağlar ve `IOAPIC` yönlendirmesini kurar; dönüş `GSI`.
+  - **`21 = SYS_IRQ_ACK(irq_cap, action)`:** `action = 1` (`UNMASK`, bekleyen kesmeyi onaylayıp maskeyi kaldırır; bekleyen kesme yoksa `-114 EALREADY`), `action = 0` (`MASK_DISABLE`, hattı güvenli maskeler).
+  - **`22 = SYS_IOPORT_RW(ioport_cap, port, op, val)`:** `op = 0` (`inb(u16) -> u8`, `CapRights::READ`), `op = 1` (`outb(u16, u8) -> 0`, `CapRights::WRITE`). `port` değeri capability `[base_port, base_port + count)` içinde olmalıdır (`RFLAGS.IOPL == 0`).
+  - **`23 = SYS_SYSINFO(user_out_ptr)`:** 8-bayt hizalı kullanıcı adresine 80-baytlık `UserSysInfo` (`abi_version`, `online_cpus`, `apic_mode` [`1=x2APIC`, `2=xAPIC`], `ioapic_present`, `fb_present`, `tsc_mhz`, `uptime_ms`, `elapsed_tsc`, `timer_irqs`, `total_ext_irqs`, `total_syscalls`, `total_ctx_switches`, `usable_frames_4k`, `free_frames_4k`) yazar.
+  - **`24 = SYS_FRAME_ALLOC(order, flags=0)`:** Çağıran sürecin güvenlik etiketiyle `PMM`'den sıfırlanmış `Order4KiB (0)` veya `Order2MiB (1)` çerçeve ayırır ve yeni `Frame4K`/`Frame2M` `CapPtr` döner.
+  - **`25 = SYS_VSPACE_MAP(frame_cap, vaddr, map_op)`:** Çağıran sürecin `VSpace`'inde `Frame4K`/`Frame2M` eşler veya çözer (`map_op`: `0 = MAP_4K_RO`, `1 = MAP_4K_RW`, `2 = UNMAP_4K`, `3 = MAP_2M_RW`, `4 = UNMAP_2M`; tümü `PTE_USER | PTE_NX`, `W^X` zorunlu).
+
+### 3.3. Yeni Capability Türleri, `RootInitBootInfo` ve `ADR-007` Çapraz-Alan Kuralı
+- **Yeni `CapObjectKind` Değerleri (`cspace/cap.rs`):**
+  - `CapObjectKind::IrqLine = 11`: `obj_id = gsi`, `aux = vector (0x30 + gsi)`; yalnızca `SecDomain::RootSystem` (`Userspace`'e delege edilemez).
+  - `CapObjectKind::IoPort = 12`: `obj_id = base_port`, `aux = port_count`; yalnızca beyaz listedeki cihaz portları (`0x60..=0x60`, `0x64..=0x64`, `0x2F8..=0x2F8`); yalnızca `SecDomain::RootSystem`.
+- **`RootInitBootInfo` (`userspace/src/lib.rs`, `0x0000_7e00_0000_0000`, 9 x `u64` = 72 B):**
+  `[0] echo_mod_cap`, `[1] display_mod_cap`, `[2] fb_cap`, `[3] input_mod_cap`, `[4] shell_mod_cap`, `[5] irq1_cap`, `[6] ioport_60_cap`, `[7] ioport_64_cap`, `[8] session_mode` (`0` = Milestone 1C regresyon akışı, `1` = P1 etkileşimli oturum).
+- **`ADR-007` Çapraz-Alan IPC Uç Noktası Tasarımı (`security.rs:224`):** `SecDomain::Userspace` (`dry-shell`, `0x0102`) hiçbir `RootSystem` nesnesine `SEND | CALL` yapamaz; ancak `RootSystem` servisleri (`dry-init`, `dry-input`, `dry-display`) `Userspace` kompartman etiketli (`domain_spec(0, SHELL_COMP_ID)`) bir `Endpoint` üzerinde `RECV | REPLY` yapabilir. Bu nedenle paylaşılan RPC uç noktaları istemci kompartmanı etiketiyle oluşturulur (`0` çekirdek istisnası).
+
+### 3.4. IPC Opcode'ları, `InputEvent`, `SharedTerminalSurface` ve Kabuk Sözleşmesi
+- **IPC Etiketleri (`userspace/src/lib.rs`):**
+  - Temel: `1 = PING`, `2 = PONG`, `3 = CRASH_UD2`, `4 = EXIT_CLEAN`.
+  - Girdi (`dry-input` `srv_ep`): `10 = INPUT_WAIT`, `11 = INPUT_EVENT`, `12 = INPUT_POLL`, `13 = INPUT_OVERFLOW_TEST`.
+  - Ekran (`dry-display` `disp_ep`): `20 = SURFACE_ATTACH` (`Frame4K` `READ|MAP` yetki devriyle), `21 = SURFACE_PRESENT`, `22 = SURFACE_MOVE` (`mr0 = dx as i64`, `mr1 = dy as i64`), `23 = SURFACE_FOCUS`.
+  - Süpervizör (`dry-init` `sup_ep`): `30 = SUP_RECONNECT_INPUT` (`#UD` çöküşü sonrası `dry-input` yeniden başlatma ve taze `Endpoint` yetki devri), `31 = SUP_SHUTDOWN`.
+- **`InputEvent` 4-Yazmaçlı (`R12..R15`) Kayıpsız Paketleme (`userspace/src/input.rs`):**
+  - `mr0`: `[7:0] kind (1=KeyPress, 2=KeyRelease) | [15:8] device_id | [31:16] keycode | [47:32] scancode | [55:48] modifiers (Shift=1, Ctrl=2, Alt=4) | [63:56] ascii`
+  - `mr1`: `seq` (monotonik olay sıra numarası)
+  - `mr2`: `timestamp_tsc`
+  - `mr3`: `queue_overflow_count` (`InputRingQueue<64>` taşma sayacı)
+- **`SharedTerminalSurface` (`userspace/src/surface.rs`, `#[repr(C)]`, tam `3.904 B <= 4.096 B` `Frame4K`):**
+  - `64 B` başlık (`magic = 0x4452_5953_5552_4631`, `version = 1`, `cols = 80`, `rows = 24`, `seq`, `cursor_col`, `cursor_row`, `cursor_visible`, `dirty_row_min`, `dirty_row_max`, `cmd_count`, `ext_irqs_snap`, `uptime_sec_snap`) + `1.920 x 2 B = 3.840 B` stilize karakter ızgarası (`SurfaceCell { ch, style }`).
+  - `dry-shell` bu sayfayı `0x0000_7c00_0000_0000` adresinde `USER_RW`, `dry-display` ise `0x0000_7c80_0000_0000` adresinde **yalnızca `USER_RO`** eşler; `dry-display` arka tamponunu `0x0000_7b00_0000_0000` (`Order2MiB` `WB`), GOP MMIO'yu `0x0000_7d00_0000_0000` (`UC`) adresinde tutar.
+- **`dry-shell` Yerleşik Komutları (`userspace/src/shell.rs`):**
+  `help`, `clear` (`Ctrl+L`), `system` (`SYS_SYSINFO` canlı CPU/APIC/RAM/IRQ/IPC sayaçları), `uptime` (`SYS_SYSINFO` kalibre edilmiş TSC saniye/ms), `echo <metin>`, `overflow-test` (80 olay basıp `retained=64 dropped=16` doğrular), `crash-input` (`dry-input` içine `#UD` enjekte edip canlı süpervizör kurtarmasını doğrular), `shutdown` (tüm Ring 3 servislerini temiz kapatıp `leaked_frames = 0` ile çıkar). Kısayollar: `Backspace`, `Delete`, `Home`/`End`, `Sol`/`Sağ`, `Ctrl+U`, `Shift+Yukarı/Aşağı` (64-satır kaydırma), `Alt+Ok` (floating pencere taşıma).
 
 ---
 
-## 4. Kritik İkili Düzenler ve Donanım Sözleşmeleri
+## 4. Tekrarlanabilir Derleme, Test, Ekran Görüntüsü ve Disassembly Komutları
 
-### 4.1. `PerCpuData` (`256 B`, `#[repr(C, align(64))]` — `kernel/src/percpu.rs`)
-Assembly kodları (`syscall/entry.rs`, `idt.rs`) aşağıdaki bayt ofsetlerine doğrudan `gs:[ofset]` ile erişir (`const assert!` kilitli):
-- `gs:[0]` `self_ptr`, `gs:[8]` `cpu_idx`, `gs:[16]` `lapic_id`, `gs:[24]` `magic = 0x4452_595f_5043_5055`.
-- `gs:[32..64]`: `boot_stack_base`, `boot_stack_top`, `df_ist1_base`, `df_ist1_top` (`verify_cpu_stack_canaries_fast` `STR` VM-exit'siz okur).
-- `gs:[64..128]`: `tss_base`, `gdt_base`, `bp_trap_count`, `last_bp_rip`, `exec_ticks`, `current_slot`, `ctx_switches` (`CLI` altında `LOCK`'sız), `in_df_handler`, `need_resched`, `timer_armed`, **`timer_needs_rearm` (ofset `104`)**.
-- `gs:[128..192]`: `timer_irqs`, `preemptions`, `deferred_rescheds`, `last_progress_seq`, `preempt_count`, `irq_depth`, `quantum_rem`, `storm_streak`, `storm_slot`, `nmi_count`.
-- **`gs:[192]` (`PCPU_OFF_KERNEL_RSP0`)**: Aktif iş parçacığının `stack_top` değeri (`TSS.RSP0` ile senkron).
-- **`gs:[200]` (`PCPU_OFF_USER_RSP_SCRATCH`)**: `SYSCALL` girişinde kullanıcı `RSP` geçici saklama alanı.
-- `gs:[208..256]`: `cur_fs_base`, `cur_user_gs_base`, `cr3_noops_local`, `cr3_switches_local`, `syscall_count`, `user_fault_count`.
-
-### 4.2. `DRY Native Syscall ABI` (`0x0001_0000` — `syscall/entry.rs`, `syscall/mod.rs`, `uaccess.rs`)
-- **Giriş:** `RAX = nr`, `RDI = a0`, `RSI = a1`, `RDX = a2`, `R10 = a3`, `R8 = a4`, `R9 = a5`; kopyasız IPC yazmaçları `R12..R15 = mr0..mr3`.
-- **Dönüş & `SysError` Kodları (`uaccess.rs`):** `RAX >= 0` başarı veya negatif hata (`-1 EPERM`, `-9 EBADCAP`, `-10 ECHILD`, `-11 EAGAIN/EWOULDBLOCK`, `-12 ENOMEM`, `-14 EFAULT`, `-16 EBUSY`, `-22 EINVAL`, `-32 EPIPE`, `-35 EDEADLK`, `-38 ENOSYS`, `-90 EMSGSIZE`, `-95 EIRQCTX`, `-110 EREVOKED`, `-116 ETIMEDOUT`, `-125 ECANCELED`); `RDX` ikincil çıktı (`reply_token` / `badge` / `pid` / aktarılan `CapPtr`).
-- **Hijyen & Bayraklar:** `RBX, RBP, R12..R15` korunur (IPC alım çağrılarında `R12..R15` mesaj taşır); dönüşte `RDI, RSI, R8, R9, R10` sıfırlanır; `IA32_FMASK` girişte `TF | IF | DF | IOPL | NT | AC` bitlerini donanımda temizler.
-- **Mevcut Çağrı Tablosu (`0..=19`):** `0: SYS_ABI_PING`, `1: SYS_WRITE_DEBUG`, `2: SYS_YIELD`, `3: SYS_EXIT`, `4: SYS_GET_TID`, `5: SYS_CAP_QUERY`, `6: SYS_EP_CREATE`, `7: SYS_IPC_SEND`, `8: SYS_IPC_RECV`, `9: SYS_IPC_CALL`, `10: SYS_IPC_REPLY`, `11: SYS_IPC_REPLY_RECV`, `12: SYS_NOTIFY_CREATE`, `13: SYS_NOTIFY_SIGNAL`, `14: SYS_NOTIFY_WAIT`, `15: SYS_CAP_DERIVE`, `16: SYS_CAP_REVOKE`, `17: SYS_PROC_SPAWN`, `18: SYS_PROC_WAIT`, `19: SYS_FB_MAP`.
-
-### 4.3. Sanal Adres Alanı Haritası (`VSpace` — `kernel/src/vspace/pte.rs`)
-- `0x0000_0000_0000_0000 .. 0x1000`: Eşlenmemiş `NULL` koruma sayfası.
-- `0x0000_0000_0040_0000+`: Statik `ET_EXEC` kullanıcı ELF64 segmentleri (`W^X` zorunlu).
-- `0x0000_7d00_0000_0000+` (`USER_FB_MMIO_BASE`): Yetenek-kapılı Ring 3 GOP Çerçeve Tamponu (`PTE_USER | PTE_WRITABLE | PTE_PWT | PTE_PCD | PTE_NX | PTE_SW_MMIO`; normal RAM iade yoluna girmez).
-- `0x0000_7fff_f000_0000 .. 0x0000_7fff_f001_2000`: Kullanıcı yığını (`4 KiB` alt koruma + `64 KiB` yığın + `4 KiB` üst koruma).
-- `0xffff_8000_0000_0000+` (`PML4[256..]`): Limine HHDM (`U/S = 0`, `NX = 1`; `ReservedOrMmio` delikleri eşlenmemiş).
-- `0xffff_ffff_8000_0000+` (`PML4[511]`): Çekirdek imajı (`.text` `RX`, `.rodata` `RO+NX`, `.data/.bss` `RW+NX`).
+1. **Derleme + Clippy (`-D warnings`, `dry-userspace` + `dry-kernel`):**
+   `python3 tools/qemu_boot_test.py --build-only`
+2. **Hızlı P1 Donanım QMP `send-key` + `screendump` + Negatif Güvenlik Paketi (`9/9`, `~32 sn`):**
+   `python3 tools/qemu_boot_test.py --p1-only` *(canlı PNG çıktısı: `docs/p1_interactive_shell.png`)*
+3. **Hızlı Tekil SMP Duman Testi (`~2 sn`):**
+   `python3 tools/qemu_boot_test.py --smp-only 2`
+4. **Tam Regresyon + P1 E2E Paketi (`65/65` = `56` Faz 0–1C + `9` P1, `~125 sn`):**
+   `python3 tools/qemu_boot_test.py`
+5. **Release Çekirdek Yığın ve Sembol Denetimi:**
+   `objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel > /tmp/dry_kernel.asm`
 
 ---
 
-## 5. Tekrarlanabilir Derleme, Test ve Disassembly Komutları
+## 5. Doğrulanmış Başarılar ve Önce/Sonra Performans Özeti (`12 Kasım 2026`)
 
-1. **Derleme + Clippy (`-D warnings`, `dry-userspace` + `dry-kernel`):** `python3 tools/qemu_boot_test.py --build-only` *(çıplak `cargo clippy` çalıştırma; betik `.toolchains/sysroot` ve `-Z build-std` bayraklarını geçirir).*
-2. **Hızlı Tekil SMP Duman Testi (`~2 sn`):** `python3 tools/qemu_boot_test.py --smp-only 2`
-3. **Tam Regresyon + Negatif Arıza + QMP `screendump` Paketi (`56/56`, `~95 sn`):** `python3 tools/qemu_boot_test.py`
-4. **Release Çekirdek Disassembly:** `objdump -d -M intel target/x86_64-unknown-none/release/dry-kernel > /tmp/dry_kernel.asm`
-5. **Faz 0 `H1` ve `H2` Testleri:** `cargo test -p h1-sched --release` ve `make -C experiments/h2-island test`
+- **`65/65` QEMU Testi Yeşil (`0` Clippy Uyarısı, `0` Dosya `>= 1.000` Satır, `leaked_frames = 0`):**
+  - `56/56` Faz 0–1C testi (`1/2/4/8/20 vCPU`, `xAPIC`, `-vga none`, `dry_os_first_screen.png`, 48 negatif arıza testi) sıfır regresyonla geçti.
+  - `9/9` yeni P1 testi geçti: `p1_interactive_{1,2,4}cpu_e2e`, `p1_interactive_2cpu_headless_e2e` (`-vga none`), `p1_interactive_2cpu_xapic_e2e`, `irq_unauth_ioport_rejected`, `irq_unauth_ack_rejected`, `irq_double_ack_rejected`, `irq_display_cap_leak_rejected`.
+- **Ölçülen Döngü ve Yığın Metrikleri (`~3.111 MHz` KVM):**
+  - `IoApicHwCache` Önce -> Sonra (`2 vCPU` `p50`): `irq_top` **`30.292 -> 13.014 cyc` (`-%57.0`)**, `irq_ack` **`24.867 -> 7.788 cyc` (`-%68.7`)**, `irq_wake` **`33.433 -> 15.981 cyc` (`-%52.2`)**; `ioport_inb = 8.618 cyc`; `null_sys = 231 cyc` korundu.
+  - Ring 3 `DirtyRegion` GOP aktarımı: tek-satır tuş vuruşu (`10.240 px`) **`15.294..18.478 cyc` (`~5 µs`, `29x` hızlı)** vs tam pencere (`276.224 px`) **`449.164..538.855 cyc` (`~150 µs`)**.
+  - Çekirdek yığın çerçeveleri (`objdump`): `rust_syscall_dispatch = 248 B` (`0 B` büyüme), `sys_cold_dispatch = 216 B`, `sys_irq_ack = 40 B`.
 
 ---
 
-## 6. 12 Kasım 2026 Sabahı Devam Edecek Coding Agent İçin Başlangıç Rehberi
+## 6. Açık Eksikler (Dürüst Sınırlar) ve Bir Sonraki Geliştirme Görevi (`Milestone 2A-2`)
 
-### 6.1. Kesin Son Commit Zinciri ve Temiz Çalışma Ağacı Durumu
-- **Son Kod Commit'leri (Dokunulmadan Korunacak):**
-  - `Milestone 1C`: `1df3842e3ff1676c46349f072c623836a56f846a`
-  - `Low-Level Optimization Pass v1`: `69522a3482d3000dc796a6717446dbc8bb1cb25e`
-  - `Gün Sonu Dokümantasyon Kapanışı`: `69522a3` üzerindeki son `docs:` commit'i (`git log -n 3` ile kontrol et; `69522a3`'ten sonra hiçbir `.rs`/kod dosyası değiştirilmemiştir).
-- **Çalışma Ağacı Durumu:** `kernel/`, `userspace/`, `tools/`, `docs/` ve kök dizindeki tüm izlenen kod/belge dosyaları temizdir. Yalnızca Faz 0'dan kalma `experiments/h1-sched/src/runqueue.rs` ve `experiments/h1-sched/src/sync.rs` yerel değişiklik içerir; **bu iki dosyayı asla `git add` yapma, düzenleme veya geri alma (`git checkout`).**
+### 6.1. Henüz Tamamlanmamış Özellikler (`PLANNED` — Tamamlanmış Gösterilmez)
+1. **Türkçe Q Klavye Eşlemesi (`KeymapLayout::TurkishQ`):** `userspace/src/keymap.rs` içinde genişletme arayüzü hazır olup şu an dürüstçe `Err(LayoutNotImplemented)` döner (`UTF-8` çok-baytlı glif ve AltGr katmanı `Milestone 2A-2`'dedir).
+2. **Gerçek Fare / İşaretçi Sürücüsü, USB HID ve `VirtIO-Input`:** `MouseEvent` veri modeli `userspace/src/input.rs` içinde tanımlanmıştır, ancak gerçek `PS/2 AUX (IRQ12)`, `VirtIO-Input` veya USB `xHCI` HID sürücüsü henüz yazılmamıştır (floating pencere taşıma şu an gerçek klavye `Alt + Ok` kısayoluyla çalışır).
+3. **Birleşik `Endpoint + Notification` Beklemesi ve `CapObjectKind::IoRing`:** Şu an `dry-input` boşta `SYS_NOTIFY_WAIT` zaman aşımı ile `MSG_FLAG_NON_BLOCKING` `Endpoint` yoklamasını birleştirir; `TCB`-bağlı `Notification` ve sıfır-kopyalı `IoRing` veri düzlemi `Milestone 2A-2` hedefidir.
+4. **Diğer Faz 2–5 Hedefleri:** `FaultEndpoint` userspace pager, FPU/SIMD `XSAVEOPT`/`XRSTOR`, koruma sayfalı sanal çekirdek yığınları, `DRY Vault` / `Policy Broker` / etiketli `VFS`, tam hibrit `DRY Desktop` WM (`Tiling`/`Tabbed` + `Action API`), `drypkg` ve fiziksel `bare-metal` + VT-d IOMMU doğrulaması (`-smp 20` KVM sonuçları `4C/8T` konak aşırı-aboneliğidir; fiziksel donanım ölçekleme kanıtı değildir).
 
-### 6.2. `56/56` Doğrulama Sonucu ve Neleri Kanıtlayıp Kanıtlamadığı
-- **Kanıtlanan (`DONE`):** `50` Faz 1 regresyon testi + `boot_display_screendump` (`1280x800`, `non_bg_px = 281.600`, `colors = 7`, sol-üst `#0A0E17`, merkez `#18E0B5`) + `boot_2cpu_headless_nofb` (`-vga none`) + `4` negatif IPC arıza testi (`ipc_irq_block`, `ipc_unauth_ep`, `ipc_double_reply`, `ipc_donate_cycle`) `%100` geçti (`0` Clippy uyarısı, `leaked_frames = 0`, `stale_tlb_reads = 0`, `uaf_errors = 0`).
-- **Kanıtlanmayan Sınırlar (`PLANNED`):** Gerçek fiziksel x86-64 donanım (`bare-metal`) önyüklemesi, fiziksel Intel VT-d / AMD-Vi IOMMU silikon davranışı, harici IOAPIC/MSI-X kesmeleriyle canlı klavye/fare/disk/ağ G/Ç, FPU/SIMD izolasyonu ve Linux'a karşı tam sistem performansı henüz test edilmemiştir.
-
-### 6.3. Ring 3 Framebuffer ve Capability IPC'nin Mevcut Durumu
-- **Ring 3 Framebuffer (`DONE` Statik Kanıt / `PLANNED` Sürekli Sunucu):** `display.rs`, Limine GOP BAR bölgesini (`0x8000_0000`, `1280x800x32`, `ReservedOrMmio`) doğrular ve yalnızca `RootSystem` süpervizörüne tekil `CapObjectKind::Framebuffer` üretir. `dry-display.elf`, `SYS_FB_MAP (19)` ile çerçeve tamponunu `0x0000_7d00_0000_0000` adresine eşler, ilk DRY OS ekranını çizer ve temiz şekilde çıkar. **Eksik olanlar (`PLANNED`):** Sürekli çalışan ekran sunucusu döngüsü, RAM arka tamponu (*backbuffer*) + kirli dikdörtgen (*dirty-rect*) aktarımı, çoklu istemci yüzeyleri ve compositor.
-- **Capability IPC (`DONE` Kontrol Düzlemi / `PLANNED` Veri Halkası):** Senkron `Endpoint` (`send`, `recv`, `call`, `reply`, tek-pin/tek-kilit birleşik `ep_reply_recv`), asenkron `Notification` (`signal`, `wait`), kopyasız `R12..R15` (`32 B`) + `<= 256 B` ek tampon, `cspace_transfer` yetki devri, tek-atımlık `ReplyToken` ve 4-sıçramalı Öncelik Bağışı tam çalışmaktadır. **Eksik olanlar (`PLANNED`):** Yüksek hacimli sıfır-kopya `CapObjectKind::IoRing` paylaşımlı bellek halkaları ve tek sunucu iş parçacığında `Endpoint + Notification` birleşik beklemesi (`TCB`-bağlı bildirim).
-
-### 6.4. Optimizasyon Öncesi (`1df3842`) ve Sonrası (`69522a3`) Özet Performans Metrikleri
-
-| Metrik (`p50` döngü, `~3.11 GHz` KVM) | `1df3842` (`1 vCPU`) | `69522a3` (`1 vCPU`) | `69522a3` (`2..20 vCPU`*) | Net Kazanç / Kök Mekanizma |
-| :--- | :---: | :---: | :---: | :--- |
-| `null_sys` (`SYSCALL -> SYSRETQ`) | `326` | **`231`** (`74 ns`) | **`231..257`** | **`-29.1%`** (`CLI` hızlı yol, `248 B` çerçeve, `STR` VM-exit elemesi) |
-| `iretq_sys` (`SYSCALL -> IRETQ`) | `619` | **`522`** | **`521..548`** | **`-15.7%`** (`1.416 B -> 248 B` `rust_syscall_dispatch` yığını) |
-| `k2k_sw` / `u2u_same_vs` / `u2u_cross_vs` | `533 / 818 / 1.015` | **`451 / 670 / 988`** | **`453..526 / 670..760 / 990..1.085`** | **`-15%..-18%`** (`tzcnt` `active_mask`, koşullu APIC rearm) |
-| `cspace_lookup_fast` / `ep_lookup` | `128` / `139` | **`99`** / **`93`** | **`99..122`** / **`98..124`** | **`-22.7%` / `-33.1%`** (sınır-kontrollü sarmalayıcı soyma) |
-| `sched_wakeup` (Preemptive epoch) | `12.593` | **`1.037`** | **`2.766..3.576`** | **`12.1x`** (gönüllü geçişte gereksiz APIC `wrmsr` VM-exit elemesi) |
-| `send_recv` (Bloklanan `Endpoint`) | `24.760` | **`2.070`** | **`2.087..3.657`** | **`12.0x`** (`0` gönüllü APIC VM-exit + tek-kilit uyanma) |
-| `call_reply` (`CALL` + `REPLY_RECV`) | `25.001` | **`1.952`** (`0.63 µs`) | **`4.876..6.535`** (`4.173` xapic) | **`12.8x`** (birleşik `ep_reply_recv` + koşullu APIC rearm) |
-| `svc_startup` (`spawn + 1 RPC + wait`) | `70.857` | **`47.741`** | **`57.882..65.171`** | **`-32.6%`** (`unmap_4k_batch` tek-IPI TLB + hızlı IPC) |
-| `rust_syscall_dispatch` & Yerleşik Meta | `11.352 B` / `1.622` fr | **`3.085 B` / `1.618` fr** | — | **`-72.8%` kod**, `76 -> 6` `lock`, **`-16 KiB` `.bss`** |
-
-### 6.5. Güvenlik Invariant'ları ve Yarış Riski Bulunan Sıcak Bölgeler
-- **Kırılmaz Güvenlik Kuralları:** `INV-SEC-01..08` (`ADR-007`: `KERNEL` çerçeveleri Ring 3'e asla eşlenmez; `READ_ONLY_EXPORT` 3 katmanda yazmaya kapalıdır; `authorize_cspace_fast` her nesne erişiminde koşar), `CR4.SMAP = 1` (kullanıcı belleğine ham Rust referansı oluşturmak yasaktır; yalnızca `copy_from_user`/`copy_to_user`), `W^X` ve `NMI/#DF` MSR-doğrulamalı koşullu `swapgs`.
-- **Yarışa Hassas 5 Sıcak Bölge (Değişiklikte Negatif Test Zorunlu):**
-  1. `sched/state.rs` & `ipc/notif.rs`: `prepare_park` ile `wake_thread`/`notif_signal` arasındaki açık `fence(Ordering::SeqCst)` bariyerlerini **asla kaldırma** (`R-01`).
-  2. `sched/runqueue.rs`: `PerCpuRunQueue::pop_masked` içinde `active_mask` biti temizlendikten sonraki Dekker yeniden kontrolünü (`!rings[p].is_empty() -> fetch_or`) koru (`R-01`).
-  3. `cspace/{mod,revoke}.rs`: Nesne kullanan her sistem çağrısı `with_pinned_cap` (`slot.in_flight_ops` `SeqCst` pini) içinden geçmelidir; `CSpace`-sahibi `TCB` yuvaları yalnızca `cspace_destroy_object -> release_dead_tcb_slot` sonrasında serbest kalır (`R-02`).
-  4. `sched/preempt.rs` & `apic.rs`: `pcpu.timer_needs_rearm` bayrağı yalnızca gerçek timer IRQ'sunda `true` yapılır; gönüllü bloklanma/`yield` yoluna koşulsuz APIC `wrmsr` eklemek IPC gecikmesini `12x` bozar.
-  5. `vspace/tlb.rs`: `CDT_LOCK -> VSpace::lock -> TLB_REQ_LOCK` ve `Endpoint::lock -> DONATE_LOCK` kilit sırasını bozma; `CLI` altında dönen her bekleme döngüsünde `poll_and_ack_pending_shootdown` çağrısını koru.
-
-### 6.6. `16 KiB` Çekirdek Yığını Bütçesi ve `Pass v1`'de Yakalanan Stack Problemi (`R-11`)
-- Her CPU önyükleme/idle yığını ve her worker TCB yığını `.bss` içinde sabit **`16.384 B` (`16 KiB`)** boyutundadır (henüz sanal koruma sayfası yoktur; tabanda 8-bayt kanarya bulunur).
-- **Yakalanan Gerçek Taşma:** `Optimization Pass v1` sırasında `verify_cpu_stack_canaries_fast`, LLVM'in `proc/bench.rs::run_stage_g_benchmarks` (`8.192 B` örneklem dizileri) fonksiyonunu `verify_userspace_and_syscalls` içine satır-içi (*inline*) gömmesi sonucunda `bsp_kmain (5.448 B) + verify_userspace_and_syscalls (8.192 B) + verify_stage_f (1.224 B) + on_process_terminating ([WakeBatchItem; 64] = 1.816 B) = 16.680 B > 16.384 B` yığın taşmasını yakaladı.
-- **Çözüm ve Zorunlu Kural:** Soğuk benchmark/test fonksiyonları `#[inline(never)]` ile izole edilerek çerçeve `8.192 B -> 488 B` boyutuna indirildi (`+7.704 B` tavan boşluğu). **Yarın yeni kod yazarken:** Çekirdek yığınında `>= 1 KiB` dizi/tampon ayırma (per-CPU statik veya nesne havuzu kullan), soğuk öz-test fonksiyonlarını `#[inline(never)]` işaretle, `soft-float` derleme bayraklarını FPU `XSAVE` eklenene dek koru ve Faz 2'de çekirdek yığınlarını koruma sayfalı sanal aralıklara taşı.
-
-### 6.7. QEMU/KVM Ölçümü ile Gerçek Donanım (`Bare-Metal`) Farkı (`R-05`, `R-09`)
-- Bu geliştirme makinesi `4C/8T` (`8` donanım izleği) kapasitelidir: `1, 2, 4, 8 vCPU` koşuları gerçek paralelliği yansıtırken `-smp 20` koşusu `2.5x` konak CFS aşırı-aboneliğidir (vCPU zamanlayıcı kuyruklanması içerir; fiziksel 20 çekirdek ölçeklemesini kanıtlamaz).
-- KVM içindeki sanal APIC MSR yakalamaları, EPT TLB davranışı ve emüle GOP/IOMMU gecikmeleri gerçek silikon davranışından farklıdır. **DRY mikroçekirdeğinin Linux'tan hızlı olduğu henüz kanıtlanmamıştır;** bu iddia yalnızca `P5` aşamasında özdeş fiziksel donanımda adil A/B testleriyle sınanacaktır.
-
-### 6.8. 12 Kasım 2026 Sabahı Başlanacak Gerçekçi İlk Teknik İş (`P1 — Dilim 1 / Milestone 2A-1`)
-Tek adımda tüm terminali veya masaüstünü yazmaya çalışma; **`P1` (Etkileşimli DRY OS)** hedefinin ilk uçtan uca çalışan dilimi olan **"Donanım IRQ -> `Notification` Köprüsü + Ring 3 `PS/2 i8042` Klavye Sürücüsü (`dry-input.elf`)"** işiyle başla:
-1. **Ring 0 `IOAPIC` + `IrqCap` (`kernel/src/ioapic.rs`, `idt.rs`, `cspace/objects.rs`):** IOAPIC MMIO eşlemesi (`ReservedOrMmio`), harici IRQ vektör kapısı (`0x20..0x3F`), kesme anında hattı maskeleyip (`IRQF_ONESHOT`) bağlı `Notification` nesnesine bloklanmadan `notif_signal` tetikleyen işleyici ve `SYS_IRQ_BIND` / `SYS_IRQ_ACK` çağrıları.
-2. **Kısıtlı Donanım Erişim Yetkisi (`CapObjectKind::IoPort`):** Rastgele `IOPL=3` açmadan, yalnızca yetkili port aralığına (`0x60`/`0x64` `i8042`) izin veren çekirdek aracılı güvenli port okuma/yazma çağrısı.
-3. **Ring 3 `dry-input.elf` (`SecDomain::RootSystem`) + Otomatik Test:** `SYS_NOTIFY_WAIT` ile IRQ bekleyen, tarama kodunu (`scancode`) `KeyEvent` yapısına çevirip IPC `Endpoint` üzerinden aboneye ileten sürücü ve `tools/qemu_boot_test.py` içinde QMP `send-key` ile uçtan uca doğrulama senaryosu.
-
-### 6.9. `Input -> IPC -> Ring 3 Shell -> Display` Zinciri İçin Mimari Bağımlılıklar
-```text
-[1. IOAPIC + IrqCap(bind/ack) + IoPortCap]  (Ring 0 — Donanım kesme ve port izolasyonu)
-                    |
-                    v  Notification::signal (IRQ-safe, bloklanmaz)
-[2. dry-input.elf (PS/2 Klavye -> Fare / VirtIO-Input)]  (Ring 3 RootSystem — Scancode -> InputEvent)
-                    |
-                    v  Endpoint IPC (kontrol/tuş) + Paylaşımlı Bellek / IoRing + TCB-Bağlı Notification
-[3. dry-shell.elf / dry-term.elf]  (Ring 3 — Komut satırı düzenleme, yerleşik komutlar, karakter ızgarası)
-                    |
-                    v  SharedPayloadDesc / Frame4K arka tampon + kirli dikdörtgen (dirty_rect) bildirimi
-[4. Sürekli Çalışan dry-display.elf GOP Sunucusu]  (Ring 3 RootSystem — RAM backbuffer -> GOP MMIO toplu aktarım)
-```
-- **Kritik Bağımlılık Notu:** Doğrudan `WC/UC` GOP MMIO belleğine karakter başına tek-piksel yazmak yavaştır; etkileşimli terminal (`P1`) ve compositor (`P2`) aşamasında çizimler mutlaka normal önbellekli (`WB`) paylaşımlı RAM çerçevesinde yapılıp yalnızca değişen dikdörtgenler (`dirty_rect`) GOP MMIO'ya toplu kopyalanmalıdır.
-
-### 6.10. Teknik Roadmap (`ROADMAP.md`) ile Ürün Roadmap (`docs/PRODUCT_ROADMAP.md`) İlişkisi
-- `Faz 0` + `Faz 1` (`Milestone 1A..1C` + `Opt Pass v1`) = **`P0` Mikroçekirdek Temeli (`DONE` — QEMU `56/56`)**
-- `Faz 2 — Milestone 2A` + `2B` çekirdeği = **`P1` Etkileşimli DRY OS (`PLANNED` — 12 Kasım sabahı başlangıç)**
-- `Faz 2 — Milestone 2B/2C` + Ring 3 UI servisleri = **`P2` `DRY Desktop` Alpha/Beta (`PLANNED` — `docs/DRY_DESKTOP_SPEC.md`)**
-- `Faz 3` (Linux ELF + `H2` Sürücü Adaları) & `Faz 5` (Seçilmiş Win32) = **`P3` Linux & Windows Uyumluluğu (`PLANNED`)**
-- `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) = **`P4` Paketleme ve Dağıtım (`PLANNED`)**
-- `Faz 4` (Bare-Metal, Fiziksel IOMMU, Linux A/B, `>=72s` Soak/Fuzz) = **`P5` Production Readiness (`PLANNED`)**
-
-### 6.11. Tamamlanmamış Özelliklerin Açık Listesi (`PLANNED` — Hiçbiri Tamamlanmış Gösterilmez)
-1. **Donanım Girdi & Etkileşim (`P1`):** IOAPIC/MSI-X IRQ yönlendirme (`dry_irq_ctrl`), `PS/2` ve `VirtIO-Input` klavye/fare sürücüleri, IPC üzerinden etkileşimli Ring 3 terminal/kabuk, çift-tamponlu sürekli ekran sunucusu.
-2. **Çekirdek Faz 2 İlkelleri (`P1/P2`):** `CapObjectKind::IoRing` paylaşımlı bellek veri düzlemi, `TCB`-bağlı `Notification`, `FaultEndpoint` userspace pager, dinamik ELF/`mmap`, FPU/SIMD (`XSAVEOPT`/`XRSTOR`) bağlam izolasyonu, koruma sayfalı sanal çekirdek yığınları ve `Optimization Pass v2` (`PCID/INVPCID`, doğrudan IPC switch, `TSC-Deadline`).
-3. **Güvenlik, Depolama ve Ağ Servisleri (`P1/P2`):** Ring 3 `DRY Vault`, `Policy Broker`, `ADR-007` etiketli `VFS` (`INV-SEC-05`), native `VirtIO-Blk`, `VirtIO-Net`, `VirtIO-GPU` ve `NVMe` sürücüleri.
-4. **Masaüstü, Açılış ve Oturum (`P2`):** Ring 3 hibrit compositor (`Floating`/`Tiling`/`Stacking`/`Tabbed`), `DRY Shell` üst bar ve `Compact UI`, ortak `Action API`, `Clean/Diagnostic Boot` (`Esc` geçişli), `DRY Login` ve ayrı `DRY PassVault` parola kasası, temel sistem uygulamaları.
-5. **Uyumluluk, Paketleme ve Üretim (`P3..P5`):** Linux ELF/ABI personality, `H2` sürücü adalarının çekirdeğe bağlanması, seçilmiş Windows PE/Win32 katmanı, `drypkg` + `DRY Store`, `DRY Desktop` / `DRY Server` kurulum profilleri, gerçek fiziksel donanım (`bare-metal`) + USB live boot + fiziksel IOMMU doğrulaması ve adil Linux A/B benchmarkları.
+### 6.2. Sıradaki Somut Mühendislik Görevi (`Milestone 2A-2`)
+1. **`TCB`-Bağlı `Notification` (`seL4 MCS` birleşik sunucu beklemesi):** Tek iş parçacıklı Ring 3 sürücü ve compositor servislerinin `SYS_IPC_REPLY_RECV` içinde zaman aşımı yoklaması yapmadan hem `Endpoint` RPC'lerini hem `IrqCap`/`IoRing` bildirimlerini sıfır gecikmeyle beklemesi.
+2. **`PS/2 AUX` (`IRQ12` -> `GSI 12`) Fare & `VirtIO-Input` Arka Ucu + İmleç / Sürükleme:** `dry-input` içine ikinci `IrqCap` (`IRQ12`) veya PCI `VirtIO-Input` arka ucu ekleyerek gerçek fare imlecini ve pencere başlık çubuğundan sürükleyerek taşımayı devreye almak; eşzamanlı olarak `KeymapLayout::TurkishQ` ve Latin-5/UTF-8 glif sayfasını tamamlamak.
+3. **`CapObjectKind::IoRing` ve FPU/SIMD `XSAVEOPT`:** Yüksek frekanslı girdi/ekran/depolama halkaları ve zengin kullanıcı alanı çizimi için çekirdek veri düzlemi ve FPU bağlam izolasyonunu tamamlamak.

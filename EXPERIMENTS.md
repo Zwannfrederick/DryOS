@@ -1,6 +1,6 @@
 # DRY OS — Faz 0 Doğrulama ve Fizibilite Deney Raporu (`H1` & `H2`)
 
-> **Son Güncelleme:** 11 Kasım 2026  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Eklendi)  
 > **Durum:** **Bölüm A (`H1` Scheduler Doğrulaması) ve Bölüm B (`H2` Linux Driver Island Fizibilite Deneyi) TAMAMLANDI ve DOĞRULANDI (`[DOĞRULANDI]`).** Fiziksel silikon IOMMU güvenlik izolasyonu açık sınır olarak Faz 3/4 bare-metal aşamasına ayrılmıştır.
 
 ---
@@ -802,3 +802,51 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 3. **`IA32_TSC_DEADLINE` MSR (`0x6E0`) + Tickless Boşta Kalma (`NO_HZ`):** `tsc_dl=1` donanımında APIC bölücü sayacı yerine doğrudan TSC son-tarih yazımı ve boşta çekirdeklerde sıfır periyodik kesme sağlar.
 4. **`PMM` Arka-Plan / Toplu Sıfırlama ve Kilit Bölümleme (`alloc_p50 = 426 cyc`, `zero_4k = 141 cyc`):** Ön-sıfırlanmış şarjör (*magazine*) havuzu ve çok-bölgeli kilit bölümlemesiyle `20-vCPU` şarjör ıskası çekişmesini düşürür.
 5. **Yıkım Yollarındaki `[WakeBatchItem; 64]` Yığın Dizilerinin Statik/Per-CPU Kazıma Alanına Taşınması:** `on_process_terminating` ve `destroy_endpoint` yığın çerçevelerini `~1.8 KiB -> <128 B` seviyesine indirir.
+
+---
+
+## Bölüm L — Faz 2 `Milestone 2A-1` (`P1 First Interaction`): `IrqCap`/`IoPortCap`, `IoApicHwCache` Optimizasyonu ve Gerçek QMP Klavye -> Kabuk -> GOP Ölçümleri
+
+- **Tarih:** 12 Kasım 2026
+- **Kapsam:** ACPI MADT üzerinden `IOAPIC` + `Interrupt Source Override` keşfi (`acpi.rs`), `IrqCap` (`0x30..=0x3F` One-Shot maskeleme + fırtına kelepçesi + `IoApicHwCache`), dar `IoPortCap` (`IOPL=0`), Ring 3 `dry-input.elf` (`PS/2 i8042` `IRQ1`), izole `Userspace` `dry-shell.elf` ve çift-tamponlu (`Order2MiB` WB RAM backbuffer + `DirtyRegion`) `dry-display.elf` GOP compositor.
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  # Yalnızca P1 donanım QMP send-key, screendump ve negatif güvenlik testleri (9/9)
+  python3 tools/qemu_boot_test.py --p1-only
+
+  # Tam regresyon + P1 paketi (56 eski + 9 yeni = 65/65)
+  python3 tools/qemu_boot_test.py
+  ```
+
+### L.1. `IoApicHwCache` Önce / Sonra Kesme ve Port G/Ç Döngü Ölçümleri (`~3.111 MHz` TSC, `64` Örneklem)
+
+İlk çalışan tabanda (`Baseline`) her `handle_external_irq` ve `SYS_IRQ_ACK` çağrısı `IOAPIC` MMIO sanal adresini çözmek için sayfa tablosu/spinlock yolu üzerinden tam `write_redir_entry` (2x `IOREGSEL` + 2x `IOWIN`) yürütüyordu. `IoApicHwCache` ile `IOREGSEL`/`IOWIN` adresleri ve her `GSI` hattının maskeli/açık alt 32-bit kelimeleri önbelleklendikten sonra (`1` x `IOREGSEL` + `1` x `IOWIN`, sıfır sayfa tablosu yürüyüşü):
+
+| Metrik (`p50 / p95 / p99` döngü) | Baseline (`2 vCPU` KVM) | Optimized (`IoApicHwCache`, `2 vCPU`) | `1 / 4 / 8 / 20* vCPU` (`p50`) | Kazanç (`2 vCPU p50`) |
+| :--- | :---: | :---: | :---: | :---: |
+| `irq_top` (Üst-yarı maske + `EOI` + `notif_signal`) | `30.292 / — / —` | **`13.014 / 19.942 / 20.799`** | `12.690 / 13.840 / 14.985 / 15.610` | **`-%57.0` (`2.33x`)** |
+| `irq_ack` (`SYS_IRQ_ACK` + `IOAPIC` unmask) | `24.867 / — / —` | **`7.788 / 12.865 / 20.256`** | `7.510 / 8.420 / 9.175 / 9.880` | **`-%68.7` (`3.19x`)** |
+| `irq_wake` (Uçtan uca IRQ -> `Notification` uyanışı) | `33.433 / — / —` | **`15.981 / 31.401 / 37.762`** | `15.420 / 17.350 / 19.197 / 21.400` | **`-%52.2` (`2.09x`)** |
+| `ioport_inb` (`CPL=3 SYS_IOPORT_RW` `0x64` okuma) | `8.618 / 9.037 / 14.542` | **`8.618 / 9.037 / 14.542`** | `8.490 / 9.120 / 9.819 / 10.240` | KVM PIO VM-exit sınırı |
+| `null_sys` & `call_reply` (Regresyon kontrolü) | `231` & `4.876..6.381` | **`231` & `4.621..6.381`** | Korundu (`0` regresyon) | Sıcak yol korundu |
+
+- **20-vCPU Ölçüm Sınırı (`*`):** `4C/8T` konakta `-smp 20` koşusu `2.5x` konak CFS aşırı-aboneliğidir; eşzamanlı `IrqCap`/`revoke` doğruluğunu kanıtlar, fiziksel 20 çekirdek ölçeklenebilirliği kanıtı olarak yorumlanmaz.
+
+### L.2. Ring 3 Çift-Tamponlu `DirtyRegion` GOP Aktarımı ve Çekirdek Yığın Denetimi
+
+| Ölçüm / Sembol | Değer (`1 / 2 / 4 vCPU`) | Mimari Açıklama |
+| :--- | :---: | :--- |
+| Tek-satır tuş vuruşu (`ROW_PRESENT`, `640x16 = 10.240 px`) | **`15.294 .. 18.478 cyc` (`~4.9 .. 5.9 µs`)** | Yalnızca aktif komut satırı (`dirty_row_min == dirty_row_max`) GOP MMIO'ya 64-bit kopyalanır (**`29x` daha hızlı**). |
+| Tam pencere güncellemesi (`PRESENT`, `276.224 px`) | **`449.164 .. 538.855 cyc` (`~144 .. 173 µs`)** | Kaydırma / `Enter` sonrası 24 satır + başlık çubuğu (`Order2MiB` WB RAM -> GOP MMIO). |
+| Floating pencere taşıma (`WIN_MOVE`, eski $\cup$ yeni kutu) | **`547.541 .. 1.044.639 cyc` (`~176 .. 336 µs`)** | `Alt + Sağ` / `Alt + Aşağı` sonrası arka plan onarımı + yeni pencere birleşik dikdörtgeni. |
+| `rust_syscall_dispatch` / `sys_cold_dispatch` / `sys_irq_ack` | **`248 B` / `216 B` / `40 B`** (`objdump -d`) | 6 yeni P1 sistem çağrısı (`20..=25`) sıcak syscall yığın çerçevesini **`0 bayt`** büyüttü (`16 KiB` bütçe korundu). |
+
+### L.3. Doğrulanan `9/9` Yeni P1 Senaryosu (`Toplam 65/65` QEMU Testi) ve Yakalanıp Düzeltilen Gerçek Hatalar
+
+- **Donanım QMP `send-key` & `screendump` Senaryoları (`5/5`, `exit=33`, `leaked_frames=0`):** `p1_interactive_1cpu_e2e`, `p1_interactive_2cpu_e2e` (`typing_px_diff = 24.272`, `move_px_diff = 122.499`, `docs/p1_interactive_shell.png`), `p1_interactive_4cpu_e2e`, `p1_interactive_2cpu_headless_e2e` (`-vga none`), `p1_interactive_2cpu_xapic_e2e` (`apic_mode=xapic`). Gerçek sanal klavye üzerinden `help`, `echo dry os`, `Backspace` (`echx\bo edit ok` -> `edit ok`), canlı `system` & `uptime`, geçersiz komut (`nosuchcmd`), 64-olay taşma testi (`retained=64 dropped=16`), canlı `dry-input` `#UD` çöküşü + `CSpace` `revoke` + yeniden başlatma + `echo recovered`, `Alt+Ok` pencere taşıma ve temiz `shutdown` doğrulandı.
+- **Negatif Güvenlik Senaryoları (`4/4` `exit=35` + `3` çekirdek içi yarış öz-testi):** `irq_unauth_ioport_rejected` (port `0x61`/`0xCF8` reddi), `irq_unauth_ack_rejected` (`Userspace` delege/ack reddi), `irq_double_ack_rejected` (`-EALREADY`), `irq_display_cap_leak_rejected` (`TransferEscalation`), ayrıca önyükleme öz-testinde `storm_clamped=1`, `revoke_race_ok=true` ve `lost_wakeups=0`.
+- **Geliştirme Sırasında Yakalanıp Düzeltilen 3 Gerçek Bulgu (Gizlenen Hata = `0`):**
+  1. **Limine Base Rev 3 Eşlenmemiş `ACPI_NVS` RSDP `#PF`:** Limine Base Revision 3, HHDM içinde `ACPI_NVS` bölgelerini eşlemediği için doğrudan `hhdm + rsdp_phys` okuması `#PF` üretti -> `acpi.rs` içinde `PML4[384]` üzerinde geçici `RO + NX` 3-sayfalık pencere + `INVLPG` sökümü ile çözüldü.
+  2. **KVM Kesme Fırtınası Penceresi Kalibrasyonu:** `264` ardışık KVM PIO/IPI kesmesi `2.000.000` TSC döngüsünden uzun sürdüğü için fırtına penceresi `64.000.000` TSC (`~20 ms`) değerine kalibre edildi.
+  3. **Görsel `screendump` Denetiminde Yakalanan 3 Telemetri Etiketi Hatası:** `docs/p1_interactive_shell.png` piksel incelemesinde `ApicMode` (`1=x2APIC-MSR`, `2=xAPIC-MMIO`) sıra tersliği, geri kazanılan `BOOTLOADER_RECLAIMABLE` RAM toplamı (`238/244 MiB`) ve pencere taşıma sırasında `IRQ` rozetinin sıfırlanması yakalanıp düzeltildi.
+
