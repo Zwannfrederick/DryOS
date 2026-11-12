@@ -1,6 +1,6 @@
 # DRY OS — Ürün Vizyonu, Kurulum Profilleri ve Ürün Yol Haritası (`P0` – `P5`)
 
-> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2A-2` / `DRY Desktop Preview` Güncellemesi)  
+> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2A-3` / `Functional Desktop Foundation` Güncellemesi)  
 > **Başlangıç Referansları:** `Milestone 1C` (`1df3842e3ff1676c46349f072c623836a56f846a`) & `Low-Level Optimization Pass v1` (`69522a3482d3000dc796a6717446dbc8bb1cb25e`)  
 > **Durum Sözleşmesi:** Bu belgedeki her hedef açıkça **`DONE`**, **`IN PROGRESS`**, **`PLANNED`** veya **`BLOCKED`** olarak işaretlenmiştir. `ROADMAP.md` içindeki mevcut teknik milestone numaraları (`Faz 0..5`, `Milestone 1A..1C`) değiştirilmeden korunmuş ve Bölüm 3'te ürün aşamalarıyla eşlenmiştir.
 
@@ -40,8 +40,8 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 | Ürün Aşaması | Durum | Eşleşen Teknik Milestone (`ROADMAP.md`) | Temel Çıktı ve Doğrulama Kapısı |
 | :--- | :---: | :--- | :--- |
 | **`P0` — Mikroçekirdek Temeli** | **`DONE` (QEMU `56/56`)** | `Faz 0` (`H1`, `H2`), `Milestone 1A`, `1B-A..1B-D`, `1C` (`1df3842`), `Opt Pass v1` (`69522a3`) | SMP (`1..20 vCPU`), `H1`, `PMM`, `VSpace`, `CSpace`/`ADR-007`, Ring 3 ELF64, IPC, kök servisler ve ilk Ring 3 GOP ekranı |
-| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1` & `2A-2`: `DONE`, `79/79` QEMU)* | `Faz 2 — Milestone 2A-1` & `2A-2` (`DONE`) + `2A-3` & `2B` (`PLANNED`) | PS/2 klavye (`IRQ1`) + PS/2 fare (`IRQ12`), `dry-input` -> IPC -> `dry-shell` & `dry-sysmon` -> dinamik GOP ekranı (`DONE`); USB HID, `IoRing`, `VFS` (`PLANNED`) |
-| **`P2` — DRY Desktop Alpha/Beta** | **`IN PROGRESS`** *(Preview Dilimi `Milestone 2A-2`: `DONE`, `79/79` QEMU)* | `Faz 2 — Milestone 2A-2` (`DONE`) + `2B/2C` + Ring 3 UI servisleri (`PLANNED`) | Yazılımsal imleç, çok-pencereli Ring 3 `Floating`/`SideBySideTiled` WM + 2 izole pencere (`DONE`); `Stacking/Tabbed`, `Action API`, `Clean/Diagnostic Boot`, Login (`PLANNED`) |
+| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1..2A-3`: `DONE`, `85/85` QEMU + `5/5` Matris)* | `Faz 2 — Milestone 2A-1..2A-3` (`DONE`) + `2A-4` & `2B` (`PLANNED`) | PS/2 klavye (`UsQwerty`+`TurkishQ`) + IntelliMouse tekerlekli fare, Ring 3 `dry-vfs` (`/boot`+`/ram`), `dry-power` (ACPI S5/Reset + `HLT`) (`DONE`); USB HID, `IoRing`, kalıcı disk `VFS` (`PLANNED`) |
+| **`P2` — DRY Desktop Alpha/Beta** | **`IN PROGRESS`** *(İşlevsel Masaüstü Temeli `Milestone 2A-3`: `DONE`, `85/85` QEMU)* | `Faz 2 — Milestone 2A-2` & `2A-3` (`DONE`) + `2A-4/2B/2C` (`PLANNED`) | `Floating`/`SideBySideTiled`/`Stacked`/`Tabbed` WM, `DialogTransient`, `DesktopAction`, `Launcher` + 4 yerel uygulama (`Terminal`, `Life Station`, `Files`, `Settings`), `DPMS` & `Session Lock` (`DONE`); `liquid-glass`, `Clean/Diagnostic Boot`, `DRY Vault` Login (`PLANNED`) |
 | **`P3` — Linux & Windows Uyumluluğu** | **`PLANNED`** *(`H2` PoC: `DONE`)* | `Faz 3` (Linux ELF + Sürücü Adaları) & `Faz 5` (Seçilmiş Win32) | Önce Linux ELF/ABI/POSIX/VFS + `H2` sürücü adaları; ardından seçilmiş Windows PE/Win32 uygulamaları |
 | **`P4` — Paketleme ve Dağıtım** | **`PLANNED`** | `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) | Tasarım-öncelikli `drypkg` + `DRY Store`, isteğe bağlı runtime, imzalı paket, `Desktop`/`Server` kurulum profilleri, atomik *rollback* |
 | **`P5` — Production Readiness** | **`PLANNED`** | `Faz 4` (Bare-Metal, IOMMU, Soak, Benchmark) | Gerçek donanım + USB live boot, Desktop/Server iş yükü testleri, adil Linux A/B benchmarkları, 72s+ soak/fuzz ve açık raporlar |
@@ -64,29 +64,29 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P1` — Etkileşimli DRY OS — Durum: `IN PROGRESS` *(`Milestone 2A-1` & `2A-2`: `DONE` — `79/79` QEMU; Kalan Cihaz/Servis Dilimleri: `PLANNED`)*
+### `P1` — Etkileşimli DRY OS — Durum: `IN PROGRESS` *(`Milestone 2A-1..2A-3`: `DONE` — `85/85` QEMU + `5/5` SMP/RAM Matrisi; Yüksek Bant Veri Düzlemi & Kalıcı Disk: `PLANNED`)*
 
 - **Alt Hedefler (Dürüst Bileşen Durumu):**
-  - Donanım IRQ yönlendirme ilkeli (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoApicHwCache`: ACPI MADT `IOAPIC`/ISA `IRQ1`+`IRQ12` -> `Notification`, tek sahip + `IRQF_ONESHOT` mask/ack + fırtına kelepçesi) ve dar `IoPortCap` (`IOPL=0`): **`DONE` (`IOAPIC`/ISA)** / **`PLANNED` (`MSI-X`)**
-  - Gerçek klavye girdisi (QEMU `PS/2 i8042` `IRQ1` -> Ring 3 `dry-input.elf`, US QWERTY + `0xE0` + 64-olay taşma koruması; `TurkishQ` genişletme arayüzü tanımlı): **`DONE` (`PS/2` US QWERTY)** / **`PLANNED` (`VirtIO-Input`, USB HID, `TurkishQ` tablosu)**
-  - Fare / işaretçi girdisi (Tek `i8042` sahibi `dry-input.elf` içinde gerçek `PS/2 AUX` `IRQ12` sürücüsü, 3-bayt senkron kilidi, `MouseMove`/`MouseButtonDown`/`MouseButtonUp` ve `12x16` kirli-dikdörtgen yazılımsal imleç): **`DONE` (`PS/2 AUX`)** / **`PLANNED` (`VirtIO-Input`, USB `xHCI` HID)**
-  - Capability IPC üzerinden çalışan izole Ring 3 interaktif terminal (`dry-shell.elf`, `0x0102`) ve canlı sistem izleyicisi (`dry-sysmon.elf`, `0x0103`, sıfır donanım/FB yetkisi): **`DONE`**
-  - Canlı tuş/fare girdisi -> `4 MiB` (`2 x Frame2M` WB) + `DirtyRegion` GOP ekran güncellemesi, başlık çubuğu sürükleme, odak/Z-sırası, `SideBySideTiled` düzen ve QMP `screendump` piksel kanıtları (`docs/p1_interactive_shell.png`, `docs/p2_desktop_preview.png`): **`DONE`**
-  - Temel donanım/sistem servisleri (`IoRing` paylaşımlı bellek veri düzlemi, `TCB`-bağlı `Notification`, `FaultEndpoint`, FPU `XSAVEOPT` ve başlangıç etiketli `VFS`): **`PLANNED` (`Milestone 2A-3` / `2B`)**
-- **Bağımlılıklar:** `P0` (`DONE`); `Milestone 2A-1` & `2A-2` klavye/fare/WM/ekran zinciri tamamlandı; yüksek bant genişlikli veri düzlemi ve VFS `Milestone 2A-3`/`2B`'ye bağlıdır.
-- **Azaltılan & Açık Riskler:** `IRQF_ONESHOT` fırtına kelepçesi (`R-14`), birleşik `i8042` + sıfır-UB atomik yüzey + `4 MiB` arka tampon denetimi (`R-15`), `DirtyRegion` imleç aktarımı (`92 px = ~10.9k cyc`, `R-12`) ve `248 B` sıcak syscall yığın bütçesi (`R-11`) `79/79` QEMU testiyle doğrulandı.
+  - Donanım IRQ yönlendirme ilkeli (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoApicHwCache`), dar `IoPortCap` (`IOPL=0`) ve yetenek-kapılı donanım güç kontrolü (`CapObjectKind::PowerCtrl` + `SYS_POWER_CTL`: ACPI S5 kapanış, FADT yeniden başlatma, yarışsız `sti; hlt` + `VEC_RESCHED_WAKE`): **`DONE` (`IOAPIC`/ISA/ACPI S5/Reset)** / **`PLANNED` (`MSI-X`, gerçek-mod `ACPI S3` uyanma trampolini)**
+  - Gerçek klavye girdisi (QEMU `PS/2 i8042` `IRQ1` -> Ring 3 `dry-input.elf`, canlı `UsQwerty` + `TurkishQ` haritaları, `0xE0` navigasyon ve 64-olay taşma koruması): **`DONE` (`PS/2` `UsQwerty` + `TurkishQ`)** / **`PLANNED` (`VirtIO-Input`, USB HID)**
+  - Fare / işaretçi girdisi (Tek `i8042` sahibi `dry-input.elf` içinde PS/2 IntelliMouse 4-bayt tekerlek protokolü, `MouseMove`/`MouseButtonDown`/`MouseButtonUp`/`MouseScroll`, imleç hız çarpanı ve `1x`/`2x` yazılımsal imleç): **`DONE` (`PS/2 AUX + IntelliMouse`)** / **`PLANNED` (`VirtIO-Input`, USB `xHCI` HID)**
+  - İzole Ring 3 dosya sistemi temeli (`dry-vfs.elf`: salt-okunur `/boot` modül envanteri + kompartman-yalıtımlı uçucu `/ram`): **`DONE` (Uçucu `/ram` + RO `/boot`)** / **`PLANNED` (Kalıcı NVMe/`VirtIO-Blk` arka ucu — `Milestone 2B/2C`)**
+  - Canlı tuş/fare girdisi -> `4 MiB` (`2 x Frame2M` WB) + `DirtyRegion` GOP ekran güncellemesi ve `1/2/4/8/20 vCPU` & `256M..2G` RAM donanım matrisi doğrulaması: **`DONE`**
+  - Yüksek bant genişlikli veri düzlemi (`IoRing`, `TCB`-bağlı `Notification`, `FaultEndpoint`, FPU `XSAVEOPT`): **`PLANNED` (`Milestone 2A-4`)**
+- **Bağımlılıklar:** `P0` (`DONE`); `Milestone 2A-1..2A-3` etkileşim, dosya sistemi temeli ve güç yaşam döngüsü tamamlandı; sıfır-kopyalı piksel/blok halkaları `Milestone 2A-4`/`2B`'ye bağlıdır.
+- **Azaltılan & Açık Riskler:** `IRQF_ONESHOT` fırtına kelepçesi (`R-14`), birleşik `i8042` + sıfır-UB atomik yüzey (`R-15`), `248 B` sıcak syscall yığın bütçesi (`R-11`) ve dürüst oturum kilidi / uçucu `/ram` / `S3` sınırları (`R-16`) `85/85` QEMU testiyle doğrulandı.
 
 ---
 
-### `P2` — `DRY Desktop` Alpha/Beta — Durum: `IN PROGRESS` *(Preview Dilimi `Milestone 2A-2`: `DONE`; Tam Masaüstü: `PLANNED` — `docs/DRY_DESKTOP_SPEC.md`)*
+### `P2` — `DRY Desktop` Alpha/Beta — Durum: `IN PROGRESS` *(İşlevsel Masaüstü Temeli `Milestone 2A-3`: `DONE` — `85/85` QEMU; Görsel `liquid-glass` & Kimlik Doğrulamalı Login: `PLANNED` — `docs/DRY_DESKTOP_SPEC.md`)*
 
 - **Alt Hedefler:**
-  - Birleşik Ring 3 Display & Input servisi ve sıfır-UB atomik `SharedWindowSurface` (`Frame4K`) önizlemesi **`DONE`**; piksel-tamponlu `IoRing` + `SharedPayloadDesc` yüzeyleri: **`PLANNED`**
-  - Tek Ring 3 Compositor üzerinde **varsayılan Floating** + tek tık **2-Sütun `SideBySideTiled`** (`Alt+T` / üst bar) önizlemesi **`DONE`**; tam dinamik ağaç + **Stacking / Tabbed** + transient diyalog kuralları: **`PLANNED`**
-  - `DRY Shell`: önizleme üst sistem çubuğu (`MODE`, `FOCUS`, `WINS`) **`DONE`**; tam `liquid-glass` bar, global arama, aktif uygulama menüleri, koyu/açık tema, **Normal**/**Compact UI** yoğunluğu: **`PLANNED`**
-  - Fare, klavye kısayolları, bağlam menüleri ve komut paletini birleştiren ortak **`Action API`**: **`PLANNED`**
-  - Tek olay akışlı **`Clean Boot`** (varsayılan) ve **`Diagnostic Boot`** (`Esc` ile canlı geçiş, sıfır sahte yüzde) + parola kasasından ayrılmış **`DRY Login` / Authentication Manager**: **`PLANNED`**
-  - Kullanılabilir temel sistem uygulamaları: Terminal (`dry-shell`) ve Sistem İzleyici (`dry-sysmon`) önizlemeleri **`DONE`**; Dosya Gezgini ve Ayarlar: **`PLANNED`**
+  - Birleşik Ring 3 Display & Input servisi ve sıfır-UB atomik `SharedWindowSurface` (`Frame4K`) **`DONE`**; piksel-tamponlu `IoRing` + `SharedPayloadDesc` yüzeyleri: **`PLANNED` (`Milestone 2A-4`)**
+  - Tek Ring 3 Compositor üzerinde **varsayılan `Floating`** + tek komutla **`SideBySideTiled` / `Stacked` / `Tabbed`** + arka düzeni bozmayan **`WindowRole::DialogTransient`** pencereler: **`DONE`** (tam dinamik ikili bölme ağacı: **`PLANNED`**)
+  - `DRY Shell`: üst sistem çubuğu (`Launcher` `[1:Term]..[4:Set]`, `MODE`, `FOCUS`, `WINS`), `High Contrast` erişilebilirlik teması, `DPMS` ekran karartma ve `Session Lock` kalkanı **`DONE`**; nihai `liquid-glass` estetiği, animasyonlar, global menü ve arama: **`PLANNED` (`Milestone 2A-4`)**
+  - Fare, klavye kısayolları ve üst çubuğu birleştiren ortak **`Action API` (`DesktopAction`)**: **`DONE` (Çekirdek masaüstü eylemleri)** / **`PLANNED` (Bağlam menüleri & komut paleti)**
+  - Tek olay akışlı **`Clean Boot`** ve **`Diagnostic Boot`** + `DRY Vault` kimlik doğrulamalı **`DRY Login`** (mevcut oturum kalkanı dürüstçe `UNAUTHENTICATED LOCK SHIELD` olarak etiketlenmiştir): **`PLANNED` (`Milestone 2B`)**
+  - Kullanılabilir 4 yerel sistem uygulaması ve `Launcher`: **`Terminal`** (`dry-shell`), **`Life Station`** (`dry-sysmon`), **`Files`** (`dry-files`) ve **`Settings`** (`dry-settings`): **`DONE`**
 - **Bağımlılıklar:** `P1` (`Input + IoRing + VFS`), kullanıcı alanında kayan nokta/vektör çizimi için çekirdek FPU/SIMD (`XSAVEOPT`/`XRSTOR`) bağlam değişimi ve `DRY Vault` oturum kiralaması.
 - **Teknik Riskler:** Yazılımsal GOP kipinde bulanıklık/alfa karışımı maliyeti (`R-12` — donanım *fallback* zorunlu); pencere kuralları ve odak yönetiminde durum karmaşıklığı.
 

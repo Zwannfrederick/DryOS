@@ -164,7 +164,7 @@
 
 ## ADR-009: `DRY Desktop` / `DRY Shell` Pencere Yönetimi, Görsel Mimari ve Ortak `Action API`
 
-- **Durum:** Kabul Edildi — İlk Dilim (`Floating` + 2-Sütun `Tiling` + Yazılımsal İmleç + 2 İzole Uygulama) `Milestone 2A-2` ile Uygulandı (`DONE — 79/79` QEMU/KVM); Tam `Stacking/Tabbed`, `Global Menu` ve `Action API` (`PLANNED — P2`; detaylar: `docs/DRY_DESKTOP_SPEC.md`)
+- **Durum:** Kabul Edildi — İşlevsel Temel (`Floating` + `SideBySideTiled` + `Stacked` + `Tabbed`, `DialogTransient`, `DesktopAction` `Action API`, `Launcher` + 4 Yerel Uygulama) `Milestone 2A-3` ile Uygulandı (`DONE — 85/85` QEMU/KVM); `liquid-glass` Görsel Efektler, Global Menü ve Komut Paleti (`PLANNED — P2`; detaylar: `docs/DRY_DESKTOP_SPEC.md`)
 - **Bağlam:** Mevcut masaüstü ortamları genellikle klavye-odaklı hız (tiling WM'ler) ile keşfedilebilirlik/rahatlık (geleneksel masaüstleri) arasında kullanıcıyı ikili bir seçime zorlar; görsel efektler ise ya düşük donanımı ezer ya da çekirdek/sürücü katmanına sızar.
 - **Karar:**
   1. **Özgün Birleşik Tasarım Dili:** `DRY Shell`; Hyprland'in dinamik döşeme (*tiling*), çalışma alanı ve klavye hakimiyetini; KDE Plasma'nın zengin özelleştirme ve pencere kurallarını; macOS/GNOME çizgisinin tutarlı menü, global arama ve sadeliğini doğrudan kopyalamadan DRY OS'ye özgü tek bir tasarım dilinde birleştirir.
@@ -266,3 +266,28 @@
 
 
 
+---
+
+## ADR-014: Birleşik Uygulama Yaşam Döngüsü, İzole Ring 3 `dry-vfs` (`RO /boot` + Uçucu `/ram`) ve Yetenek-Kapılı Güç/Oturum Mimarisi (`dry-power`)
+
+- **Durum:** Kabul Edildi ve `Milestone 2A-3` (`Functional Desktop Foundation, Native Applications & Power Lifecycle`) ile Uygulandı (`85/85` QEMU/KVM + `5/5` SMP/RAM Matrisi, 12 Kasım 2026)
+- **Bağlam:** DRY OS'nin yalnızca grafik bir önizleme olmaktan çıkıp kendi servisleri ve uygulamaları üzerinden kullanılabilen bir işletim sistemine dönüşmesi için (1) birden fazla yerel uygulamanın ortak bir yaşam döngüsüyle açılıp kapatılması ve çöküşlerinin yalıtılması, (2) kalıcı disk sürücüsü henüz yokken dürüst bir dosya sistemi servisi kurulması, (3) masaüstü tercihlerinin (`Floating`/`Tiling`/`Stacked`/`Tabbed`, `UsQwerty`/`TurkishQ`, `High Contrast`, `2x` imleç, DPMS zaman aşımı) canlı uygulanması ve (4) gerçek donanım güç/boşta/oturum durumlarının (`CPU HLT`, `DPMS`, `Session Lock`, `ACPI S5`, `FADT Reset`, `S3` denetimi) yetenek sınırları korunarak yönetilmesi gerekir.
+- **Karar:**
+  1. **Birleşik Uygulama Yaşam Döngüsü, `Launcher` ve Ortak `DesktopAction` (`userspace/src/{action,supervisor}.rs`):**
+     - Tüm masaüstü etkileşimleri (üst çubuk `[1:Term]`..`[4:Set]` hapları, `Alt+1..4`, `Alt+T/S/B`, `Alt+Tab`, `[x]`, `Settings` satırları ve `Terminal` güç komutları) tek tipli `DesktopAction` (`action.rs`) üzerinden `dry-display` ve `dry-init` arasında iletilir; yetkisiz `Userspace` süreçlerinin doğrudan süpervizör aksiyonu basması rozet kontrolüyle reddedilir.
+     - Yerel uygulama kümesi her biri ayrı `VSpace` + `CSpace` + `SecDomain::Userspace` kompartmanında çalışan 4 bağımsız ELF64 ikilisinden oluşur: `dry-shell` (`0x0102`), `dry-sysmon` / `Life Station` (`0x0103`, `SYS_PROC_LIST = 26` ile canlı süreç tablosu), `dry-files` (`0x0104`) ve `dry-settings` (`0x0105` + `WindowRole::DialogTransient` yardım diyaloğu). Çöken uygulama `SYS_PROC_KILL = 27` / `WM_OP_OWNER_REAPED` ile temizlenir ve `Launcher` üzerinden taze süreç olarak yeniden başlatılır.
+  2. **Ring 3 `dry-vfs` (`RootSystem` `0x0004`): Salt-Okunur `/boot` ve Kompartman-Yalıtımlı Uçucu `/ram`:**
+     - Çekirdek içine dosya sistemi eklenmez. `dry-vfs.elf`, Limine modül/önyükleme envanterini `/boot` altında salt-okunur sunar (`create`/`write`/`rename`/`unlink` -> `VFS_ERR_ROFS`) ve yazılabilir alanı `/ram` altında RAM-destekli uçucu düğümlerde tutar (arayüzde `VOLATILE RAM — wiped on reboot/poweroff` uyarısı zorunludur).
+     - Her `/ram` düğümü oluşturan istemcinin çekirdek-damgalı IPC rozetinden türetilen `owner_compartment` değerini taşır; çapraz kompartman okuma/silme/yeniden adlandırma `VFS_ERR_PERM` ile reddedilir.
+  3. **Yetenek-Kapılı Güç Yönetimi (`CapObjectKind::PowerCtrl = 13`, `SYS_POWER_CTL = 28`, `dry-power` `0x0005`):**
+     - Donanım kapanış/yeniden başlatma/uyku kapısı yalnızca `SecDomain::RootSystem` içindeki `dry-power.elf` sürecine verilen tekil `PowerCtrl` capability'si ile açılır; `Userspace` süreçlerinin doğrudan `SYS_POWER_CTL` çağrısı `SysError::Perm (-1)` döner.
+     - **CPU Idle:** Masaüstü oturumunda boşta kalan vCPU'lar `idle_park_or_spin` içinde yarışsız `cli -> kuyruk denetimi -> sti; hlt` ile donanım `HLT` durumuna girer; başka bir CPU'daki `wake_thread` hedef CPU'yu `VEC_RESCHED_WAKE (0xed)` IPI ile anında uyandırır ve `idle_hlt_calls`/`idle_hlt_tsc` gerçek telemetri olarak raporlanır.
+     - **Display Idle (DPMS) vs Session Lock Ayrımı:** `DPMS` (`blank` veya 5 sn hareketsizlik) GOP çerçevesini `0x000000` tam siyaha indirir ve ilk girdiyle anında uyandırır; **Session Lock** (`lock`) ise arka plan uygulamaları çalışmaya devam ederken tüm klavye/fare olaylarını compositor katmanında yutar ve `DRY Vault` kimlik doğrulaması henüz mevcut olmadığından dürüstçe `UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)` etiketiyle çalışır.
+     - **Gerçek ACPI S5 / FADT Reset ve Dürüst S3 (`-ENOSYS`) Sınırı:** `acpi.rs`, `FADT` (`FACP`), `FACS` ve `DSDT` `\_S5_`/`\_S3_` paketlerini doğrular. `Shutdown` tüm Ring 3 süreçlerini kapattıktan sonra `PM1a_CNT_BLK` (`0x604`) portuna `(SLP_TYPa << 10) | SLP_EN` yazar; `Reboot` önce `FADT.RESET_REG` (`0xcf9` <- `0x0f`), yedek olarak `i8042` `0xFE` tetikler. `Suspend-to-RAM (S3)` ise `< 1 MiB` 16-bit gerçek-mod uyanma trampolini, SMP `INIT-SIPI-SIPI` yeniden girişi ve GOP yeniden başlatma zinciri tamamlanana dek sahte ekran karartmasıyla taklit edilmez; açıkça `SysError::NoSys (-38)` döner.
+- **Test Edilebilir Güvenlik Invariant'ları (`INV-APP-01` .. `INV-APP-06`):**
+  1. **`INV-APP-01 (PowerCapRootOnly)`:** `CapObjectKind::PowerCtrl` yalnızca `RootSystem` `dry-power` sürecindedir; yetkisiz `SYS_POWER_CTL` `EPERM` ile reddedilir.
+  2. **`INV-APP-02 (VfsBootReadOnly)`:** `/boot` altındaki tüm mutasyon istekleri (`create`/`write`/`rename`/`unlink`) `EROFS` ile reddedilir.
+  3. **`INV-APP-03 (VfsCompartmentIsolation)`:** Bir `Userspace` kompartmanı başka bir kompartmanın özel `/ram` düğümünü okuyamaz, silemez veya yeniden adlandıramaz.
+  4. **`INV-APP-04 (DialogPreservesTilingTree)`:** `WindowRole::DialogTransient` pencereler `Tiling`/`Stacked`/`Tabbed` kiplerinde dahi her zaman `Floating` kalır ve arka düzeni bozmaz.
+  5. **`INV-APP-05 (LockShieldBlocksAppInput)`:** Oturum kilitliyken hiçbir tuş veya fare olayı arka plandaki uygulama kuyruklarına sızmaz (`lock_blocked` sayacıyla doğrulanır).
+  6. **`INV-APP-06 (HonestS3NoFakeSleep)`:** Donanım uyanma vektörü hazır olmadan `POWER_OP_SUSPEND_S3` ekran karartarak sahte uyku üretmez; deterministik `-ENOSYS` döner.

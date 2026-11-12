@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-2` / `DRY Desktop Preview` Kapanışı)  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2A-3` / `Functional Desktop Foundation` Kapanışı)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -67,6 +67,11 @@
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).
 - **Teknik Mekanizma:** Yabancı uyumluluk çalışma zamanlarının varsayılan kurulumu şişirmesi (`DRY Server` saflığını bozması) veya kararsız paket formatı/gerçekçi olmayan "%100 Windows/Linux uyumu" beklentisi.
 - **Azaltma:** Kodlama öncesi zorunlu paket/ABI tasarım kapısı, isteğe bağlı (*on-demand*) salt-okunur (`READ_ONLY_EXPORT`) runtime kurulumu, kesin öncelik sırası (`Native DRY -> Linux ELF -> Seçilmiş Win32`) ve `DRY Store` üzerinde görünür uyumluluk/kısıtlama rozetleri.
+
+### R-16: Kimlik Doğrulamasız Oturum Kalkanı (`DRY Vault` Öncesi), Uçucu `/ram` Dosya Sistemi ve UEFI `ACPI S3` Uyanma Sınırı (Yeni — 12 Kasım 2026)
+- **Durum:** `BOUNDED BY DESIGN` / `OPEN — Milestone 2B & P5` (`ADR-014`, `85/85` QEMU testiyle sınırı doğrulandı).
+- **Teknik Mekanizma:** (a) `DRY Vault` kimlik doğrulama servisi henüz yokken oturum kilidinin sahte parola ekranıyla güvenlik yanılsaması yaratması; (b) kalıcı blok sürücüsü yokken `/ram` dosyalarının kalıcı sanılması; (c) `< 1 MiB` 16-bit gerçek-mod uyanma trampolini ve SMP/GOP geri yükleme zinciri yokken `Suspend-to-RAM (S3)` işleminin siyah ekranla taklit edilmesi veya sistemi çökertmesi.
+- **Uygulanan Savunma:** (a) Compositor kilit kalkanı tüm uygulama girdilerini engeller (`INV-APP-05`) ancak ekranda açıkça `UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)` uyarısı gösterir; (b) `Files` ve `Terminal` arayüzleri `/ram` alanını açıkça uçucu (*volatile*) olarak etiketler, `/boot` mutasyonlarını `EROFS` ile ve çapraz kompartman erişimlerini `EPERM` ile reddeder (`INV-APP-02`, `INV-APP-03`); (c) `POWER_OP_SUSPEND_S3` sahte uyku yapmaz ve deterministik `-ENOSYS` döner (`INV-APP-06`).
 
 ---
 

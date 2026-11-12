@@ -890,3 +890,20 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
   1. **QEMU `hw/input/ps2.c` 16-Bayt Konak Kuyruğu Sınırı:** Tek bir QMP `input-send-event` ile `> 127 px` (`750 px`) hareket gönderildiğinde QEMU konak PS/2 kuyruğu (`16 B` = en fazla `5` adet 3-baytlık paket) taşarak kalan paketleri düşürdü; QMP adımları `<= 100 px` parçalara bölündüğünde `1:1` piksel doğruluğu sağlandı ve `dry-input` tarafında `desync = 0` korundu.
   2. **Seri Satır Tamponu Kırpılması (`128 B -> 192 B`):** `userspace/src/lib.rs` içindeki `LineBuilder` `128 B` sınırında `[DRY-WM-BENCH]` satırının son metriklerini kırptığı için `192 B` kapasiteye çıkarıldı.
 
+
+---
+
+## Bölüm N — Faz 2 `Milestone 2A-3` (`Functional Desktop Foundation, Native Applications & Power Lifecycle`): Özeti
+
+- **Tarih:** 12 Kasım 2026 (`0da9d9d`, `ce61fea`, `58ccda6`)
+- **Tam Ayrıntılı Tablolar ve ACPI S3 Boşluk Raporu:** [`docs/EXPERIMENTS_2A3.md`](docs/EXPERIMENTS_2A3.md)
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  python3 tools/qemu_boot_test.py --p3-only    # 6/6 Milestone 2A-3 E2E + güvenlik + güç paketi
+  python3 tools/qemu_boot_test.py --p3-matrix  # 5/5 SMP (1/2/4/8/20 vCPU) & RAM (256M..2G) matrisi
+  python3 tools/qemu_boot_test.py              # 85/85 tam deterministik regresyon paketi
+  ```
+- **Özet Bulgular (`85/85` QEMU/KVM + `5/5` Matris Yeşil, `leaked_frames = 0`):**
+  1. **Açılış & Etkileşim:** 7 eşzamanlı Ring 3 sistem/uygulama süreciyle (`dry-init`, `dry-vfs`, `dry-power`, `dry-display`, `dry-input`, `dry-shell`, `dry-sysmon`) masaüstü hazır olma süresi **`229 .. 235 ms`** (`2 vCPU`); `in2comp p50 = 48.981 cyc` (`~15.7 µs`), tek-satır `ROW_PRESENT = ~41k cyc` (`~13 µs`).
+  2. **Bellek & Yığın Disiplini:** `pmm/tests.rs` OOM öz-testinin intrüzif HHDM sayfa listesine taşınmasıyla çekirdek `.bss` **`-512 KiB` küçüldü** (`kernel_meta_frames: 1.782 -> 1.654`) ve `256 MiB` (`60.891` serbest çerçeve) -> **`2 GiB` (`516.802` serbest çerçeve, `20 vCPU`)** ölçeklenmesi doğrulandı. `rust_syscall_dispatch` (`248 B`), `sys_cold_dispatch` (`216 B`) ve `sys_irq_ack` (`40 B`) yığın çerçeveleri **`+0 B`** büyüdü.
+  3. **Güç & Oturum Yaşam Döngüsü:** Masaüstü `HLT` boşta kalma (`16.209` çağrı, `VEC_RESCHED_WAKE` IPI ile `0` kayıp uyanma), manuel + 5 sn otomatik `DPMS` (`1.024.000/1.024.000` `0x000000` piksel ve anlık uyanma), girdi-engelleyici `Session Lock` (`lock_blocked=3`, `docs/p3c_lock_shield.png`), `isa-debug-exit` kapalıyken gerçek donanım **ACPI S5 kapanış** (`PM1a=0x604`, `rc=0`) ve **FADT yeniden başlatma** (`0xcf9`<-`0x0f`, `rc=0`), ayrıca `< 1 MiB` gerçek-mod uyanma trampolini eksikliği nedeniyle dürüst **`S3 = -ENOSYS`** davranışı doğrulandı.
