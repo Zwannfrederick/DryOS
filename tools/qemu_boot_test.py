@@ -41,6 +41,20 @@ OVMF_VARS = pathlib.Path("/usr/share/edk2/x64/OVMF_VARS.4m.fd")
 EXIT_CODE_SUCCESS = (0x10 << 1) | 1  # 33
 EXIT_CODE_PANIC = (0x11 << 1) | 1    # 35
 
+USERSPACE_MODS = (
+    ("user-hello", "user-hello.elf"),
+    ("user-peer", "user-peer.elf"),
+    ("dry-init", "dry-init.elf"),
+    ("dry-echo", "dry-echo.elf"),
+    ("dry-display", "dry-display.elf"),
+    ("dry-input", "dry-input.elf"),
+    ("dry-shell", "dry-shell.elf"),
+    ("dry-sysmon", "dry-sysmon.elf"),
+    ("dry-vfs", "dry-vfs.elf"),
+    ("dry-files", "dry-files.elf"),
+    ("dry-settings", "dry-settings.elf"),
+)
+
 
 def kernel_cargo_env() -> dict[str, str]:
     linker_script = KERNEL_DIR / "linker.ld"
@@ -128,19 +142,7 @@ def build_userspace() -> list[pathlib.Path]:
         env=env,
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
-    bins = [
-        out_dir / b
-        for b in (
-            "user-hello",
-            "user-peer",
-            "dry-init",
-            "dry-echo",
-            "dry-display",
-            "dry-input",
-            "dry-shell",
-            "dry-sysmon",
-        )
-    ]
+    bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():
             raise RuntimeError(f"Missing userspace ELF {b}")
@@ -218,16 +220,7 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         subprocess.check_call(["mmd", "-i", part_spec, d], env=mtools_env)
 
     u_out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
-    mods = [
-        ("user-hello", "user-hello.elf"),
-        ("user-peer", "user-peer.elf"),
-        ("dry-init", "dry-init.elf"),
-        ("dry-echo", "dry-echo.elf"),
-        ("dry-display", "dry-display.elf"),
-        ("dry-input", "dry-input.elf"),
-        ("dry-shell", "dry-shell.elf"),
-        ("dry-sysmon", "dry-sysmon.elf"),
-    ]
+    mods = USERSPACE_MODS
 
     conf_path = BUILD_DIR / "limine.conf"
     mod_lines = "".join(f"    module_path: boot():/boot/{dst}\n" for _, dst in mods)

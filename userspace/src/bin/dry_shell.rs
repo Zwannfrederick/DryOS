@@ -22,14 +22,15 @@ use dry_userspace::shell::{parse_command, LineBuilder, ShellCommand, ShellEngine
 use dry_userspace::surface::{
     SharedWindowSurface, STYLE_DEFAULT, STYLE_MUTED, STYLE_OK, STYLE_WARN, TERM_COLS, TERM_ROWS,
 };
+use dry_userspace::vfs_proto::{vfs_create_file, vfs_read_file, vfs_unlink_file};
 use dry_userspace::wm::{WindowRole, TITLE_KIND_TERMINAL};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_proc_kill,
     sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserProcInfo, UserSysInfo,
-    EBADCAP, EPERM, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
+    EBADCAP, EPERM, EPIPE, EREVOKED, EROFS, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
     IPC_OP_ERR_PERM, IPC_OP_INPUT_EVENT, IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT,
-    IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO,
+    IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_GET_VFS_CAP, IPC_OP_SUP_HELLO,
     IPC_OP_SUP_MINT_ROGUE_TEST, IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_RECONNECT_INPUT,
     IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT,
     IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP,
@@ -146,16 +147,30 @@ fn run_live_p3_sec_probes(sup_ep_cap: u64, engine: &mut ShellEngine) {
     .map(|(t, _, _)| msg_tag_label(t));
     let bad_ipc_inval = bad1 == Ok(IPC_OP_ERR_INVAL) && bad2 == Ok(IPC_OP_ERR_INVAL);
 
+    let mut vfs_rofs = false;
+    let mut vfs_eperm = false;
+    if let Ok((vtag, vcap, _)) =
+        sys_ipc_call_with_grant(sup_ep_cap, IPC_OP_SUP_GET_VFS_CAP, [0; 4], 0, 0, 0, 0)
+    {
+        if msg_tag_label(vtag) == IPC_OP_PONG && vcap != 0 {
+            let mut scratch = [0u8; 32];
+            vfs_rofs = vfs_create_file(vcap, b"/boot/pwn.txt", 0) == Err(EROFS);
+            vfs_eperm = vfs_read_file(vcap, b"/ram/vault_key.priv", 0, &mut scratch) == Err(EPERM)
+                && vfs_unlink_file(vcap, b"/ram/vault_key.priv") == Err(EPERM);
+            let _ = sys_cap_revoke(vcap, 1);
+        }
+    }
+
     let mut lb = LineBuilder::new();
     lb.push_bytes(b"Security audit: kill_eperm=");
     lb.push_bytes(if kill_eperm { b"true" } else { b"false" });
     lb.push_bytes(b" unauth_perm=");
     lb.push_bytes(if unauth_perm { b"true" } else { b"false" });
-    lb.push_bytes(b" bad_ipc_inval=");
-    lb.push_bytes(if bad_ipc_inval { b"true" } else { b"false" });
+    lb.push_bytes(b" vfs_eperm=");
+    lb.push_bytes(if vfs_eperm { b"true" } else { b"false" });
     engine.push_line(
         lb.as_bytes(),
-        if kill_eperm && unauth_perm && bad_ipc_inval {
+        if kill_eperm && unauth_perm && bad_ipc_inval && vfs_rofs && vfs_eperm {
             STYLE_OK
         } else {
             STYLE_WARN
@@ -169,6 +184,10 @@ fn run_live_p3_sec_probes(sup_ep_cap: u64, engine: &mut ShellEngine) {
     slb.push_bytes(if unauth_perm { b"true" } else { b"false" });
     slb.push_bytes(b" bad_ipc_inval=");
     slb.push_bytes(if bad_ipc_inval { b"true" } else { b"false" });
+    slb.push_bytes(b" vfs_rofs=");
+    slb.push_bytes(if vfs_rofs { b"true" } else { b"false" });
+    slb.push_bytes(b" vfs_eperm=");
+    slb.push_bytes(if vfs_eperm { b"true" } else { b"false" });
     debug_line(&slb);
 }
 

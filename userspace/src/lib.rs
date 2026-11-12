@@ -12,10 +12,13 @@ pub mod input;
 pub mod keymap;
 pub mod ps2;
 pub mod shell;
+pub mod sup_services;
 pub mod supervisor;
 pub mod surface;
+pub mod vfs_proto;
 pub mod wm;
 pub mod wm_ipc;
+pub mod wm_layout;
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -54,13 +57,17 @@ pub const SYS_PROC_KILL: u64 = 27;
 pub const SYS_POWER_CTL: u64 = 28;
 
 pub const EPERM: isize = -1;
+pub const ENOENT: isize = -2;
 pub const EBADCAP: isize = -9;
 pub const ENOCHILD: isize = -10;
 pub const EAGAIN: isize = -11;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
 pub const EBUSY: isize = -16;
+pub const EEXIST: isize = -17;
 pub const EINVAL: isize = -22;
+pub const ENOSPC: isize = -28;
+pub const EROFS: isize = -30;
 pub const EPIPE: isize = -32;
 pub const EDEADLK: isize = -35;
 pub const ENOSYS: isize = -38;
@@ -69,6 +76,8 @@ pub const EREVOKED: isize = -110;
 pub const EALREADY: isize = -114;
 pub const ETIMEDOUT: isize = -116;
 pub const ECANCELED: isize = -125;
+
+pub const MAX_IPC_EXTRA_BYTES: usize = 256;
 
 // IPC MsgTag / syscall flag bits (`kernel/src/ipc/mod.rs`)
 pub const MSG_FLAG_EXTRA_BUF: u8 = 1 << 0;
@@ -176,6 +185,8 @@ pub const IPC_OP_WM_SET_SESSION_STATE: u32 = 47;
 pub const IPC_OP_INPUT_SET_PREFS: u32 = 48;
 pub const IPC_OP_ERR_NOSYS: u32 = 49;
 pub const IPC_OP_SUP_MINT_ROGUE_TEST: u32 = 50;
+pub const IPC_OP_SUP_QUERY_PREFS: u32 = 51;
+pub const IPC_OP_SUP_GET_VFS_CAP: u32 = 52;
 
 pub const BOOT_MANIFEST_OFFSET: u64 = 0x0100;
 
@@ -664,6 +675,11 @@ pub fn sys_ipc_reply_with_grant(
         mrs,
     );
     if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub const fn msg_tag_extra_len(tag: u64) -> usize {
+    ((tag >> 16) & 0xffff) as usize
 }
 
 #[inline]

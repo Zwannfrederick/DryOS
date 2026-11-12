@@ -9,12 +9,12 @@ use crate::action::LatencyRing;
 use crate::compositor::DesktopCompositor;
 use crate::gfx::Rect;
 use crate::shell::LineBuilder;
-use crate::wm::{WindowManager, TOPBAR_H};
+use crate::wm::{LayoutMode, WindowManager, TOPBAR_H};
 use crate::{
     pack_msg_tag, sys_cap_revoke, sys_ipc_reply_inline, sys_write_debug, UserIpcRecvExt,
-    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_PERM, IPC_OP_PONG, IPC_OP_WIN_EMPTY,
-    IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER, IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE,
-    IPC_OP_WM_TOGGLE_TILING,
+    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_PONG,
+    IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER, IPC_OP_WM_POLL_ACTION,
+    IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS, IPC_OP_WM_TOGGLE_TILING,
 };
 
 pub fn wm_log_line(lb: &LineBuilder) {
@@ -168,6 +168,66 @@ pub fn handle_wm_admin_op(
                     reply_tok,
                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
                     [focused_wid as u64, wm.active_window_count() as u64, cyc, 0],
+                );
+            }
+            true
+        }
+        IPC_OP_WM_SET_LAYOUT => {
+            if ext.sender_badge != BADGE_SUPERVISOR {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            let Some(target) = LayoutMode::from_u8((mrs[0] & 0xff) as u8) else {
+                wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                return true;
+            };
+            let m = wm.set_layout_mode(target, &mut comp.scene_dirty);
+            let (_, cyc) = comp.flush_all(wm);
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-WM] LAYOUT mode=");
+            lb.push_u64(m as u64);
+            wm_log_line(&lb);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
+                    [m as u64, cyc, 0, 0],
+                );
+            }
+            true
+        }
+        IPC_OP_WM_SET_PREFS => {
+            if ext.sender_badge != BADGE_SUPERVISOR {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            if (mrs[0] & !0x3) != 0 {
+                wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                return true;
+            }
+            wm.high_contrast = (mrs[0] & 1) != 0;
+            wm.cursor_large = (mrs[0] & 2) != 0;
+            comp.apply_display_prefs(wm);
+            let (px, cyc) = comp.flush_all(wm);
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-WM] PREFS contrast=");
+            lb.push_u64(u64::from(wm.high_contrast));
+            lb.push_bytes(b" cur_large=");
+            lb.push_u64(u64::from(wm.cursor_large));
+            lb.push_bytes(b" px=");
+            lb.push_u64(px);
+            wm_log_line(&lb);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
+                    [mrs[0] & 0x3, px, cyc, 0],
                 );
             }
             true

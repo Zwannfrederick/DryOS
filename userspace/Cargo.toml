@@ -36,6 +36,18 @@ path = "src/bin/dry_shell.rs"
 name = "dry-sysmon"
 path = "src/bin/dry_sysmon.rs"
 
+[[bin]]
+name = "dry-vfs"
+path = "src/bin/dry_vfs.rs"
+
+[[bin]]
+name = "dry-files"
+path = "src/bin/dry_files.rs"
+
+[[bin]]
+name = "dry-settings"
+path = "src/bin/dry_settings.rs"
+
 [profile.dev]
 panic = "abort"
 

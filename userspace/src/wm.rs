@@ -30,12 +30,13 @@ pub const TITLE_KIND_SYSMON: u8 = 1;
 pub const TITLE_KIND_GENERIC: u8 = 2;
 pub const TITLE_KIND_FILES: u8 = 3;
 pub const TITLE_KIND_SETTINGS: u8 = 4;
+pub const TITLE_KIND_DIALOG: u8 = 5;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowRole {
     Normal = 0,
-    /// Future-ready modal/dialog role: remains floating above tiled windows even in `SideBySideTiled`.
+    /// Modal/helper dialog role: stays auto-floating above tiled/stacked/tabbed workspaces.
     DialogTransient = 1,
 }
 
@@ -55,6 +56,31 @@ impl WindowRole {
 pub enum LayoutMode {
     Floating = 0,
     SideBySideTiled = 1,
+    Stacked = 2,
+    Tabbed = 3,
+}
+
+impl LayoutMode {
+    #[inline]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Floating),
+            1 => Some(Self::SideBySideTiled),
+            2 => Some(Self::Stacked),
+            3 => Some(Self::Tabbed),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn next_mode(self) -> Self {
+        match self {
+            Self::Floating => Self::SideBySideTiled,
+            Self::SideBySideTiled => Self::Stacked,
+            Self::Stacked => Self::Tabbed,
+            Self::Tabbed => Self::Floating,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +213,8 @@ pub struct WindowManager {
     pub sup_wake_cap: u64,
     pub action_queue: ActionQueue<16>,
     pub layout: LayoutMode,
+    pub high_contrast: bool,
+    pub cursor_large: bool,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub cursor_visible: bool,
@@ -219,6 +247,8 @@ impl WindowManager {
             sup_wake_cap: 0,
             action_queue: ActionQueue::new(),
             layout: LayoutMode::Floating,
+            high_contrast: false,
+            cursor_large: false,
             cursor_x: 640,
             cursor_y: 400,
             cursor_visible: false,
@@ -249,7 +279,8 @@ impl WindowManager {
     #[inline]
     pub const fn cursor_rect(&self) -> Rect {
         if self.cursor_visible {
-            Rect::new(self.cursor_x, self.cursor_y, CURSOR_W, CURSOR_H)
+            let scale = if self.cursor_large { 2 } else { 1 };
+            Rect::new(self.cursor_x, self.cursor_y, CURSOR_W * scale, CURSOR_H * scale)
         } else {
             Rect::EMPTY
         }
@@ -422,13 +453,16 @@ impl WindowManager {
         if self.z_len >= 2 {
             self.desktop_mode = true;
         }
-        if self.layout == LayoutMode::SideBySideTiled {
-            self.apply_tiling_geometries(dirty);
+        if self.layout != LayoutMode::Floating {
+            self.apply_layout_geometries(dirty);
+        } else {
+            self.ensure_dialogs_above_normal(dirty);
         }
         Ok(slot_idx)
     }
 
-    /// Focus `slot_idx` and raise it to the top of `z_stack`, marking changed window frames + topbar.
+    /// Focus `slot_idx` and raise it to the top of its role band (`Normal` below `DialogTransient`),
+    /// marking changed window frames + topbar (and tab strip in `Tabbed` mode).
     pub fn focus_and_raise(&mut self, slot_idx: usize, dirty: &mut DirtyRegion) -> bool {
         if slot_idx >= MAX_WINDOWS || !self.windows[slot_idx].allocated || !self.windows[slot_idx].visible {
             return false;
@@ -441,6 +475,9 @@ impl WindowManager {
                 self.z_stack[i] = self.z_stack[i + 1];
             }
             self.z_stack[self.z_len - 1] = slot_idx;
+        }
+        if self.layout != LayoutMode::Floating {
+            self.ensure_dialogs_above_normal(dirty);
         }
         if !was_top && self.z_len > 1 {
             self.z_raises = self.z_raises.wrapping_add(1);
@@ -455,6 +492,11 @@ impl WindowManager {
         }
         if !was_top {
             dirty.mark(self.windows[slot_idx].outer_rect());
+        }
+        if self.layout == LayoutMode::Tabbed {
+            dirty.mark(self.tabstrip_rect());
+        } else if self.layout == LayoutMode::Stacked {
+            self.apply_layout_geometries(dirty);
         }
         if prev_focus != Some(slot_idx) {
             self.focus_switches = self.focus_switches.wrapping_add(1);
@@ -499,8 +541,8 @@ impl WindowManager {
             let new_top = self.z_stack[self.z_len - 1];
             let _ = self.focus_and_raise(new_top, dirty);
         }
-        if self.layout == LayoutMode::SideBySideTiled {
-            self.apply_tiling_geometries(dirty);
+        if self.layout != LayoutMode::Floating {
+            self.apply_layout_geometries(dirty);
         }
         Some(res)
     }
@@ -537,10 +579,10 @@ impl WindowManager {
         if slot_idx >= MAX_WINDOWS || !self.windows[slot_idx].allocated {
             return (0, 0);
         }
-        if self.layout == LayoutMode::SideBySideTiled
+        if self.layout != LayoutMode::Floating
             && self.windows[slot_idx].role == WindowRole::Normal
         {
-            self.toggle_tiling(dirty);
+            self.set_layout_mode(LayoutMode::Floating, dirty);
         }
         let old_outer = self.windows[slot_idx].outer_rect();
         let cur = self.windows[slot_idx].rect;
@@ -557,113 +599,6 @@ impl WindowManager {
         dirty.mark(old_outer);
         dirty.mark(new_outer);
         (nx, ny)
-    }
-
-    /// Toggle `Floating <-> SideBySideTiled`, preserving & restoring `saved_floating_rect`.
-    pub fn toggle_tiling(&mut self, dirty: &mut DirtyRegion) -> LayoutMode {
-        self.dragging_slot = None;
-        if self.layout == LayoutMode::Floating {
-            for w in &mut self.windows {
-                if w.allocated && w.role == WindowRole::Normal {
-                    w.saved_floating_rect = w.rect;
-                }
-            }
-            self.layout = LayoutMode::SideBySideTiled;
-            self.apply_tiling_geometries(dirty);
-        } else {
-            self.layout = LayoutMode::Floating;
-            for w in &mut self.windows {
-                if w.allocated && w.role == WindowRole::Normal && !w.saved_floating_rect.is_empty() {
-                    let old_o = w.outer_rect();
-                    w.rect = w.saved_floating_rect;
-                    dirty.mark(old_o);
-                    dirty.mark(w.outer_rect());
-                }
-            }
-        }
-        dirty.mark(Rect::new(0, 0, self.screen_w, TOPBAR_H));
-        self.layout
-    }
-
-    pub fn apply_tiling_geometries(&mut self, dirty: &mut DirtyRegion) {
-        let mut normal_slots = [0usize; MAX_WINDOWS];
-        let mut n = 0usize;
-        // Order deterministically by `WindowId` so tiled assignment stays stable across focus!
-        for slot_i in 0..MAX_WINDOWS {
-            let w = &self.windows[slot_i];
-            if w.allocated && w.visible && w.role == WindowRole::Normal {
-                normal_slots[n] = slot_i;
-                n += 1;
-            }
-        }
-        if n == 0 {
-            return;
-        }
-        let gap = 14usize;
-        let ty = TOPBAR_H + 14;
-        if n == 1 {
-            let idx = normal_slots[0];
-            let old_o = self.windows[idx].outer_rect();
-            let rw = self.windows[idx].rect.w;
-            let rh = self.windows[idx].rect.h;
-            let (nx, ny) = self.clamp_window_pos(
-                ((self.screen_w.saturating_sub(rw)) / 2) as isize,
-                ty as isize,
-                rw,
-                rh,
-            );
-            self.windows[idx].rect.x = nx;
-            self.windows[idx].rect.y = ny;
-            dirty.mark(old_o);
-            dirty.mark(self.windows[idx].outer_rect());
-        } else if n == 2 {
-            let left_idx = normal_slots[0];
-            let right_idx = normal_slots[1];
-            let lw = self.windows[left_idx].rect.w;
-            let lh = self.windows[left_idx].rect.h;
-            let rw = self.windows[right_idx].rect.w;
-            let rh = self.windows[right_idx].rect.h;
-            let total_w = lw + gap + rw;
-            let start_x = self.screen_w.saturating_sub(total_w) / 2;
-
-            let old_l = self.windows[left_idx].outer_rect();
-            let (lx, ly) = self.clamp_window_pos(start_x.max(8) as isize, ty as isize, lw, lh);
-            self.windows[left_idx].rect.x = lx;
-            self.windows[left_idx].rect.y = ly;
-            dirty.mark(old_l);
-            dirty.mark(self.windows[left_idx].outer_rect());
-
-            let old_r = self.windows[right_idx].outer_rect();
-            let (rx, ry) = self.clamp_window_pos((lx + lw + gap) as isize, ty as isize, rw, rh);
-            self.windows[right_idx].rect.x = rx;
-            self.windows[right_idx].rect.y = ry;
-            dirty.mark(old_r);
-            dirty.mark(self.windows[right_idx].outer_rect());
-        } else {
-            // 2x2 / 2-column grid for 3..8 open normal windows; DialogTransient windows stay floating.
-            let half_w = self.screen_w / 2;
-            let avail_h = self.screen_h.saturating_sub(TOPBAR_H + 16);
-            let rows_grid = n.div_ceil(2).max(1);
-            let row_step = avail_h / rows_grid;
-            for (k, &idx) in normal_slots.iter().take(n).enumerate() {
-                let col_k = k % 2;
-                let row_k = k / 2;
-                let old_o = self.windows[idx].outer_rect();
-                let ww = self.windows[idx].rect.w;
-                let wh = self.windows[idx].rect.h;
-                let tx = if col_k == 0 {
-                    12isize
-                } else {
-                    (half_w + 6) as isize
-                };
-                let target_y = (TOPBAR_H + 8 + row_k * row_step) as isize;
-                let (nx, ny) = self.clamp_window_pos(tx, target_y, ww, wh);
-                self.windows[idx].rect.x = nx;
-                self.windows[idx].rect.y = ny;
-                dirty.mark(old_o);
-                dirty.mark(self.windows[idx].outer_rect());
-            }
-        }
     }
 
     /// Cycle focus to the next visible window (`Alt + Tab`).
@@ -757,9 +692,17 @@ impl WindowManager {
                         }
                     }
                     if self.topbar_mode_pill_rect().contains(self.cursor_x, self.cursor_y) {
-                        let m = self.toggle_tiling(scene_dirty);
+                        let m = if self.p3_mode {
+                            self.set_layout_mode(self.layout.next_mode(), scene_dirty)
+                        } else {
+                            self.toggle_tiling(scene_dirty)
+                        };
                         return WmInputAction::LayoutToggled(m);
                     }
+                }
+                if let Some(tab_slot) = self.hit_test_tabstrip(self.cursor_x, self.cursor_y) {
+                    let _ = self.focus_and_raise(tab_slot, scene_dirty);
+                    return WmInputAction::FocusChanged(self.windows[tab_slot].id);
                 }
                 if let Some((slot_idx, part)) = self.hit_test_topmost(self.cursor_x, self.cursor_y) {
                     let focus_changed = self.focus_and_raise(slot_idx, scene_dirty);
@@ -770,10 +713,10 @@ impl WindowManager {
                             return WmInputAction::CloseRequested(win_id);
                         }
                         HitPart::TitleBar => {
-                            if self.layout == LayoutMode::SideBySideTiled
+                            if self.layout != LayoutMode::Floating
                                 && self.windows[slot_idx].role == WindowRole::Normal
                             {
-                                self.toggle_tiling(scene_dirty);
+                                self.set_layout_mode(LayoutMode::Floating, scene_dirty);
                             }
                             let wx = self.windows[slot_idx].rect.x;
                             let wy = self.windows[slot_idx].rect.y;
@@ -843,6 +786,10 @@ impl WindowManager {
                     }
                     if ev.ascii == b't' || ev.ascii == b'T' || (ev.scancode & 0x7f) == 0x14 {
                         let m = self.toggle_tiling(scene_dirty);
+                        return WmInputAction::LayoutToggled(m);
+                    }
+                    if self.p3_mode && (ev.ascii == b'g' || ev.ascii == b'G' || (ev.scancode & 0x7f) == 0x22) {
+                        let m = self.set_layout_mode(self.layout.next_mode(), scene_dirty);
                         return WmInputAction::LayoutToggled(m);
                     }
                     let delta = match ev.keycode {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Ring 3 keycode & keymap translation (`US QWERTY` implemented; extensible `TurkishQ` interface).
+//! Ring 3 keycode & keymap translation (`US QWERTY` and `Turkish Q` runtime layouts).
 
 use crate::input::MOD_SHIFT;
 
@@ -29,15 +29,22 @@ pub const KEY_PAGEDOWN: u16 = 28;
 
 pub const KEY_CHAR_BASE: u16 = 0x0100;
 
-/// Extensible keyboard layout selector.
-///
-/// NOTE: Only `UsQwerty` is implemented in P1. `TurkishQ` is intentionally declared as an
-/// unimplemented layout variant (`Err(KeymapError::LayoutNotImplemented)`) so UTF-8 / multi-byte
-/// glyph composition can be plugged in during P2 without breaking the `dry-input` ABI.
+/// Runtime keyboard layout selector (`0 = UsQwerty`, `1 = TurkishQ`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeymapLayout {
-    UsQwerty,
-    TurkishQ,
+    UsQwerty = 0,
+    TurkishQ = 1,
+}
+
+impl KeymapLayout {
+    #[inline]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::UsQwerty),
+            1 => Some(Self::TurkishQ),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +62,7 @@ pub fn translate_set1(
 ) -> Result<(u16, u8), KeymapError> {
     match layout {
         KeymapLayout::UsQwerty => Ok(translate_us_qwerty(base_code, extended, modifiers)),
-        KeymapLayout::TurkishQ => Err(KeymapError::LayoutNotImplemented),
+        KeymapLayout::TurkishQ => Ok(translate_turkish_q(base_code, extended, modifiers)),
     }
 }
 
@@ -138,6 +145,45 @@ const fn translate_us_qwerty(base_code: u8, extended: bool, modifiers: u8) -> (u
         0x38 => return (KEY_LALT, 0),
         0x39 => return (KEY_SPACE, b' '),
         _ => return (KEY_NONE, 0),
+    };
+    let ascii = if shift { shifted } else { normal };
+    (KEY_CHAR_BASE | kc, ascii)
+}
+
+const fn translate_turkish_q(base_code: u8, extended: bool, modifiers: u8) -> (u16, u8) {
+    if extended {
+        return translate_us_qwerty(base_code, true, modifiers);
+    }
+
+    let shift = (modifiers & MOD_SHIFT) != 0;
+    let (kc, normal, shifted): (u16, u8, u8) = match base_code {
+        0x01 => return (KEY_ESC, 0x1b),
+        0x02 => (b'1' as u16, b'1', b'!'),
+        0x03 => (b'2' as u16, b'2', b'\''),
+        0x04 => (b'3' as u16, b'3', b'^'),
+        0x05 => (b'4' as u16, b'4', b'+'),
+        0x06 => (b'5' as u16, b'5', b'%'),
+        0x07 => (b'6' as u16, b'6', b'&'),
+        0x08 => (b'7' as u16, b'7', b'/'),
+        0x09 => (b'8' as u16, b'8', b'('),
+        0x0A => (b'9' as u16, b'9', b')'),
+        0x0B => (b'0' as u16, b'0', b'='),
+        0x0C => (b'*' as u16, b'*', b'?'),
+        0x0D => (b'-' as u16, b'-', b'_'),
+        0x0E => return (KEY_BACKSPACE, 0x08),
+        0x0F => return (KEY_TAB, b'\t'),
+        // Turkish-specific positions (`ğ`, `ü`, `ş`, `i`, `ö`, `ç`) map to clean 7-bit ASCII glyphs
+        // while preserving true Turkish Q punctuation (`*`/`?`, `-`/`_`, `.`/`:`, `,`/`;`, `7 -> /`).
+        0x1A => (b'g' as u16, b'g', b'G'),
+        0x1B => (b'u' as u16, b'u', b'U'),
+        0x27 => (b's' as u16, b's', b'S'),
+        0x28 => (b'i' as u16, b'i', b'I'),
+        0x29 => (b'"' as u16, b'"', b'~'),
+        0x2B => (b',' as u16, b',', b';'),
+        0x33 => (b'o' as u16, b'o', b'O'),
+        0x34 => (b'c' as u16, b'c', b'C'),
+        0x35 => (b'.' as u16, b'.', b':'),
+        _ => return translate_us_qwerty(base_code, false, modifiers),
     };
     let ascii = if shift { shifted } else { normal };
     (KEY_CHAR_BASE | kc, ascii)

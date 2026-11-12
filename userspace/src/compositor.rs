@@ -24,9 +24,11 @@ use crate::surface::{
     TERM_CELLS,
 };
 use crate::wm::{
-    LayoutMode, WindowManager, WindowSlot, SHADOW_OFF, TITLE_KIND_FILES, TITLE_KIND_SETTINGS,
-    TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL, TOPBAR_H, WIN_BORDER, WIN_TITLE_H,
+    LayoutMode, WindowManager, WindowSlot, MAX_WINDOWS, SHADOW_OFF, TITLE_KIND_DIALOG,
+    TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL, TOPBAR_H,
+    WIN_BORDER, WIN_TITLE_H,
 };
+use crate::wm_layout::{TABSTRIP_H, TABSTRIP_Y};
 use crate::{rdtsc_user, UserFbInfo};
 
 #[derive(Clone, Copy)]
@@ -54,6 +56,33 @@ pub struct Palette {
 
 impl Palette {
     pub fn from_fb(info: &UserFbInfo) -> Self {
+        Self::from_fb_prefs(info, false)
+    }
+
+    pub fn from_fb_prefs(info: &UserFbInfo, high_contrast: bool) -> Self {
+        if high_contrast {
+            return Self {
+                bg_canvas: pack_rgb(info, 0x00, 0x00, 0x00),
+                bg_grid: pack_rgb(info, 0x24, 0x24, 0x24),
+                bg_topbar: pack_rgb(info, 0x00, 0x00, 0x00),
+                bg_pill: pack_rgb(info, 0x00, 0x2B, 0x36),
+                bg_shadow: pack_rgb(info, 0x00, 0x00, 0x00),
+                bg_win: pack_rgb(info, 0x04, 0x06, 0x0A),
+                bg_title_focus: pack_rgb(info, 0x00, 0x3B, 0x4D),
+                bg_title_idle: pack_rgb(info, 0x14, 0x14, 0x14),
+                bg_close: pack_rgb(info, 0x6E, 0x00, 0x18),
+                border_focus: pack_rgb(info, 0x00, 0xFF, 0xEE),
+                border_idle: pack_rgb(info, 0x94, 0xA3, 0xB8),
+                fg_primary: pack_rgb(info, 0xFF, 0xFF, 0xFF),
+                fg_muted: pack_rgb(info, 0xD8, 0xE2, 0xEC),
+                fg_accent: pack_rgb(info, 0x00, 0xFF, 0xEE),
+                fg_ok: pack_rgb(info, 0x39, 0xFF, 0x88),
+                fg_warn: pack_rgb(info, 0xFF, 0xEA, 0x00),
+                fg_prompt: pack_rgb(info, 0x5C, 0xE1, 0xFF),
+                cur_outline: pack_rgb(info, 0x00, 0x00, 0x00),
+                cur_fill: pack_rgb(info, 0xFF, 0xEA, 0x00),
+            };
+        }
         Self {
             bg_canvas: pack_rgb(info, 0x0B, 0x10, 0x1B),
             bg_grid: pack_rgb(info, 0x18, 0x24, 0x38),
@@ -134,6 +163,7 @@ pub struct DesktopCompositor {
     pub w: usize,
     pub h: usize,
     pub fb_stride: usize,
+    pub fb_info: UserFbInfo,
     pub pal: Palette,
     pub scene_dirty: DirtyRegion,
     pub mmio_dirty: DirtyRegion,
@@ -148,6 +178,21 @@ impl DesktopCompositor {
             w: 0,
             h: 0,
             fb_stride: 0,
+            fb_info: UserFbInfo {
+                width: 0,
+                height: 0,
+                pitch: 0,
+                bpp: 0,
+                memory_model: 0,
+                red_shift: 0,
+                green_shift: 0,
+                blue_shift: 0,
+                red_size: 0,
+                green_size: 0,
+                blue_size: 0,
+                _pad: [0; 3],
+                mapped_bytes: 0,
+            },
             pal: Palette {
                 bg_canvas: 0,
                 bg_grid: 0,
@@ -181,9 +226,15 @@ impl DesktopCompositor {
         self.w = info.width as usize;
         self.h = info.height as usize;
         self.fb_stride = (info.pitch as usize) / 4;
-        self.pal = Palette::from_fb(info);
+        self.fb_info = *info;
+        self.pal = Palette::from_fb_prefs(info, false);
         self.scene_dirty = DirtyRegion::new();
         self.mmio_dirty = DirtyRegion::new();
+    }
+
+    pub fn apply_display_prefs(&mut self, wm: &WindowManager) {
+        self.pal = Palette::from_fb_prefs(&self.fb_info, wm.high_contrast);
+        self.scene_dirty.mark(Rect::new(0, 0, self.w, self.h));
     }
 
     #[inline]
@@ -325,16 +376,18 @@ impl DesktopCompositor {
                 self.draw_str_clipped(14, 6, brand, self.pal.fg_primary, self.pal.bg_topbar, tb_clip);
             }
 
-            // Center layout pill (`[MODE: FLOAT]` / `[MODE: TILED]`) + active window indicator.
+            // Center layout pill (`[MODE: FLOAT/TILED/STACK/TABBED]`) + active window indicator.
             let pill = wm.topbar_mode_pill_rect();
             if (wm.desktop_mode || wm.p3_mode) && self.w >= 960 {
                 self.fill_back_clipped(pill, tb_clip, self.pal.bg_pill);
                 let mode_lbl: &[u8] = match wm.layout {
                     LayoutMode::Floating => b"MODE: FLOAT",
                     LayoutMode::SideBySideTiled => b"MODE: TILED",
+                    LayoutMode::Stacked => b"MODE: STACK",
+                    LayoutMode::Tabbed => b"MODE: TABBED",
                 };
                 self.draw_str_clipped(
-                    pill.x + 12,
+                    pill.x + 8,
                     6,
                     mode_lbl,
                     self.pal.fg_accent,
@@ -375,6 +428,34 @@ impl DesktopCompositor {
                 }
                 let rx = self.w.saturating_sub(sp * 8 + 14);
                 self.draw_str_clipped(rx, 6, &status[..sp], self.pal.fg_ok, self.pal.bg_topbar, tb_clip);
+            }
+        }
+
+        // In `Tabbed` mode, paint clickable workspace tab strip headers for all open `Normal` windows.
+        if wm.layout == LayoutMode::Tabbed {
+            let strip_clip = c.intersect(Rect::new(0, TABSTRIP_Y, self.w, TABSTRIP_H));
+            if !strip_clip.is_empty() {
+                let mut normal_slots = [0usize; MAX_WINDOWS];
+                let n = wm.collect_normal_slots(&mut normal_slots);
+                for (tab_i, &slot_idx) in normal_slots.iter().take(n).enumerate() {
+                    let tr = wm.tab_pill_rect(tab_i);
+                    let w = &wm.windows[slot_idx];
+                    let (tbg, tfg, bcol) = if w.focused {
+                        (self.pal.bg_title_focus, self.pal.fg_primary, self.pal.border_focus)
+                    } else {
+                        (self.pal.bg_title_idle, self.pal.fg_muted, self.pal.border_idle)
+                    };
+                    self.fill_back_clipped(tr, strip_clip, tbg);
+                    self.fill_back_clipped(Rect::new(tr.x, tr.y + tr.h - 2, tr.w, 2), strip_clip, bcol);
+                    let lbl: &[u8] = match w.title_kind {
+                        TITLE_KIND_TERMINAL => b"TAB: Terminal",
+                        TITLE_KIND_SYSMON => b"TAB: LifeStn",
+                        TITLE_KIND_FILES => b"TAB: Files",
+                        TITLE_KIND_SETTINGS => b"TAB: Settings",
+                        _ => b"TAB: Window",
+                    };
+                    self.draw_str_clipped(tr.x + 10, tr.y + 4, lbl, tfg, tbg, strip_clip);
+                }
             }
         }
     }
@@ -437,6 +518,7 @@ impl DesktopCompositor {
                 TITLE_KIND_TERMINAL => b"DRY TERMINAL // dry-shell [0x0102]",
                 TITLE_KIND_FILES => b"FILES // dry-files [0x0104]",
                 TITLE_KIND_SETTINGS => b"SETTINGS // dry-settings [0x0105]",
+                TITLE_KIND_DIALOG => b"QUICK HELP // Dialog [AUTO-FLOAT]",
                 _ => b"DRY APP // [CPL=3]",
             };
             self.draw_str_clipped(
@@ -600,6 +682,7 @@ impl DesktopCompositor {
         }
 
         let cur_r = wm.cursor_rect();
+        let cur_scale = if wm.cursor_large { 2usize } else { 1usize };
         let t0 = rdtsc_user();
         let mut total_px = 0u64;
 
@@ -607,7 +690,7 @@ impl DesktopCompositor {
             total_px += (r.w * r.h) as u64;
             let has_cur = !cur_r.intersect(*r).is_empty();
             for y in r.y..(r.y + r.h) {
-                let row_has_cur = has_cur && y >= cur_r.y && y < cur_r.y + CURSOR_H;
+                let row_has_cur = has_cur && y >= cur_r.y && y < cur_r.y + cur_r.h;
                 if !row_has_cur {
                     let mut x = r.x;
                     let x_end = r.x + r.w;
@@ -632,12 +715,14 @@ impl DesktopCompositor {
                         }
                     }
                 } else {
-                    let sprite_row = &CURSOR_SPRITE_12X16[y - cur_r.y];
+                    let sy = ((y - cur_r.y) / cur_scale).min(CURSOR_H - 1);
+                    let sprite_row = &CURSOR_SPRITE_12X16[sy];
                     for x in r.x..(r.x + r.w) {
                         // SAFETY: `(x, y)` clamped to `(self.w, self.h)`.
                         let mut px = unsafe { *self.back_ptr.add(y * self.w + x) };
-                        if x >= cur_r.x && x < cur_r.x + CURSOR_W {
-                            match sprite_row[x - cur_r.x] {
+                        if x >= cur_r.x && x < cur_r.x + cur_r.w {
+                            let sx = ((x - cur_r.x) / cur_scale).min(CURSOR_W - 1);
+                            match sprite_row[sx] {
                                 1 => px = self.pal.cur_outline,
                                 2 => px = self.pal.cur_fill,
                                 3 => px = self.pal.fg_accent,

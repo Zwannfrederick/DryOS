@@ -22,9 +22,10 @@ use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_revoke, sys_exit,
     sys_ipc_call_inline, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_irq_ack, sys_irq_bind,
-    sys_notify_create, sys_notify_wait, sys_write_debug, UserIpcRecvExt, EAGAIN, EBADCAP, EPIPE,
-    EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_EVENT, IPC_OP_INPUT_INIT_MOUSE,
-    IPC_OP_INPUT_INIT_PORT, IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_QUERY_STATS,
+    sys_notify_create, sys_notify_wait, sys_write_debug, UserIpcRecvExt, BADGE_SUPERVISOR, EAGAIN,
+    EBADCAP, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
+    IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_EVENT, IPC_OP_INPUT_INIT_MOUSE, IPC_OP_INPUT_INIT_PORT,
+    IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_QUERY_STATS, IPC_OP_INPUT_SET_PREFS,
     IPC_OP_INPUT_SET_WM_SINK, IPC_OP_INPUT_WAIT, IPC_OP_PONG, IPC_OP_WM_INPUT_EVENT, IRQF_ONESHOT,
     IRQ_ACK_MASK, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, MSG_FLAG_NON_BLOCKING,
 };
@@ -257,27 +258,32 @@ pub extern "C" fn _start(srv_ep_cap: u64, irq1_cap: u64) -> ! {
 
         let mut recv_ext = UserIpcRecvExt::default();
         match sys_ipc_recv_ext(srv_ep_cap, MSG_FLAG_NON_BLOCKING as u64, 0, &mut recv_ext) {
-            Ok((tag, reply_tok, _mrs)) => {
+            Ok((tag, reply_tok, mrs)) => {
                 match msg_tag_label(tag) {
                     IPC_OP_INPUT_INIT_MOUSE => {
                         let cap12 = recv_ext.transferred_cap;
                         let mut vec12 = 0u64;
                         let mut ok_flag = 0u64;
+                        let mut wheel_flag = 0u64;
                         if cap12 != 0 {
                             let _ = sys_irq_ack(irq1_cap, IRQ_ACK_MASK);
-                            if let Ok(true) = init_i8042_mouse(ioport_cap) {
+                            if let Ok((true, has_wheel)) = init_i8042_mouse(ioport_cap) {
                                 if let Ok(v) = sys_irq_bind(cap12, notif_cap, IRQF_ONESHOT) {
                                     irq12_cap = cap12;
                                     mouse_irq_bound = true;
                                     decoder.mouse_enabled = true;
+                                    decoder.mouse.has_wheel = has_wheel;
                                     vec12 = v as u64;
                                     ok_flag = 1;
+                                    wheel_flag = u64::from(has_wheel);
                                 }
                             }
                             let _ = sys_irq_bind(irq1_cap, notif_cap, IRQF_ONESHOT);
                             let mut lb = LineBuilder::new();
                             lb.push_bytes(b"[DRY-INPUT] PS/2 AUX mouse init ok=");
                             lb.push_u64(ok_flag);
+                            lb.push_bytes(b" wheel=");
+                            lb.push_u64(wheel_flag);
                             lb.push_bytes(b" vec=0x");
                             lb.push_hex_u64(vec12);
                             log_line(&lb);
@@ -286,8 +292,45 @@ pub extern "C" fn _start(srv_ep_cap: u64, irq1_cap: u64) -> ! {
                             let _ = sys_ipc_reply_inline(
                                 srv_ep_cap,
                                 reply_tok,
-                                pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
-                                [ok_flag, vec12, 0, 0],
+                                pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
+                                [ok_flag, vec12, wheel_flag, 0],
+                            );
+                        }
+                    }
+                    IPC_OP_INPUT_SET_PREFS => {
+                        if recv_ext.sender_badge != BADGE_SUPERVISOR {
+                            if reply_tok != 0 {
+                                let _ = sys_ipc_reply_inline(
+                                    srv_ep_cap,
+                                    reply_tok,
+                                    pack_msg_tag(IPC_OP_ERR_PERM, 0, 1, 0),
+                                    [0; 4],
+                                );
+                            }
+                        } else if let Some(layout) = KeymapLayout::from_u8((mrs[0] & 0xff) as u8) {
+                            let speed = (mrs[1] as i16).clamp(1, 2);
+                            decoder.set_layout(layout);
+                            decoder.mouse.speed_mult = speed;
+                            let mut lb = LineBuilder::new();
+                            lb.push_bytes(b"[DRY-INPUT] PREFS keymap=");
+                            lb.push_u64(layout as u64);
+                            lb.push_bytes(b" speed=");
+                            lb.push_u64(speed as u64);
+                            log_line(&lb);
+                            if reply_tok != 0 {
+                                let _ = sys_ipc_reply_inline(
+                                    srv_ep_cap,
+                                    reply_tok,
+                                    pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
+                                    [layout as u64, speed as u64, 0, 0],
+                                );
+                            }
+                        } else if reply_tok != 0 {
+                            let _ = sys_ipc_reply_inline(
+                                srv_ep_cap,
+                                reply_tok,
+                                pack_msg_tag(IPC_OP_ERR_INVAL, 0, 1, 0),
+                                [0; 4],
                             );
                         }
                     }

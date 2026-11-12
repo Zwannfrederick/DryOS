@@ -30,6 +30,8 @@ const CMD_ENABLE_AUX: u8 = 0xA8;
 const CMD_WRITE_AUX: u8 = 0xD4;
 
 const DEV_CMD_ENABLE_SCAN: u8 = 0xF4;
+const MOUSE_CMD_GET_ID: u8 = 0xF2;
+const MOUSE_CMD_SET_RATE: u8 = 0xF3;
 const MOUSE_CMD_SET_DEFAULTS: u8 = 0xF6;
 const PS2_RESP_ACK: u8 = 0xFA;
 const PS2_RESP_RESEND: u8 = 0xFE;
@@ -53,41 +55,47 @@ const MOUSE_PKT_Y_SIGN: u8 = 1 << 5;
 const MOUSE_PKT_X_OVF: u8 = 1 << 6;
 const MOUSE_PKT_Y_OVF: u8 = 1 << 7;
 
-/// 3-byte standard PS/2 AUX mouse packet decoder with sync-bit recovery and overflow protection.
+/// 3-byte standard / 4-byte IntelliMouse PS/2 AUX packet decoder with sync-bit recovery.
 pub struct Ps2MouseDecoder {
-    pkt: [u8; 3],
+    pkt: [u8; 4],
     idx: u8,
+    pub has_wheel: bool,
+    pub speed_mult: i16,
     buttons: u8,
     pub packets_ok: u64,
     pub desync_drops: u64,
     pub overflow_drops: u64,
     pub move_events: u64,
     pub button_events: u64,
+    pub wheel_events: u64,
 }
 
 impl Ps2MouseDecoder {
     pub const fn new() -> Self {
         Self {
-            pkt: [0; 3],
+            pkt: [0; 4],
             idx: 0,
+            has_wheel: false,
+            speed_mult: 1,
             buttons: 0,
             packets_ok: 0,
             desync_drops: 0,
             overflow_drops: 0,
             move_events: 0,
             button_events: 0,
+            wheel_events: 0,
         }
     }
 
-    /// Feed one AUX (`STATUS_AUX_DATA == 1`) byte from `0x60` and emit up to 4 normalized events
-    /// (up to 3 button transitions + 1 relative motion event) into `out`.
+    /// Feed one AUX (`STATUS_AUX_DATA == 1`) byte from `0x60` and emit up to 5 normalized events
+    /// (up to 3 button transitions + 1 relative motion event + 1 scroll wheel event) into `out`.
     pub fn feed_byte(
         &mut self,
         byte: u8,
         modifiers: u8,
         next_seq: &mut u32,
         tsc48: u64,
-        out: &mut [InputEvent; 4],
+        out: &mut [InputEvent; 5],
     ) -> usize {
         if self.idx == 0 {
             if (byte & MOUSE_PKT_SYNC_BIT) == 0 {
@@ -99,9 +107,10 @@ impl Ps2MouseDecoder {
             return 0;
         }
 
+        let target_len = if self.has_wheel { 4u8 } else { 3u8 };
         self.pkt[self.idx as usize] = byte;
         self.idx += 1;
-        if self.idx < 3 {
+        if self.idx < target_len {
             return 0;
         }
         self.idx = 0;
@@ -109,6 +118,7 @@ impl Ps2MouseDecoder {
         let b0 = self.pkt[0];
         let b1 = self.pkt[1];
         let b2 = self.pkt[2];
+        let b3 = if self.has_wheel { self.pkt[3] } else { 0 };
         self.packets_ok = self.packets_ok.wrapping_add(1);
 
         let mut emitted = 0usize;
@@ -150,10 +160,12 @@ impl Ps2MouseDecoder {
             return emitted;
         }
 
-        let dx: i16 = (b1 as i16) - if (b0 & MOUSE_PKT_X_SIGN) != 0 { 256 } else { 0 };
+        let mult = self.speed_mult.clamp(1, 2);
+        let raw_dx: i16 = (b1 as i16) - if (b0 & MOUSE_PKT_X_SIGN) != 0 { 256 } else { 0 };
         let dy_ps2_up: i16 = (b2 as i16) - if (b0 & MOUSE_PKT_Y_SIGN) != 0 { 256 } else { 0 };
+        let dx = raw_dx.saturating_mul(mult);
         // PS/2 packet Y+ points upward; screen Y+ points downward.
-        let dy_screen: i16 = -dy_ps2_up;
+        let dy_screen: i16 = (-dy_ps2_up).saturating_mul(mult);
 
         if (dx != 0 || dy_screen != 0) && emitted < out.len() {
             let seq = *next_seq;
@@ -175,6 +187,33 @@ impl Ps2MouseDecoder {
             };
             emitted += 1;
             self.move_events = self.move_events.wrapping_add(1);
+        }
+
+        if self.has_wheel {
+            let raw4 = (b3 & 0x0f) as i8;
+            let dz = if (raw4 & 0x08) != 0 { raw4 - 16 } else { raw4 };
+            let wheel = -dz;
+            if wheel != 0 && emitted < out.len() {
+                let seq = *next_seq;
+                *next_seq = next_seq.wrapping_add(1);
+                out[emitted] = InputEvent {
+                    seq,
+                    device_id: DEV_ID_PS2_MOUSE,
+                    kind: InputEventKind::MouseScroll,
+                    modifiers,
+                    scancode: 0,
+                    keycode: 0,
+                    ascii: 0,
+                    flags: 0,
+                    dx: 0,
+                    dy: 0,
+                    buttons: new_buttons,
+                    wheel,
+                    timestamp_tsc48: tsc48,
+                };
+                emitted += 1;
+                self.wheel_events = self.wheel_events.wrapping_add(1);
+            }
         }
 
         emitted
@@ -215,6 +254,16 @@ impl Ps2Decoder {
             mouse_enabled: false,
             mouse: Ps2MouseDecoder::new(),
         }
+    }
+
+    #[inline]
+    pub fn set_layout(&mut self, layout: KeymapLayout) {
+        self.layout = layout;
+    }
+
+    #[inline]
+    pub const fn layout(&self) -> KeymapLayout {
+        self.layout
     }
 
     #[inline]
@@ -377,7 +426,7 @@ impl Ps2Decoder {
         queue: &mut InputRingQueue<N>,
     ) -> Result<usize, isize> {
         let mut pushed = 0usize;
-        let mut mouse_out = [InputEvent::EMPTY; 4];
+        let mut mouse_out = [InputEvent::EMPTY; 5];
         for _ in 0..48 {
             let status = sys_ioport_inb(ioport_cap, I8042_STATUS_PORT)?;
             if (status & STATUS_OBF) == 0 {
@@ -527,12 +576,40 @@ pub fn init_i8042_keyboard(ioport_cap: u64) -> Result<(), isize> {
     flush_obf(ioport_cap)
 }
 
-/// Initialize the PS/2 auxiliary mouse device (`0xA8`, `0xD4 -> 0xF6/0xF4`, CCB `IRQ1 | IRQ12`)
+fn read_aux_byte_after_ack(ioport_cap: u64) -> Result<Option<u8>, isize> {
+    for _ in 0..4096 {
+        let st = sys_ioport_inb(ioport_cap, I8042_STATUS_PORT)?;
+        if (st & STATUS_OBF) != 0 {
+            let b = sys_ioport_inb(ioport_cap, I8042_DATA_PORT)?;
+            if (st & STATUS_AUX_DATA) != 0 {
+                return Ok(Some(b));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn negotiate_intellimouse_wheel(ioport_cap: u64) -> Result<bool, isize> {
+    for rate in [200u8, 100, 80] {
+        if !send_aux_cmd_expect_ack(ioport_cap, MOUSE_CMD_SET_RATE)? {
+            return Ok(false);
+        }
+        if !send_aux_cmd_expect_ack(ioport_cap, rate)? {
+            return Ok(false);
+        }
+    }
+    if !send_aux_cmd_expect_ack(ioport_cap, MOUSE_CMD_GET_ID)? {
+        return Ok(false);
+    }
+    let dev_id = read_aux_byte_after_ack(ioport_cap)?.unwrap_or(0);
+    Ok(dev_id == 0x03 || dev_id == 0x04)
+}
+
+/// Initialize the PS/2 auxiliary mouse device (`0xA8`, `0xD4 -> 0xF6`, IntelliMouse wheel probe, `0xF4`)
 /// under single-controller serialization while IOAPIC pins are masked/quiesced.
 ///
-/// Returns `Ok(true)` if the PS/2 mouse acknowledged setup, or `Ok(false)` if absent/disconnected
-/// (preserving keyboard `IRQ1` operation cleanly).
-pub fn init_i8042_mouse(ioport_cap: u64) -> Result<bool, isize> {
+/// Returns `Ok((enable_ok, has_wheel))`.
+pub fn init_i8042_mouse(ioport_cap: u64) -> Result<(bool, bool), isize> {
     flush_obf(ioport_cap)?;
 
     // Mask both IRQ1 and IRQ12 inside CCB during AUX command sequencing so keyboard/mouse replies
@@ -547,7 +624,9 @@ pub fn init_i8042_mouse(ioport_cap: u64) -> Result<bool, isize> {
     flush_obf(ioport_cap)?;
 
     let defaults_ok = send_aux_cmd_expect_ack(ioport_cap, MOUSE_CMD_SET_DEFAULTS)?;
+    let mut has_wheel = false;
     let enable_ok = if defaults_ok {
+        has_wheel = negotiate_intellimouse_wheel(ioport_cap).unwrap_or(false);
         send_aux_cmd_expect_ack(ioport_cap, DEV_CMD_ENABLE_SCAN)?
     } else {
         false
@@ -560,5 +639,5 @@ pub fn init_i8042_mouse(ioport_cap: u64) -> Result<bool, isize> {
     };
     write_ccb(ioport_cap, final_ccb)?;
     flush_obf(ioport_cap)?;
-    Ok(enable_ok)
+    Ok((enable_ok, has_wheel))
 }
