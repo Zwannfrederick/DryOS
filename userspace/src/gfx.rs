@@ -5,6 +5,8 @@
 //! tables live purely in `no_std` userspace (`dry-display` compositor).
 
 pub const BOX_HORIZ: u8 = 0x80;
+pub const CURSOR_W: usize = 12;
+pub const CURSOR_H: usize = 16;
 
 /// Axis-aligned pixel rectangle (`x, y` top-left, `w, h` dimensions).
 #[repr(C)]
@@ -32,6 +34,15 @@ impl Rect {
     #[inline]
     pub const fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
+    }
+
+    #[inline]
+    pub const fn contains(self, px: usize, py: usize) -> bool {
+        !self.is_empty()
+            && px >= self.x
+            && py >= self.y
+            && px < self.x.saturating_add(self.w)
+            && py < self.y.saturating_add(self.h)
     }
 
     #[inline]
@@ -91,36 +102,84 @@ impl Rect {
     }
 }
 
-/// Accumulates damaged screen regions between `IPC_OP_SURFACE_PRESENT` / `MOVE` frames so only
-/// modified scanlines are copied across PCIe/MMIO into the uncached/WC GOP framebuffer.
-#[derive(Clone, Copy, Debug, Default)]
+/// Bounded multi-rectangle damage tracker (`MAX_DIRTY_RECTS = 6`) so disjoint small updates (such
+/// as `old_cursor_rect` + `new_cursor_rect` across distant screen coordinates) flush only modified
+/// scanlines (`2 x 192 = 384` px) instead of inflating into a full-screen bounding box.
+pub const MAX_DIRTY_RECTS: usize = 6;
+
+#[derive(Clone, Copy, Debug)]
 pub struct DirtyRegion {
-    bounds: Rect,
+    rects: [Rect; MAX_DIRTY_RECTS],
+    count: usize,
+}
+
+impl Default for DirtyRegion {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DirtyRegion {
     pub const fn new() -> Self {
         Self {
-            bounds: Rect::EMPTY,
+            rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
+            count: 0,
         }
     }
 
     #[inline]
     pub fn mark(&mut self, r: Rect) {
-        self.bounds = self.bounds.union(r);
+        if r.is_empty() {
+            return;
+        }
+        for existing in self.rects.iter_mut().take(self.count) {
+            if !existing.intersect(r).is_empty() {
+                *existing = existing.union(r);
+                return;
+            }
+        }
+        if self.count < MAX_DIRTY_RECTS {
+            self.rects[self.count] = r;
+            self.count += 1;
+        } else {
+            self.rects[MAX_DIRTY_RECTS - 1] = self.rects[MAX_DIRTY_RECTS - 1].union(r);
+        }
     }
 
     #[inline]
-    pub fn take(&mut self, fb_w: usize, fb_h: usize) -> Option<Rect> {
-        let clamped = self.bounds.clamp_to(fb_w, fb_h);
-        self.bounds = Rect::EMPTY;
-        if clamped.is_empty() {
-            None
-        } else {
-            Some(clamped)
+    pub fn drain_into(&mut self, fb_w: usize, fb_h: usize, out: &mut [Rect; MAX_DIRTY_RECTS]) -> usize {
+        let mut n = 0usize;
+        for i in 0..self.count {
+            let c = self.rects[i].clamp_to(fb_w, fb_h);
+            if !c.is_empty() {
+                out[n] = c;
+                n += 1;
+            }
         }
+        self.count = 0;
+        n
     }
 }
+
+/// 12x16 software pointer sprite (`0` = transparent, `1` = outline, `2` = white fill, `3` = accent).
+pub const CURSOR_SPRITE_12X16: [[u8; CURSOR_W]; CURSOR_H] = [
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+    [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0],
+    [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0, 0],
+    [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0],
+    [1, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+];
 
 /// Complete printable ASCII (`0x20..=0x7E`) + `BOX_HORIZ` (`0x80`) crisp 8x16 monospace font.
 pub const fn glyph_8x16(ch: u8) -> [u8; 16] {

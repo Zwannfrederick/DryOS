@@ -1,41 +1,62 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! `dry_init` — Root Userspace Supervisor (`CPL=3`, `SecDomain::RootSystem`).
 //!
-//! Operates in two modes selected by `RootInitBootInfo::session_mode`:
+//! Operates in three modes selected by `RootInitBootInfo::session_mode`:
 //! - `0` (**Milestone 1C Service & IPC Proof**): `dry_echo` round-trip, `#UD` crash + stale-handle
 //!   revocation + restart, and one-shot `dry_display` banner.
-//! - `>= 1` (**Milestone 2A-1 / P1 Interactive Session**): launches `dry-display` compositor,
-//!   `dry-input` (`IRQ1` + narrow `i8042` `IoPortCap`), and isolated `dry-shell` (`Userspace`),
-//!   supervises live `dry-input` `#UD` crash recovery + `CSpace` revocation + `IRQ1` re-binding,
-//!   and orchestrates zero-leak shutdown.
+//! - `1` (**Milestone 2A-1 / P1 Interactive Session**): launches `dry-display`, `dry-input`, and
+//!   `dry-shell`, supervises live `dry-input` `#UD` recovery, and orchestrates zero-leak shutdown.
+//! - `>= 2` (**Milestone 2A-2 / DRY Desktop Preview**): launches `dry-display` multi-window WM,
+//!   unified `dry-input` (`IRQ1` keyboard + `IRQ12` PS/2 mouse), and two independent `Userspace`
+//!   applications (`dry-shell` in `0x0102` and `dry-sysmon` in `0x0103`), enforces unforgeable
+//!   capability badges, reaps per-app faults (`IPC_OP_WM_OWNER_GONE`), and optionally runs live
+//!   Ring 3 negative WM security probes (`session_mode == 3`).
 
 #![no_std]
 #![no_main]
 
 use core::ptr::read_volatile;
+use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_derive, sys_cap_revoke, sys_ep_create,
-    sys_exit, sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_recv_inline,
-    sys_ipc_reply_inline, sys_ipc_reply_with_grant, sys_ipc_send_inline, sys_notify_create,
-    sys_notify_wait, sys_proc_spawn, sys_proc_wait, sys_write_debug, RootInitBootInfo, EBADCAP,
-    EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_DISPLAY_DONE, IPC_OP_EXIT_CLEAN,
-    IPC_OP_INPUT_INIT_PORT, IPC_OP_INPUT_WAIT, IPC_OP_PING_SILENT, IPC_OP_PING_TRACE, IPC_OP_PONG,
-    IPC_OP_SUP_HELLO, IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, RIGHT_CALL, RIGHT_GRANT,
-    RIGHT_MAP, RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WAIT,
-    RIGHT_WRITE, ROOT_INIT_BOOT_MAGIC,
+    sys_exit, sys_frame_alloc, sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_recv_ext,
+    sys_ipc_recv_inline, sys_ipc_reply_inline, sys_ipc_reply_with_grant, sys_ipc_send_inline,
+    sys_notify_create, sys_notify_signal, sys_notify_wait, sys_proc_spawn, sys_proc_wait,
+    sys_sysinfo, sys_write_debug, RootInitBootInfo, UserIpcRecvExt, UserSysInfo, BADGE_INPUT_SVC,
+    BADGE_SUPERVISOR, BADGE_WIN_ROGUE_PROBE, BADGE_WIN_SHELL, BADGE_WIN_SYSMON, EAGAIN, EBADCAP,
+    EPIPE, EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2, IPC_OP_DISPLAY_DONE, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_INIT_MOUSE, IPC_OP_INPUT_INIT_PORT,
+    IPC_OP_INPUT_SET_WM_SINK, IPC_OP_INPUT_WAIT, IPC_OP_PING_SILENT, IPC_OP_PING_TRACE,
+    IPC_OP_PONG, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_RECONNECT_INPUT,
+    IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE,
+    IPC_OP_WIN_POLL_EVENT, IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_QUERY_STATE,
+    RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND,
+    RIGHT_SIGNAL, RIGHT_WAIT, RIGHT_WRITE, ROOT_INIT_BOOT_MAGIC,
 };
 
 const PING_WORD: u64 = u64::from_le_bytes(*b"ping\0\0\0\0");
 const PONG_WORD: u64 = u64::from_le_bytes(*b"pong\0\0\0\0");
 
+const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
 const ECHO_COMP_ID: u16 = 0x0101;
 const SHELL_COMP_ID: u16 = 0x0102;
+const SYSMON_COMP_ID: u16 = 0x0103;
 const DISPLAY_COMP_ID: u16 = 0x0002;
 const INPUT_COMP_ID: u16 = 0x0003;
+const SYSMON_SHUTDOWN_BIT: u64 = 1 << 1;
 
 #[inline]
 const fn domain_spec(domain_code: u8, comp_id: u16) -> u64 {
     (domain_code as u64) | (1u64 << 8) | ((comp_id as u64) << 16)
+}
+
+fn log_line(lb: &LineBuilder) {
+    let mut out = [0u8; 128];
+    let s = lb.as_bytes();
+    let n = s.len().min(out.len() - 1);
+    out[..n].copy_from_slice(&s[..n]);
+    out[n] = b'\n';
+    let _ = sys_write_debug(&out[..=n]);
 }
 
 fn spawn_and_init_input_service(boot: &RootInitBootInfo) -> Result<(u64, u64), i32> {
@@ -68,6 +89,487 @@ fn spawn_and_init_input_service(boot: &RootInitBootInfo) -> Result<(u64, u64), i
     }
 
     Ok((input_handle, input_ep))
+}
+
+fn spawn_and_init_desktop_input(
+    boot: &RootInitBootInfo,
+    disp_ep: u64,
+) -> Result<(u64, u64), i32> {
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let input_ep = sys_ep_create(ipc_spec).map_err(|_| 140)?;
+
+    let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
+    let irq_rights = RIGHT_READ | RIGHT_SIGNAL | RIGHT_WAIT;
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let (input_handle, _) = sys_proc_spawn(
+        boot.input_mod_cap,
+        1,
+        INPUT_COMP_ID,
+        (input_ep, srv_rights, 0x1040),
+        (boot.irq1_cap, irq_rights),
+    )
+    .map_err(|_| 141)?;
+
+    let (rtag, _, _) = sys_ipc_call_with_grant(
+        input_ep,
+        IPC_OP_INPUT_INIT_PORT,
+        [0; 4],
+        boot.i8042_port_cap,
+        RIGHT_READ | RIGHT_WRITE,
+        0,
+        0,
+    )
+    .map_err(|_| 142)?;
+    if msg_tag_label(rtag) != IPC_OP_PONG {
+        return Err(143);
+    }
+
+    if boot.irq12_cap != 0 {
+        let _ = sys_ipc_call_with_grant(
+            input_ep,
+            IPC_OP_INPUT_INIT_MOUSE,
+            [0; 4],
+            boot.irq12_cap,
+            irq_rights,
+            0,
+            0,
+        );
+    }
+    if disp_ep != 0 {
+        let _ = sys_ipc_call_with_grant(
+            input_ep,
+            IPC_OP_INPUT_SET_WM_SINK,
+            [0; 4],
+            disp_ep,
+            cli_rights,
+            BADGE_INPUT_SVC,
+            0,
+        );
+    }
+    Ok((input_handle, input_ep))
+}
+
+fn run_wm_security_audit(disp_ep: u64) -> Result<(), i32> {
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let rogue_ep = sys_cap_derive(disp_ep, cli_rights, 0, BADGE_WIN_ROGUE_PROBE).map_err(|_| 170)?;
+
+    // 1. Rogue cross-window surface presentation against Window 1 & Window 2 must return `IPC_OP_ERR_PERM`.
+    for target_wid in [1u64, 2u64] {
+        let (t, _, _) = sys_ipc_call_inline(
+            rogue_ep,
+            pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
+            [target_wid, 0, 0, 0],
+            0,
+        )
+        .map_err(|_| 171)?;
+        if msg_tag_label(t) != IPC_OP_ERR_PERM {
+            return Err(172);
+        }
+    }
+
+    // 2. Rogue cross-window input queue eavesdrop must return `IPC_OP_ERR_PERM`.
+    let (t_poll, _, _) = sys_ipc_call_inline(
+        rogue_ep,
+        pack_msg_tag(IPC_OP_WIN_POLL_EVENT, 0, 1, 0),
+        [1, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| 173)?;
+    if msg_tag_label(t_poll) != IPC_OP_ERR_PERM {
+        return Err(174);
+    }
+
+    // 3. Rogue cross-window close hijack must return `IPC_OP_ERR_PERM`.
+    let (t_close, _, _) = sys_ipc_call_inline(
+        rogue_ep,
+        pack_msg_tag(IPC_OP_WIN_CLOSE, 0, 1, 0),
+        [1, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| 175)?;
+    if msg_tag_label(t_close) != IPC_OP_ERR_PERM {
+        return Err(176);
+    }
+
+    // 4. Forged `IPC_OP_WM_INPUT_EVENT` from non-`BADGE_INPUT_SVC` must return `IPC_OP_ERR_PERM`.
+    let (t_ev, _, _) = sys_ipc_call_inline(
+        rogue_ep,
+        pack_msg_tag(IPC_OP_WM_INPUT_EVENT, 0, 4, 0),
+        [0; 4],
+        0,
+    )
+    .map_err(|_| 177)?;
+    if msg_tag_label(t_ev) != IPC_OP_ERR_PERM {
+        return Err(178);
+    }
+
+    // 5. Forged `IPC_OP_WM_OWNER_GONE` from non-`BADGE_SUPERVISOR` must return `IPC_OP_ERR_PERM`.
+    let (t_reap, _, _) = sys_ipc_call_inline(
+        rogue_ep,
+        pack_msg_tag(IPC_OP_WM_OWNER_GONE, 0, 1, 0),
+        [BADGE_WIN_SHELL, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| 179)?;
+    if msg_tag_label(t_reap) != IPC_OP_ERR_PERM {
+        return Err(180);
+    }
+
+    // 6. Malformed geometry (`999x999`) surface attach must be rejected with `IPC_OP_ERR_INVAL` & zero leak.
+    let tmp_frame = sys_frame_alloc(0).map_err(|_| 181)?;
+    let (t_geom, _, _) = sys_ipc_call_with_grant(
+        rogue_ep,
+        IPC_OP_SURFACE_ATTACH,
+        [999 | (999 << 16), 0, 0, 0],
+        tmp_frame,
+        RIGHT_READ | RIGHT_MAP,
+        0,
+        0,
+    )
+    .map_err(|_| 182)?;
+    let _ = sys_cap_revoke(tmp_frame, 2);
+    let _ = sys_cap_revoke(rogue_ep, 1);
+    if msg_tag_label(t_geom) != IPC_OP_ERR_INVAL {
+        return Err(183);
+    }
+
+    let _ = sys_write_debug(
+        b"[DRY-WM-SEC] PASS: cross_present_denied=true cross_input_denied=true close_hijack_denied=true forged_ev_denied=true forged_reap_denied=true bad_geom_denied=true\n",
+    );
+    Ok(())
+}
+
+fn reap_sysmon_if_exited(
+    sysmon_alive: &mut bool,
+    sysmon_handle: u64,
+    sysmon_notif_cap: &mut u64,
+    disp_sup_cap: u64,
+    blocking: bool,
+) {
+    if !*sysmon_alive {
+        return;
+    }
+    let flags = if blocking { 0 } else { 1 };
+    match sys_proc_wait(sysmon_handle, flags, 0) {
+        Ok((w_kind, w_detail)) => {
+            *sysmon_alive = false;
+            if *sysmon_notif_cap != 0 {
+                let _ = sys_cap_revoke(*sysmon_notif_cap, 1);
+                *sysmon_notif_cap = 0;
+            }
+            if disp_sup_cap != 0 {
+                let _ = sys_ipc_call_inline(
+                    disp_sup_cap,
+                    pack_msg_tag(IPC_OP_WM_OWNER_GONE, 0, 1, 0),
+                    [BADGE_WIN_SYSMON, 0, 0, 0],
+                    0,
+                );
+            }
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-INIT] SYSMON_REAPED kind=");
+            lb.push_u64(w_kind as u64);
+            lb.push_bytes(b" vec=");
+            lb.push_u64(w_detail & 0xff);
+            lb.push_bytes(b" window_cleaned=true");
+            log_line(&lb);
+        }
+        Err(EAGAIN) => {}
+        Err(_) => {
+            *sysmon_alive = false;
+        }
+    }
+}
+
+fn run_p2_desktop_session(boot: &RootInitBootInfo) -> ! {
+    if boot.input_mod_cap == 0
+        || boot.shell_mod_cap == 0
+        || boot.sysmon_mod_cap == 0
+        || boot.irq1_cap == 0
+        || boot.i8042_port_cap == 0
+    {
+        sys_exit(139);
+    }
+
+    let _ = sys_write_debug(b"[DRY-INIT] Starting Milestone 2A-2 multi-window desktop session in CPL3\n");
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+
+    let mut sys = UserSysInfo::default();
+    let _ = sys_sysinfo(&mut sys);
+    let poll_timeout_tsc = 40_000u64.saturating_mul(sys.tsc_mhz.max(1000));
+
+    // 1. Optional `dry-display` Ring 3 multi-window WM (`fb_cap != 0` unless `-vga none`).
+    let mut disp_handle = 0u64;
+    let mut disp_ep = 0u64;
+    let mut disp_sup_cap = 0u64;
+    if boot.fb_cap != 0 && boot.display_mod_cap != 0 {
+        disp_ep = match sys_ep_create(ipc_spec) {
+            Ok(c) => c,
+            Err(_) => sys_exit(144),
+        };
+        disp_sup_cap = match sys_cap_derive(disp_ep, cli_rights, 0, BADGE_SUPERVISOR) {
+            Ok(c) => c,
+            Err(_) => sys_exit(144),
+        };
+        let fb_delegatable = match sys_cap_derive(
+            boot.fb_cap,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT,
+            0,
+            0,
+        ) {
+            Ok(c) => c,
+            Err(_) => sys_exit(145),
+        };
+        let (dh, _) = match sys_proc_spawn(
+            boot.display_mod_cap,
+            1,
+            DISPLAY_COMP_ID,
+            (disp_ep, RIGHT_READ | RIGHT_RECV | RIGHT_REPLY, 0xd152),
+            (fb_delegatable, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP),
+        ) {
+            Ok(v) => v,
+            Err(_) => sys_exit(146),
+        };
+        disp_handle = dh;
+    }
+
+    // 2. Spawn unified `dry-input` (`RootSystem`, `0x0003`) owning `IRQ1` + `IRQ12` + `i8042`.
+    let (mut input_handle, mut input_ep) = match spawn_and_init_desktop_input(boot, disp_ep) {
+        Ok(v) => v,
+        Err(code) => sys_exit(code),
+    };
+
+    // 3. Spawn two independent unprivileged `Userspace` apps (`dry-shell` `0x0102`, `dry-sysmon` `0x0103`).
+    let sup_ep = match sys_ep_create(ipc_spec) {
+        Ok(c) => c,
+        Err(_) => sys_exit(147),
+    };
+    let (shell_handle, _) = match sys_proc_spawn(
+        boot.shell_mod_cap,
+        0,
+        SHELL_COMP_ID,
+        (sup_ep, cli_rights, 0x5501),
+        (input_ep, cli_rights),
+    ) {
+        Ok(v) => v,
+        Err(_) => sys_exit(148),
+    };
+    let (sysmon_handle, _) = match sys_proc_spawn(
+        boot.sysmon_mod_cap,
+        0,
+        SYSMON_COMP_ID,
+        (sup_ep, cli_rights, 0x5502),
+        (0, 0),
+    ) {
+        Ok(v) => v,
+        Err(_) => sys_exit(165),
+    };
+
+    let mut sysmon_alive = true;
+    let mut sysmon_notif_cap = 0u64;
+    let mut shell_hello = false;
+    let mut sysmon_hello = false;
+    let mut sec_audit_done = boot.session_mode != 3 || disp_ep == 0;
+    let mut restarts = 0u64;
+
+    loop {
+        reap_sysmon_if_exited(
+            &mut sysmon_alive,
+            sysmon_handle,
+            &mut sysmon_notif_cap,
+            disp_sup_cap,
+            false,
+        );
+
+        if !sec_audit_done && shell_hello && sysmon_hello {
+            if let Ok((_, _, qmrs)) = sys_ipc_call_inline(
+                disp_sup_cap,
+                pack_msg_tag(IPC_OP_WM_QUERY_STATE, 0, 1, 0),
+                [0; 4],
+                0,
+            ) {
+                if qmrs[3] >= 2 {
+                    if let Err(code) = run_wm_security_audit(disp_ep) {
+                        sys_exit(code);
+                    }
+                    sec_audit_done = true;
+                }
+            }
+        }
+
+        let mut ext = UserIpcRecvExt::default();
+        let (tag, reply_tok, mrs) = match sys_ipc_recv_ext(sup_ep, 0, poll_timeout_tsc, &mut ext) {
+            Ok(v) => v,
+            Err(ETIMEDOUT | EAGAIN) => continue,
+            Err(_) => break,
+        };
+
+        match msg_tag_label(tag) {
+            IPC_OP_SUP_HELLO => {
+                let caller_comp = mrs[0];
+                let badge = if caller_comp == SYSMON_COMP_ID as u64 {
+                    if ext.transferred_cap != 0 {
+                        sysmon_notif_cap = ext.transferred_cap;
+                    }
+                    sysmon_hello = true;
+                    BADGE_WIN_SYSMON
+                } else {
+                    shell_hello = true;
+                    BADGE_WIN_SHELL
+                };
+
+                if disp_ep != 0 {
+                    if sys_ipc_reply_with_grant(
+                        sup_ep,
+                        reply_tok,
+                        IPC_OP_PONG,
+                        [boot.session_mode, 0, 0, 0],
+                        disp_ep,
+                        cli_rights,
+                        badge,
+                    )
+                    .is_err()
+                    {
+                        sys_exit(149);
+                    }
+                } else {
+                    let _ = sys_ipc_reply_inline(
+                        sup_ep,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [boot.session_mode, 0, 0, 0],
+                    );
+                }
+            }
+            IPC_OP_SUP_APP_EXITED => {
+                if reply_tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        sup_ep,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [1, 0, 0, 0],
+                    );
+                }
+                if mrs[0] == SYSMON_COMP_ID as u64 {
+                    reap_sysmon_if_exited(
+                        &mut sysmon_alive,
+                        sysmon_handle,
+                        &mut sysmon_notif_cap,
+                        disp_sup_cap,
+                        true,
+                    );
+                }
+            }
+            IPC_OP_SUP_RECONNECT_INPUT => {
+                let (w_kind, w_detail) = match sys_proc_wait(input_handle, 0, 0) {
+                    Ok(v) => v,
+                    Err(_) => sys_exit(150),
+                };
+                if w_kind != 1 || (w_detail & 0xff) != 6 {
+                    sys_exit(151);
+                }
+                if sys_cap_revoke(input_ep, 2).is_err() {
+                    sys_exit(154);
+                }
+                let (new_handle, new_ep) = match spawn_and_init_desktop_input(boot, disp_ep) {
+                    Ok(v) => v,
+                    Err(code) => sys_exit(code),
+                };
+                input_handle = new_handle;
+                input_ep = new_ep;
+                restarts += 1;
+                let _ = sys_write_debug(
+                    b"[DRY-INIT] Reaped crashed dry-input, revoked stale cap & restarted\n",
+                );
+                if sys_ipc_reply_with_grant(
+                    sup_ep,
+                    reply_tok,
+                    IPC_OP_PONG,
+                    [restarts, 0, 0, 0],
+                    input_ep,
+                    cli_rights,
+                    0x54e1,
+                )
+                .is_err()
+                {
+                    sys_exit(156);
+                }
+            }
+            IPC_OP_SUP_SHUTDOWN => {
+                if !sec_audit_done {
+                    if let Err(code) = run_wm_security_audit(disp_ep) {
+                        sys_exit(code);
+                    }
+                }
+                if reply_tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        sup_ep,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [1, 0, 0, 0],
+                    );
+                }
+                break;
+            }
+            _ => {
+                if reply_tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        sup_ep,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [0; 4],
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. Deterministic zero-leak teardown of `dry-shell`, `dry-sysmon`, `dry-input`, and `dry-display`.
+    if sys_proc_wait(shell_handle, 0, 0) != Ok((0, 0)) {
+        sys_exit(157);
+    }
+
+    if sysmon_alive {
+        if sysmon_notif_cap != 0 {
+            let _ = sys_notify_signal(sysmon_notif_cap, SYSMON_SHUTDOWN_BIT);
+        }
+        reap_sysmon_if_exited(
+            &mut sysmon_alive,
+            sysmon_handle,
+            &mut sysmon_notif_cap,
+            disp_sup_cap,
+            true,
+        );
+    }
+
+    let _ = sys_ipc_call_inline(
+        input_ep,
+        pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
+        [0; 4],
+        0,
+    );
+    if sys_proc_wait(input_handle, 0, 0) != Ok((0, 0)) {
+        sys_exit(158);
+    }
+    let _ = sys_cap_revoke(input_ep, 2);
+
+    if disp_ep != 0 {
+        let _ = sys_ipc_call_inline(
+            disp_sup_cap,
+            pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+        if sys_proc_wait(disp_handle, 0, 0) != Ok((0, 0)) {
+            sys_exit(159);
+        }
+        let _ = sys_cap_revoke(disp_sup_cap, 1);
+        let _ = sys_cap_revoke(disp_ep, 2);
+    }
+
+    let _ = sys_cap_revoke(sup_ep, 2);
+    let _ = sys_write_debug(b"[DRY-INIT] P2 desktop session verified & reaped cleanly\n");
+    sys_exit(0);
 }
 
 fn run_p1_interactive_session(boot: &RootInitBootInfo) -> ! {
@@ -164,7 +666,6 @@ fn run_p1_interactive_session(boot: &RootInitBootInfo) -> ! {
                 }
             }
             IPC_OP_SUP_RECONNECT_INPUT => {
-                // Reap crashed `dry-input`, verify `-EPIPE` + post-revoke rejection, and respawn!
                 let (w_kind, w_detail) = match sys_proc_wait(input_handle, 0, 0) {
                     Ok(v) => v,
                     Err(_) => sys_exit(150),
@@ -247,7 +748,6 @@ fn run_p1_interactive_session(boot: &RootInitBootInfo) -> ! {
         }
     }
 
-    // 5. Deterministic zero-leak teardown of `dry-shell`, `dry-input`, and `dry-display`.
     if sys_proc_wait(shell_handle, 0, 0) != Ok((0, 0)) {
         sys_exit(157);
     }
@@ -294,13 +794,15 @@ pub extern "C" fn _start(boot_info_ptr: u64, _arg1: u64) -> ! {
         sys_exit(71);
     }
 
-    if boot.session_mode >= 1 {
+    if boot.session_mode >= 2 {
+        run_p2_desktop_session(&boot);
+    }
+    if boot.session_mode == 1 {
         run_p1_interactive_session(&boot);
     }
 
     let _ = sys_write_debug(b"[DRY-INIT] Root service started in CPL3\n");
 
-    // 1. Create `Endpoint` + startup `Notification` scoped to `dry_echo`'s `Userspace` compartment.
     let echo_spec = domain_spec(0, ECHO_COMP_ID);
     let ep1_root = match sys_ep_create(echo_spec) {
         Ok(c) => c,
@@ -313,7 +815,6 @@ pub extern "C" fn _start(boot_info_ptr: u64, _arg1: u64) -> ! {
         Err(_) => sys_exit(73),
     };
 
-    // 2. Spawn `dry_echo` in `SecDomain::Userspace` with narrowed `(RECV|REPLY, SIGNAL)` caps.
     let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
     let sig_rights = RIGHT_READ | RIGHT_SIGNAL;
     let (echo1_handle, _) = match sys_proc_spawn(
@@ -331,7 +832,6 @@ pub extern "C" fn _start(boot_info_ptr: u64, _arg1: u64) -> ! {
         sys_exit(75);
     }
 
-    // 3. Derive narrowed client capability (`SEND | CALL`, badged) & execute `ping -> pong` round-trip.
     let cli_ep1 = match sys_cap_derive(ep1_root, RIGHT_READ | RIGHT_SEND | RIGHT_CALL, 0, 0x00c1_1e01) {
         Ok(c) => c,
         Err(_) => sys_exit(76),
@@ -352,7 +852,6 @@ pub extern "C" fn _start(boot_info_ptr: u64, _arg1: u64) -> ! {
     }
     let _ = sys_write_debug(b"[DRY-IPC] Roundtrip successful\n");
 
-    // 4. Crash Supervision & Restart Verification (`Stage C.4, C.5, D.4, F.13`).
     let _ = sys_ipc_send_inline(cli_ep1, pack_msg_tag(IPC_OP_CRASH_UD2, 0, 1, 0), [0; 4], 0);
     let (wait_kind1, wait_detail1) = match sys_proc_wait(echo1_handle, 0, 0) {
         Ok(v) => v,
@@ -411,7 +910,6 @@ pub extern "C" fn _start(boot_info_ptr: u64, _arg1: u64) -> ! {
     }
     let _ = sys_cap_revoke(ep2_root, 2);
 
-    // 5. Optional Ring 3 Display Service (`Stage E`): spawn `dry_display` if GOP `fb_cap` present.
     if boot.fb_cap != 0 && boot.display_mod_cap != 0 {
         let disp_spec = domain_spec(1, DISPLAY_COMP_ID);
         let disp_ep = match sys_ep_create(disp_spec) {

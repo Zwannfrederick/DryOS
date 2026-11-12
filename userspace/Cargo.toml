@@ -32,6 +32,10 @@ path = "src/bin/dry_input.rs"
 name = "dry-shell"
 path = "src/bin/dry_shell.rs"
 
+[[bin]]
+name = "dry-sysmon"
+path = "src/bin/dry_sysmon.rs"
+
 [profile.dev]
 panic = "abort"
 

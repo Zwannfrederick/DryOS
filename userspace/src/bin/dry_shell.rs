@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! `dry-shell` — Unprivileged Ring 3 (`CPL=3`, `SecDomain::Userspace`) Interactive Shell.
+//! `dry-shell` — Unprivileged Ring 3 (`CPL=3`, `SecDomain::Userspace`, `0x0102`) Interactive Shell.
 //!
 //! Holds ZERO hardware capabilities (`0` `IrqCap`, `0` `IoPortCap`, `0` `Framebuffer` cap):
-//! receives normalized `InputEvent`s from `dry-input` over Capability IPC, executes commands
-//! backed by live `SYS_SYSINFO` kernel telemetry, writes character cells into its private 4 KiB
-//! `SharedTerminalSurface`, and requests dirty-rectangle presentation from `dry-display`.
+//! - In Milestone 2A-1 (`P1`, `session_mode == 1`) or headless `-vga none` mode, pulls events from
+//!   `dry-input` (`IPC_OP_INPUT_WAIT`) and presents an `80x24` floating surface.
+//! - In Milestone 2A-2 (`Desktop Preview`, `session_mode >= 2` with GOP active), attaches `Window A`
+//!   (`70x22` at `(24, 52)`) to the Ring 3 Window Manager and receives focus-routed keyboard events
+//!   strictly via `IPC_OP_WIN_WAIT_EVENT` (`0` keystroke leakage when another window holds focus!).
 
 #![no_std]
 #![no_main]
+
+use core::cell::UnsafeCell;
 
 use dry_userspace::input::{InputEvent, InputEventKind, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use dry_userspace::keymap::{
@@ -15,20 +19,24 @@ use dry_userspace::keymap::{
 };
 use dry_userspace::shell::{parse_command, LineBuilder, ShellCommand, ShellEngine, MAX_INPUT_LEN};
 use dry_userspace::surface::{
-    SharedTerminalSurface, STYLE_DEFAULT, STYLE_OK, STYLE_WARN,
+    SharedWindowSurface, STYLE_DEFAULT, STYLE_OK, STYLE_WARN, TERM_COLS, TERM_ROWS,
 };
+use dry_userspace::wm::{WindowRole, TITLE_KIND_TERMINAL};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_sysinfo, sys_vspace_map,
     sys_write_debug, UserSysInfo, EBADCAP, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_INPUT_EVENT,
     IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT, IPC_OP_PONG, IPC_OP_SUP_HELLO,
     IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE,
-    IPC_OP_SURFACE_PRESENT, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT, RIGHT_MAP,
+    RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
-use core::cell::UnsafeCell;
-
 const SHELL_SURF_VADDR: u64 = 0x1800_0000;
+const DESKTOP_WIN_COLS: u16 = 70;
+const DESKTOP_WIN_ROWS: u16 = 22;
+const DESKTOP_WIN_X: u64 = 24;
+const DESKTOP_WIN_Y: u64 = 52;
 
 struct SingleThreadCell(UnsafeCell<ShellEngine>);
 // SAFETY: `dry-shell` executes strictly on a single CPL=3 thread.
@@ -37,7 +45,7 @@ unsafe impl Sync for SingleThreadCell {}
 static ENGINE: SingleThreadCell = SingleThreadCell(UnsafeCell::new(ShellEngine::new()));
 
 fn debug_line(lb: &LineBuilder) {
-    let mut out = [0u8; 96];
+    let mut out = [0u8; 112];
     let s = lb.as_bytes();
     let n = s.len().min(out.len() - 1);
     out[..n].copy_from_slice(&s[..n]);
@@ -45,14 +53,14 @@ fn debug_line(lb: &LineBuilder) {
     let _ = sys_write_debug(&out[..=n]);
 }
 
-fn present_surface(disp_ep_cap: u64) -> (u64, u64) {
+fn present_surface(disp_ep_cap: u64, win_id: u32) -> (u64, u64) {
     if disp_ep_cap == 0 {
         return (0, 0);
     }
     match sys_ipc_call_inline(
         disp_ep_cap,
         pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
-        [0; 4],
+        [win_id as u64, 0, 0, 0],
         0,
     ) {
         Ok((_, _, mrs)) => (mrs[0], mrs[1]),
@@ -60,14 +68,14 @@ fn present_surface(disp_ep_cap: u64) -> (u64, u64) {
     }
 }
 
-fn move_floating_window(disp_ep_cap: u64, dx: i64, dy: i64) {
+fn move_floating_window(disp_ep_cap: u64, win_id: u32, dx: i64, dy: i64) {
     if disp_ep_cap == 0 {
         return;
     }
     if let Ok((_, _, mrs)) = sys_ipc_call_inline(
         disp_ep_cap,
-        pack_msg_tag(IPC_OP_SURFACE_MOVE, 0, 2, 0),
-        [dx as u64, dy as u64, 0, 0],
+        pack_msg_tag(IPC_OP_SURFACE_MOVE, 0, 3, 0),
+        [dx as u64, dy as u64, win_id as u64, 0],
         0,
     ) {
         let mut lb = LineBuilder::new();
@@ -81,6 +89,37 @@ fn move_floating_window(disp_ep_cap: u64, dx: i64, dy: i64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reconnect_input_service(
+    sup_ep_cap: u64,
+    disp_ep_cap: u64,
+    win_id: u32,
+    input_ep_cap: &mut u64,
+    engine: &mut ShellEngine,
+    surf: &SharedWindowSurface,
+    win_cols: usize,
+    win_rows: usize,
+    sys: &mut UserSysInfo,
+) -> bool {
+    match sys_ipc_call_with_grant(sup_ep_cap, IPC_OP_SUP_RECONNECT_INPUT, [0; 4], 0, 0, 0, 0) {
+        Ok((rtag, new_ep, rmrs)) if msg_tag_label(rtag) == IPC_OP_PONG && new_ep != 0 => {
+            let _ = sys_cap_revoke(*input_ep_cap, 1);
+            *input_ep_cap = new_ep;
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[supervisor] dry-input restarted (#");
+            lb.push_u64(rmrs[0]);
+            lb.push_bytes(b"), stale cap revoked, IRQ1 re-bound");
+            engine.push_line(lb.as_bytes(), STYLE_OK);
+            let _ = sys_sysinfo(sys);
+            engine.project_to_surface(surf, win_cols, win_rows, Some(sys));
+            let _ = present_surface(disp_ep_cap, win_id);
+            let _ = sys_write_debug(b"[DRY-SHELL] INPUT_RECOVERED ok=true\n");
+            true
+        }
+        _ => false,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
     let (cs, ss) = read_cs_ss();
@@ -88,21 +127,33 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
         sys_exit(130);
     }
 
-    // 1. Handshake with `dry-init` supervisor to receive optional `disp_ep_cap` (`0` if headless).
-    let disp_ep_cap = match sys_ipc_call_with_grant(
+    // 1. Handshake with `dry-init` supervisor (`0x0102` = `dry-shell`) to obtain badged `disp_ep_cap`.
+    let (disp_ep_cap, session_mode) = match sys_ipc_call_with_grant(
         sup_ep_cap,
         IPC_OP_SUP_HELLO,
-        [0; 4],
+        [0x0102, 0, 0, 0],
         0,
         0,
         0,
         0,
     ) {
-        Ok((tag, cap, _)) if msg_tag_label(tag) == IPC_OP_PONG => cap,
+        Ok((tag, cap, mrs)) if msg_tag_label(tag) == IPC_OP_PONG => (cap, mrs[0]),
         _ => sys_exit(131),
     };
 
-    // 2. Allocate & map 4 KiB `SharedTerminalSurface` (`USER_RW`), then grant `READ|MAP` to `dry-display`.
+    let desktop_wm_mode = session_mode >= 2 && disp_ep_cap != 0;
+    let win_cols = if desktop_wm_mode {
+        DESKTOP_WIN_COLS
+    } else {
+        TERM_COLS as u16
+    };
+    let win_rows = if desktop_wm_mode {
+        DESKTOP_WIN_ROWS
+    } else {
+        TERM_ROWS as u16
+    };
+
+    // 2. Allocate & initialize atomic 4 KiB `SharedWindowSurface` (`USER_RW`).
     let surf_cap = match sys_frame_alloc(0) {
         Ok(c) => c,
         Err(_) => sys_exit(132),
@@ -110,9 +161,8 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
     if sys_vspace_map(surf_cap, SHELL_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
         sys_exit(133);
     }
-    // SAFETY: `SHELL_SURF_VADDR` is exclusively mapped `USER_RW` in single-threaded `dry-shell`.
-    let surf = unsafe { &mut *(SHELL_SURF_VADDR as *mut SharedTerminalSurface) };
-    surf.init();
+    // SAFETY: `SHELL_SURF_VADDR` is mapped `USER_RW` in `dry-shell`'s `VSpace`; `init_at` uses atomics only.
+    let surf = unsafe { SharedWindowSurface::init_at(SHELL_SURF_VADDR, win_cols, win_rows, true) };
 
     // SAFETY: Single-threaded process owns `ENGINE`.
     let engine = unsafe { &mut *ENGINE.0.get() };
@@ -120,18 +170,33 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
 
     let mut sys = UserSysInfo::default();
     let _ = sys_sysinfo(&mut sys);
-    engine.project_to_surface(surf, Some(&sys));
+    engine.project_to_surface(surf, win_cols as usize, win_rows as usize, Some(&sys));
 
+    let mut win_id: u32 = 0;
     if disp_ep_cap != 0 {
-        let _ = sys_ipc_call_with_grant(
+        let attach_mrs = if desktop_wm_mode {
+            [
+                (win_cols as u64) | ((win_rows as u64) << 16),
+                DESKTOP_WIN_X | (DESKTOP_WIN_Y << 32),
+                (WindowRole::Normal as u64) | ((TITLE_KIND_TERMINAL as u64) << 8),
+                0,
+            ]
+        } else {
+            [0; 4]
+        };
+        if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
             disp_ep_cap,
             IPC_OP_SURFACE_ATTACH,
-            [0; 4],
+            attach_mrs,
             surf_cap,
             RIGHT_READ | RIGHT_MAP,
             0,
             0,
-        );
+        ) {
+            if msg_tag_label(rtag) == IPC_OP_PONG {
+                win_id = rmrs[0] as u32;
+            }
+        }
     }
 
     let mut input_ep_cap = init_input_ep_cap;
@@ -139,72 +204,84 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
     let _ = sys_write_debug(b"[DRY-SHELL] Interactive shell ready in CPL3 Userspace\n");
 
     loop {
-        let wait_res = sys_ipc_call_inline(
-            input_ep_cap,
-            pack_msg_tag(IPC_OP_INPUT_WAIT, 0, 1, 0),
-            [0; 4],
-            0,
-        );
+        let wait_res = if desktop_wm_mode {
+            sys_ipc_call_inline(
+                disp_ep_cap,
+                pack_msg_tag(IPC_OP_WIN_WAIT_EVENT, 0, 1, 0),
+                [win_id as u64, 0, 0, 0],
+                0,
+            )
+        } else {
+            sys_ipc_call_inline(
+                input_ep_cap,
+                pack_msg_tag(IPC_OP_INPUT_WAIT, 0, 1, 0),
+                [0; 4],
+                0,
+            )
+        };
 
         let (tag, _, mrs) = match wait_res {
             Ok(v) => v,
-            Err(EPIPE | EREVOKED | EBADCAP) => {
-                // `dry-input` crashed or was revoked; request supervised restart & fresh capability!
-                match sys_ipc_call_with_grant(
+            Err(EPIPE | EREVOKED | EBADCAP) if !desktop_wm_mode => {
+                if reconnect_input_service(
                     sup_ep_cap,
-                    IPC_OP_SUP_RECONNECT_INPUT,
-                    [0; 4],
-                    0,
-                    0,
-                    0,
-                    0,
+                    disp_ep_cap,
+                    win_id,
+                    &mut input_ep_cap,
+                    engine,
+                    surf,
+                    win_cols as usize,
+                    win_rows as usize,
+                    &mut sys,
                 ) {
-                    Ok((rtag, new_ep, rmrs)) if msg_tag_label(rtag) == IPC_OP_PONG && new_ep != 0 => {
-                        let _ = sys_cap_revoke(input_ep_cap, 1);
-                        input_ep_cap = new_ep;
-                        let mut lb = LineBuilder::new();
-                        lb.push_bytes(b"[supervisor] dry-input restarted (#");
-                        lb.push_u64(rmrs[0]);
-                        lb.push_bytes(b"), stale cap revoked, IRQ1 re-bound");
-                        engine.push_line(lb.as_bytes(), STYLE_OK);
-                        let _ = sys_sysinfo(&mut sys);
-                        engine.project_to_surface(surf, Some(&sys));
-                        let _ = present_surface(disp_ep_cap);
-                        let _ = sys_write_debug(b"[DRY-SHELL] INPUT_RECOVERED ok=true\n");
-                        continue;
-                    }
-                    _ => break,
+                    continue;
                 }
+                break;
             }
             Err(_) => break,
         };
 
-        if msg_tag_label(tag) != IPC_OP_INPUT_EVENT {
+        let lbl = msg_tag_label(tag);
+        if lbl == IPC_OP_WIN_CLOSED {
+            let _ = sys_ipc_call_inline(
+                disp_ep_cap,
+                pack_msg_tag(IPC_OP_WIN_CLOSE, 0, 1, 0),
+                [win_id as u64, 0, 0, 0],
+                0,
+            );
+            let _ = sys_ipc_call_inline(
+                sup_ep_cap,
+                pack_msg_tag(IPC_OP_SUP_SHUTDOWN, 0, 1, 0),
+                [engine.cmd_count as u64, 0, 0, 0],
+                0,
+            );
+            break;
+        }
+        if lbl != IPC_OP_INPUT_EVENT {
             continue;
         }
+
         let (ev, _) = InputEvent::from_ipc_mrs(mrs);
         if ev.kind != InputEventKind::KeyPress {
             continue;
         }
 
-        // Desktop foundation shortcut: `Alt + Arrow` moves the floating terminal window.
         if (ev.modifiers & MOD_ALT) != 0 {
             match ev.keycode {
-                KEY_LEFT => move_floating_window(disp_ep_cap, -32, 0),
-                KEY_RIGHT => move_floating_window(disp_ep_cap, 32, 0),
-                KEY_UP => move_floating_window(disp_ep_cap, 0, -24),
-                KEY_DOWN => move_floating_window(disp_ep_cap, 0, 24),
+                KEY_LEFT => move_floating_window(disp_ep_cap, win_id, -32, 0),
+                KEY_RIGHT => move_floating_window(disp_ep_cap, win_id, 32, 0),
+                KEY_UP => move_floating_window(disp_ep_cap, win_id, 0, -24),
+                KEY_DOWN => move_floating_window(disp_ep_cap, win_id, 0, 24),
                 _ => {}
             }
             continue;
         }
 
-        // Scrollback navigation: `Shift + Up/Down`.
         if (ev.modifiers & MOD_SHIFT) != 0 && (ev.keycode == KEY_UP || ev.keycode == KEY_DOWN) {
             let delta = if ev.keycode == KEY_UP { 3 } else { -3 };
             if engine.scroll_history(delta) {
-                engine.project_to_surface(surf, None);
-                let _ = present_surface(disp_ep_cap);
+                engine.project_to_surface(surf, win_cols as usize, win_rows as usize, None);
+                let _ = present_surface(disp_ep_cap, win_id);
             }
             continue;
         }
@@ -212,51 +289,54 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
         if (ev.modifiers & MOD_CTRL) != 0 {
             if ev.ascii == b'l' || ev.ascii == b'L' {
                 engine.clear_history();
-                engine.project_to_surface(surf, None);
-                let _ = present_surface(disp_ep_cap);
+                engine.project_to_surface(surf, win_cols as usize, win_rows as usize, None);
+                let _ = present_surface(disp_ep_cap, win_id);
             } else if ev.ascii == b'u' || ev.ascii == b'U' {
                 engine.editor.clear();
-                engine.project_to_surface(surf, None);
-                let _ = present_surface(disp_ep_cap);
+                engine.project_to_surface(surf, win_cols as usize, win_rows as usize, None);
+                let _ = present_surface(disp_ep_cap, win_id);
             }
             continue;
         }
 
+        let wcols = win_cols as usize;
+        let wrows = win_rows as usize;
+
         match ev.keycode {
             KEY_BACKSPACE => {
                 if engine.editor.backspace() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_DELETE => {
                 if engine.editor.delete_at_cursor() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_LEFT => {
                 if engine.editor.move_left() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_RIGHT => {
                 if engine.editor.move_right() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_HOME => {
                 if engine.editor.move_home() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_END => {
                 if engine.editor.move_end() {
-                    engine.project_to_surface(surf, None);
-                    let _ = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let _ = present_surface(disp_ep_cap, win_id);
                 }
             }
             KEY_ENTER => {
@@ -360,12 +440,12 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 }
 
                 let _ = sys_sysinfo(&mut sys);
-                engine.project_to_surface(surf, Some(&sys));
-                let (d_px, d_cyc) = present_surface(disp_ep_cap);
+                engine.project_to_surface(surf, wcols, wrows, Some(&sys));
+                let (d_px, d_cyc) = present_surface(disp_ep_cap, win_id);
                 if disp_ep_cap != 0 {
                     let mut plb = LineBuilder::new();
                     plb.push_bytes(b"[DRY-SHELL] PRESENT seq=");
-                    plb.push_u64(surf.seq);
+                    plb.push_u64(surf.current_seq() as u64);
                     plb.push_bytes(b" dirty_px=");
                     plb.push_u64(d_px);
                     plb.push_bytes(b" blit_cyc=");
@@ -380,6 +460,21 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         [0; 4],
                         0,
                     );
+                    if desktop_wm_mode
+                        && !reconnect_input_service(
+                            sup_ep_cap,
+                            disp_ep_cap,
+                            win_id,
+                            &mut input_ep_cap,
+                            engine,
+                            surf,
+                            wcols,
+                            wrows,
+                            &mut sys,
+                        )
+                    {
+                        break;
+                    }
                 }
 
                 if wants_shutdown {
@@ -394,13 +489,13 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
             }
             _ => {
                 if ev.ascii != 0 && engine.editor.insert_ascii(ev.ascii) {
-                    engine.project_to_surface(surf, None);
-                    let (d_px, d_cyc) = present_surface(disp_ep_cap);
+                    engine.project_to_surface(surf, wcols, wrows, None);
+                    let (d_px, d_cyc) = present_surface(disp_ep_cap, win_id);
                     if !logged_single_row && disp_ep_cap != 0 {
                         logged_single_row = true;
                         let mut rlb = LineBuilder::new();
                         rlb.push_bytes(b"[DRY-SHELL] ROW_PRESENT seq=");
-                        rlb.push_u64(surf.seq);
+                        rlb.push_u64(surf.current_seq() as u64);
                         rlb.push_bytes(b" dirty_px=");
                         rlb.push_u64(d_px);
                         rlb.push_bytes(b" blit_cyc=");

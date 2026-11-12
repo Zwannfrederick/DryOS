@@ -65,16 +65,16 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
     }
 }
 
-/// Compact 80-column stack formatter (zero heap, zero `core::fmt` bloat).
+/// Compact 128-column stack formatter (zero heap, zero `core::fmt` bloat).
 pub struct LineBuilder {
-    buf: [u8; TERM_COLS],
+    buf: [u8; 192],
     len: usize,
 }
 
 impl LineBuilder {
     pub const fn new() -> Self {
         Self {
-            buf: [b' '; TERM_COLS],
+            buf: [b' '; 192],
             len: 0,
         }
     }
@@ -84,13 +84,49 @@ impl LineBuilder {
         &self.buf[..self.len]
     }
 
+    #[inline]
+    pub fn push_byte(&mut self, b: u8) {
+        if self.len < self.buf.len() {
+            self.buf[self.len] = b;
+            self.len += 1;
+        }
+    }
+
     pub fn push_bytes(&mut self, s: &[u8]) {
         for &b in s {
-            if self.len >= TERM_COLS {
+            if self.len >= self.buf.len() {
                 break;
             }
             self.buf[self.len] = b;
             self.len += 1;
+        }
+    }
+
+    pub fn push_i64(&mut self, val: i64) {
+        if val < 0 {
+            self.push_byte(b'-');
+            self.push_u64(val.unsigned_abs());
+        } else {
+            self.push_u64(val as u64);
+        }
+    }
+
+    pub fn push_hex_u64(&mut self, mut val: u64) {
+        if val == 0 {
+            self.push_byte(b'0');
+            return;
+        }
+        let mut tmp = [0u8; 16];
+        let mut n = 0usize;
+        while val > 0 {
+            let nib = (val & 0x0f) as u8;
+            tmp[n] = if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) };
+            val >>= 4;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            self.push_byte(tmp[n]);
         }
     }
 
@@ -442,44 +478,57 @@ impl ShellEngine {
         self.push_line(lb.as_bytes(), STYLE_WARN);
     }
 
-    /// Project visible scrollback + active prompt line into `surf`, setting minimal dirty row bounds.
-    pub fn project_to_surface(&mut self, surf: &mut SharedTerminalSurface, sys: Option<&UserSysInfo>) {
-        let hist_viewport = TERM_ROWS - 1;
+    /// Project visible scrollback + active prompt line into `surf` (`cols x rows`) using zero-UB
+    /// atomic seqlock publication.
+    pub fn project_to_surface(
+        &mut self,
+        surf: &SharedTerminalSurface,
+        win_cols: usize,
+        win_rows: usize,
+        sys: Option<&UserSysInfo>,
+    ) {
+        use core::sync::atomic::Ordering;
+        let cols = win_cols.clamp(1, TERM_COLS);
+        let rows = win_rows.clamp(2, TERM_ROWS);
+        let hist_viewport = rows - 1;
         let end_idx = self.count.saturating_sub(self.scroll_up);
         let visible_hist = end_idx.min(hist_viewport);
         let start_idx = end_idx - visible_hist;
+        let prompt_row = visible_hist;
 
-        let prompt_row = visible_hist; // Immediately below history while `< 23` lines, then pinned at row 23!
+        let odd = surf.begin_write();
+        let blank_row = [SurfaceCell::BLANK; TERM_COLS];
+
         if self.full_dirty {
-            for r in 0..TERM_ROWS {
-                let row_slice = &mut surf.cells[r * TERM_COLS..(r + 1) * TERM_COLS];
+            for r in 0..rows {
                 if r < visible_hist {
                     let ring_idx = (self.head + start_idx + r) % SCROLLBACK_CAP;
-                    row_slice.copy_from_slice(&self.lines[ring_idx]);
+                    surf.store_row_slice(cols, r, &self.lines[ring_idx][..cols]);
                 } else {
-                    row_slice.fill(SurfaceCell::BLANK);
+                    surf.store_row_slice(cols, r, &blank_row[..cols]);
                 }
             }
-            surf.dirty_row_min = 0;
-            surf.dirty_row_max = (TERM_ROWS - 1) as u16;
+            surf.dirty_row_min.store(0, Ordering::Relaxed);
+            surf.dirty_row_max.store((rows - 1) as u16, Ordering::Relaxed);
             self.full_dirty = false;
         } else {
-            surf.dirty_row_min = prompt_row as u16;
-            surf.dirty_row_max = prompt_row as u16;
+            surf.dirty_row_min.store(prompt_row as u16, Ordering::Relaxed);
+            surf.dirty_row_max.store(prompt_row as u16, Ordering::Relaxed);
         }
 
-        let prow = &mut surf.cells[prompt_row * TERM_COLS..(prompt_row + 1) * TERM_COLS];
-        prow.fill(SurfaceCell::BLANK);
+        let mut prow = [SurfaceCell::BLANK; TERM_COLS];
         let mut col = 0usize;
         for &b in PROMPT_STR {
-            prow[col] = SurfaceCell {
-                ch: b,
-                style: STYLE_PROMPT,
-            };
-            col += 1;
+            if col < cols {
+                prow[col] = SurfaceCell {
+                    ch: b,
+                    style: STYLE_PROMPT,
+                };
+                col += 1;
+            }
         }
         for &b in self.editor.as_bytes() {
-            if col < TERM_COLS {
+            if col < cols {
                 prow[col] = SurfaceCell {
                     ch: b,
                     style: STYLE_DEFAULT,
@@ -487,15 +536,21 @@ impl ShellEngine {
                 col += 1;
             }
         }
+        surf.store_row_slice(cols, prompt_row, &prow[..cols]);
 
-        surf.cursor_col = (PROMPT_STR.len() + self.editor.cursor()).min(TERM_COLS - 1) as u16;
-        surf.cursor_row = prompt_row as u16;
-        surf.cmd_count = self.cmd_count;
+        surf.cursor_col.store(
+            (PROMPT_STR.len() + self.editor.cursor()).min(cols - 1) as u16,
+            Ordering::Relaxed,
+        );
+        surf.cursor_row.store(prompt_row as u16, Ordering::Relaxed);
+        surf.cmd_count.store(self.cmd_count, Ordering::Relaxed);
         if let Some(s) = sys {
-            surf.ext_irqs_snap = s.total_ext_irqs as u32;
-            surf.uptime_sec_snap = (s.uptime_ms / 1000) as u32;
+            surf.ext_irqs_snap
+                .store(s.total_ext_irqs as u32, Ordering::Relaxed);
+            surf.uptime_sec_snap
+                .store((s.uptime_ms / 1000) as u32, Ordering::Relaxed);
         }
-        surf.seq = surf.seq.wrapping_add(1);
+        let _ = surf.end_write(odd);
     }
 }
 
