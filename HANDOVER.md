@@ -1,32 +1,41 @@
 # DRY OS — Sıfır-Bağlam Mühendislik Devir Teslim Kılavuzu (`HANDOVER.md`)
 
-> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2C-0` Kapanışı — Eksiksiz Sıfır-Bağlam Devir Teslimi)  
+> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2C-0` Son Mimari Karar Kilidi, Belge Senkronizasyonu ve Oturum Kapanışı)  
 > **İlke:** *Minimum Overhead. Maximum Useful Work. Correctness first. Security always. Performance measured.*
 
 ---
 
-## SONRAKİ OTURUM — BURADAN BAŞLA
+## SONRAKİ OTURUM — YARINKİ AJANLAR (GPT / CLAUDE / KODLAMA AJANI) BURADAN BAŞLA
 
-1. **Projenin Mevcut Durumu:** DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + `16` adet statik `CPL=3` ELF64 kullanıcı alanı ikilisi). Faz 0 (`H1` TLA+/Loom + `H2` `igc` PoC), Faz 1 (`1A..1C` + `Opt Pass v1`) ve Faz 2 alt aşamaları **`Milestone 2A-1`**, **`2A-2`**, **`2A-3`**, **`2B`** (Ring 3 `VirtIO-Blk`, kilitsiz `IoRing`, çökme-güvenli CoW `DRYFS_v1` `/persist`, `DRY Vault` `PBKDF2-SHA256` oturum kilidi + $O(1)$ `lease_epoch`, `PCI Command.BME = 0` çöküş susturması) ile **`Milestone 2C-0`** (`ADR-016` Minimal Adaptive Driver Island PoC: `Device Broker` + `Mock Driver Island`) tamamlanmış ve doğrulanmıştır. Gerçek Linux veya Windows ikili/sürücü uyumluluğu **henüz uygulanmamıştır** (`PLANNED`).
-2. **Son Doğrulanmış Commit:** Kod, test ve deney verisi commit'i **`a6fe26bbacf72aea5cb827517fdab0bd28aae2e7`** (`a6fe26b` — `feat(island): add Milestone 2C-0 device broker and mock driver island PoC`); `main` üzerindeki `HEAD` ise bu devir belgesini mühürleyen doğrudan ardıl `docs(handover)` commit'idir (`HEAD~1 == a6fe26b`, kod farkı `0` satır).
-3. **Son Doğrulanmış Testler (`12 Kasım 2026`, `a6fe26b` üzerinde bizzat çalıştırıldı):**
-   - `cargo clippy -D warnings` (`dry-userspace` + `dry-kernel`): **`0` uyarı / `PASS`**.
-   - Tam deterministik QEMU/KVM regresyon paketi (`python3 tools/qemu_boot_test.py`): **`90/90 PASS`** (`56` Faz 0–1C + `9` P1 + `14` P2 + `6` P3 + `3` P4 + `2` P5/`2C-0`; tüm senaryolarda `leaked_frames = 0`).
-   - SMP (`1/2/4/8/20 vCPU`) & RAM (`256M/512M/1G/2G`) masaüstü matrisi (`python3 tools/qemu_boot_test.py --p3-matrix`): **`5/5 PASS`** (`leaked_frames = 0`).
-   - Çekirdek yığın çerçevesi denetimi (`objdump -d`): `rust_syscall_dispatch = 248 B` (`+0 B`), `sys_cold_dispatch = 264 B`, `sys_irq_ack = 40 B`.
-4. **Aktif Milestone:** `Milestone 2C-0` tamamlandı ve kapatıldı (`DONE`). Henüz başlatılmış yarım bir milestone yoktur; sıradaki sınırlı hedef **`Milestone 2A-4a`** (`MAX_LATCHED_MODULES` `16 -> 32` genişletmesi + FPU/SIMD `XSAVEOPT`/`XRSTOR` + `FaultEndpoint` altyapısı) olarak önerilmektedir (bkz. Bölüm `4.9`).
+1. **Projenin Mevcut Durumu ve Kesinleşmiş Mimari Karar (`ADR-016`):**
+   - DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + `16` adet statik `CPL=3` ELF64 kullanıcı alanı ikilisi).
+   - Faz 0 (`H1` TLA+/Loom + `H2` `igc` PoC), Faz 1 (`1A..1C` + `Opt Pass v1`) ve Faz 2 alt aşamaları **`Milestone 2A-1`**, **`2A-2`**, **`2A-3`**, **`2B`** (`VirtIO-Blk`, `IoRing`, çökme-güvenli CoW `DRYFS_v1` `/persist`, `DRY Vault` `PBKDF2-SHA256` + $O(1)$ `lease_epoch`, `PCI Command.BME = 0`) ile **`Milestone 2C-0`** (`Device Broker` + `Mock Driver Island`) tamamlanmış ve doğrulanmıştır. Gerçek Linux/Windows ikili veya sürücü uyumluluğu **henüz uygulanmamıştır** (`PLANNED`).
+   - **Kesin Mimari Kural:** **`Device Broker` (`0x0008`) yalnızca kontrol düzlemidir.** Yetkilendirme, daraltılmış capability kiralama, `revoke`, nesil yönetimi ve crash recovery Broker'dadır; **normal sürücü veri trafiği asla Broker üzerinden dolaşmaz** (`BADGE_BROKER_CLIENT` yönlendirme denemesi `-EPERM` döner: `INV-ISL-01`). Veri düzlemi doğrudan kiralanmış `Endpoint` (`5.270 cyc` `p50`) ve toplu `IoRingSharedPage` (`batch=32` `804 cyc/op` vs Broker 2-sıçrama `10.165 cyc`, `12.64x` kazanç) kullanır. Ada yeniden başladığında eski neslin tüm yetkileri geçersizleşir (`stale_revoked = 5/5`, `INV-ISL-03`). Yeni syscall eklemek varsayılan çözüm değildir; **Linux uyumluluk katmanı %100 Ring 3'te tutulur (`dry-kernel` içinde `0` satır Linux ABI kodu — `INV-ISL-05`).**
+2. **Son Doğrulanmış Commit Zinciri (`main`):**
+   - **`49b668217ae94bce3a569325654b4e9feb889da6`** (`49b6682` — `fix(island): enforce control-plane-only broker contract and full lease revocation`): Son mimari karar denetimi, kontrol-düzlemi zorlaması (`unauth_denied = 4`), `RIGHT_REVOKE` ile tam `IoRing` alt-ağaç iptali (`stale_revoked = 5`) ve kanonik belgelerin senkronizasyonu.
+   - `a6fe26bbacf72aea5cb827517fdab0bd28aae2e7` (`a6fe26b` — `feat(island): add Milestone 2C-0 device broker and mock driver island PoC`): Tam `90/90` QEMU/KVM tabanı.
+   - `HEAD`: Yalnızca bu `HANDOVER.md` dosyasını `49b6682` commit hash'i ve bağımsız kod inceleme rehberiyle mühürleyen son `docs(handover)` commit'idir (`HEAD~1 == 49b6682`, kod farkı `0` satır).
+3. **Son Doğrulanmış Test Kanıtları (`12 Kasım 2026`):**
+   - `python3 tools/qemu_boot_test.py --build-only` (`49b6682` üzerinde): **`0` Clippy uyarısı (`-D warnings`) / `PASS`**.
+   - `python3 tools/qemu_boot_test.py --island-only` (`49b6682` üzerinde): **`2/2 PASS`** (`p5a`: `unauth_denied=4`, `stale_revoked=5`, `leaked_frames=0`; `p5b`: `d_p50=5270cyc`, `b_p50=10165cyc`, `b32=804cycop`, `pmm_act=31`, `leaked_frames=0`).
+   - `python3 tools/qemu_boot_test.py --p4-only` (`49b6682` üzerinde etkilenen regresyon): **`3/3 PASS`** (`p4a + p4b + p4c`, `leaked_frames = 0`).
+   - `python3 tools/qemu_boot_test.py --p3-matrix` (`49b6682` üzerinde `1/2/4/8/20 vCPU` & `256M..2G` matrisi): **`5/5 PASS`** (`leaked_frames = 0`).
+   - Tam `90/90` QEMU/KVM paketi (`a6fe26b` tabanı + `49b6682` üzerinde etkilenen tüm kullanıcı alanı ikilileri doğrulandı; çekirdek kodu `49b6682`'de değişmedi): `rust_syscall_dispatch = 248 B` (`+0 B`).
+4. **Kesinleştirilmiş Sonraki Milestone Sırası (Henüz Başlatılmadı — Tasarım Sözleşmeleri Hazır):**
+   1. **`Milestone 2A-4a` Önkoşulları:** Modül kapasitesi (`MAX_LATCHED_MODULES: 16 -> 32`), FPU/SIMD bağlam izolasyonu (`XSAVEOPT`/`XRSTOR`) ve `FaultEndpoint` (+ `TCB`-bağlı `Notification`).
+   2. **`Milestone 2C-1` Gerçek Linux Driver Island PoC:** En küçük gerçek Linux kaynaklı sürücü bileşeninin (`H2` sınırlı PCIe NIC: `e1000e`/`igc`) DRY Ring 3 üzerinde çalıştırılması.
+   3. **`Faz 3A/3B` Genişletilmiş Linux ABI / Sürücü Uyumluluğu:** İlk gerçek PoC kanıtlarına göre.
+   4. **`Faz 4 / P5` Fiziksel DMA/IOMMU ve GPU:** Ayrı, daha ileri bare-metal doğrulama aşaması.
 5. **Açık Riskler (Özet):**
-   - **`R-18` (Acil Ön Koşul):** Limine önyükleme modül dizisi `16/16` doludur (`kernel/src/limine.rs:429`); 17. ELF64 ikilisi eklenmeden önce tavan `16 -> 32` yükseltilmelidir.
+   - **`R-18` (Acil Ön Koşul):** Limine önyükleme modül dizisi `16/16` doludur (`kernel/src/limine.rs:429`); 17. ELF64 ikilisi eklenmeden önce `2A-4a` ilk adımı olarak `16 -> 32` yükseltilmelidir.
    - **`R-11` (`P0`):** Sabit `16 KiB` çekirdek yığını bütçesi; sıcak `rust_syscall_dispatch` çerçevesi `248 B` korunmalıdır.
    - **`R-03` & `R-05` (`P0/P1`):** Fiziksel Intel VT-d / AMD-Vi IOMMU ve gerçek silikon (`bare-metal`) doğrulaması henüz yapılmamıştır (`QEMU/KVM != bare-metal`).
    - **`R-16` & `R-17` (`P1/P2`):** `ACPI S3` uyku kipi dürüstçe `-ENOSYS` döner; ayrık GPU MicroVM (`RTX 3050 Ti` `01:00.0`) VFIO RAM sabitlemesi (`309.41 MiB+`) ve `RTD3` pil kısıtı nedeniyle varsayılan kapalı (*opt-in*) tutulmalıdır.
 6. **İlk Okunması Gereken Belgeler (Sırasıyla):**
-   1. `HANDOVER.md` (bu belge)
-   2. `ROADMAP.md` ve `docs/PRODUCT_ROADMAP.md`
-   3. `ARCHITECTURE.md` ve `DECISIONS.md` (`ADR-001` .. `ADR-016`)
-   4. `RISK_REGISTER.md` (`R-01` .. `R-18`)
-   5. `docs/EXPERIMENTS_2B.md` ve `docs/EXPERIMENTS_2C0_ISLAND_POC.md`
-   6. `docs/COMPATIBILITY_ISLANDS_RESEARCH.md` ve `docs/COMPATIBILITY_EXPERIMENTS_DATA.md`
+   1. `HANDOVER.md` (bu belge — özellikle Bölüm `4.6`, `4.9` ve `4.10` denetim listesi)
+   2. `DECISIONS.md` (`ADR-001` .. `ADR-016`) ve `ARCHITECTURE.md` (§2.9 & §5)
+   3. `ROADMAP.md`, `docs/PRODUCT_ROADMAP.md` ve `RISK_REGISTER.md` (`R-01` .. `R-18`)
+   4. `docs/EXPERIMENTS_2C0_ISLAND_POC.md`, `docs/EXPERIMENTS_2B.md` ve `docs/COMPATIBILITY_ISLANDS_RESEARCH.md`
 7. **İlk Çalıştırılması Gereken Komutlar:**
    ```bash
    git status -s && git log -n 5 --oneline
@@ -34,12 +43,14 @@
    python3 tools/qemu_boot_test.py --island-only
    python3 tools/qemu_boot_test.py --p4-only
    ```
-   *(Not: `experiments/h1-sched/src/runqueue.rs` ve `experiments/h1-sched/src/sync.rs` içindeki önceden mevcut yerel değişikliklere **kesinlikle dokunma**, `git add` veya `git checkout` uygulama.)*
-8. **Bir Sonraki Mantıklı Geliştirme Adımı (`Milestone 2A-4a`):** Önce `MAX_LATCHED_MODULES` (`16 -> 32`) ve `MAX_BOOT_ENTRIES` (`20 -> 36`) tavanlarını genişlet; ardından hem `DRY Desktop` (`P2`) hem `dry-linux-abi` (`Faz 3`) için zorunlu çekirdek ön koşulları olan **FPU/SIMD `XSAVEOPT`/`XRSTOR` bağlam izolasyonunu** ve **`FaultEndpoint` (Ring 3 sayfalayıcı + yabancı `SYSCALL` yönlendirme kapısı)** mekanizmasını uygula.
+   *(Kritik Kural: `experiments/h1-sched/src/runqueue.rs` ve `experiments/h1-sched/src/sync.rs` içindeki önceden mevcut kullanıcı değişikliklerine **kesinlikle dokunma**, `git add` veya `git checkout` uygulama.)*
 
-### Yeni Oturum Ajan Başlangıç Talimatı (Doğrudan Kopyalanabilir)
+### Yarınki Ajanlar İçin Doğrudan Kopyalanabilir Başlangıç Talimatları
 
-> DRY OS geliştirmesine devam etmeden önce HANDOVER.md dosyasını tamamen oku. Referans verilen mimari, karar, risk ve deney belgelerini incele. Mevcut Git durumunu doğrula. Son tamamlanan milestone'u ve test sonuçlarını belirle. Daha önce çözülmüş problemleri yeniden ele alma; doğrulanmış mimari kararları gerekçesiz değiştirme. Önce mevcut durumun tutarlılığını doğrula, ardından belgelenmiş bir sonraki sınırlı milestone üzerinden ilerle. Eksik veya çelişkili bilgi bulursan varsayım üretmek yerine kod ve testlerle doğrula.
+- **Geliştirme Ajanı İçin:**
+  > DRY OS geliştirmesine devam etmeden önce `HANDOVER.md`, `DECISIONS.md` (`ADR-016`), `ARCHITECTURE.md` ve `RISK_REGISTER.md` belgelerini oku. `git status -s` ve `--build-only` / `--island-only` testleriyle `49b6682` tabanını doğrula (`experiments/h1-sched/src/{runqueue,sync}.rs` dosyalarına dokunma). Kesinleşen `ADR-016` kurallarını (`Device Broker` yalnızca kontrol düzlemidir; Linux uyumluluk katmanı Ring 3'tedir; yeni syscall son çaredir) koruyarak yalnızca sıradaki **`Milestone 2A-4a`** önkoşul paketini (`MAX_LATCHED_MODULES` `16->32`, `XSAVEOPT`/`XRSTOR`, `FaultEndpoint` + `TCB`-bağlı `Notification`) uygula.
+- **Bağımsız Kod İnceleme Ajanı (GPT / Claude) İçin:**
+  > Kodda değişiklik yapma (salt-okunur denetim). Önce `HANDOVER.md` Bölüm `4.1` ve `4.10` ile `DECISIONS.md` (`ADR-004`, `ADR-007`, `ADR-015`, `ADR-016`) ve `RISK_REGISTER.md` dosyalarını oku. Ardından Bölüm `4.10`'daki 30 kritik çekirdek/userspace dosyasını bellek sıralaması, yarış durumları, capability/CDT `revoke` UAF-ABA güvenliği, `W^X`/TLB shootdown, `SMAP`/`swapgs`, `16 KiB` yığın bütçesi, `BME=0` DMA susturma ve `Device Broker` kontrol/veri düzlemi ayrımı açısından satır satır denetle; bulguları ciddiyet sırasıyla (`P0..P3`) dosya:satır kanıtıyla raporla.
 
 ---
 
@@ -120,7 +131,7 @@ Depodaki tüm kaynak dosyalar `< 1.000` satır pragmatik tavanı altındadır:
 | **`Milestone 2A-2` (`P2 Preview`)** | `ff31908` .. `85ec902` | Birleşik `IRQ1` + `IRQ12` PS/2 fare, `4 MiB` (`2 x Frame2M`) arka tampon + `UNMAP_2M`, izsiz yazılımsal imleç, sıfır-UB atomik `SharedWindowSurface`, `Floating`/`SideBySideTiled` WM, `dry-sysmon` | `79/79` QEMU + `p2_desktop_preview.png` | İki sabit pencere; dosya sistemi ve güç yönetimi yok. |
 | **`Milestone 2A-3` (`Desktop & Power`)** | `0da9d9d`, `ce61fea`, `58ccda6`, `2a361c3` | Birleşik uygulama yaşam döngüsü (`Launcher`, `DesktopAction`, `PROC_LIST`/`PROC_KILL`), 4 yerel uygulama (`Terminal`, `Life Station`, `Files`, `Settings` + `DialogTransient`), `dry-vfs` (`RO /boot` + uçucu `/ram`), `TurkishQ`, PS/2 tekerlek, `Stacked`/`Tabbed` WM, `dry-power` (`HLT` + `VEC_RESCHED_WAKE`, `DPMS`, `Session Lock`, gerçek `ACPI S5` & `FADT Reset`), `-512 KiB` `.bss` | `85/85` QEMU + `5/5` SMP/RAM Matrisi | `/ram` uçucudur; `Session Lock` bu aşamada parolasız kalkan idi (`2B`'de giderildi); `ACPI S3 = -ENOSYS`. |
 | **`Milestone 2B` + `Track B`** | `8c9bc25`, `57d213d` | `PciDev` (`SYS_DEV_MAP`), sabitlenmiş `SYS_DMA_ALLOC` + çöküşte `PCI Command.BME = 0`, Ring 3 `dry-blk` (`VirtIO 1.0`) + kilitsiz `IoRing`, çift A/B `CRC32` CoW kalıcı `DRYFS_v1` (`/persist`, `SIGKILL` kurtarma), `dry-vault` (`PBKDF2-HMAC-SHA256` parola doğrulamalı `Session Lock` + $O(1)$ `GLOBAL_LEASE_EPOCH` + `SEAL_RO_EXPORT`), `DEV_WORKSPACE` kısıtlaması; `ADR-016` 4-kademeli uyumluluk araştırması (`EXP-B1..B4`) | `88/88` QEMU + `5/5` Matris + `p4_*.png` | `DRYFS_v1` düz 24-girişli dizin tablosu kullanır (alt-dizin ağacı yok); donanım VT-d IOMMU yerine QEMU'da `BME=0` + pin kullanılır. |
-| **`Milestone 2C-0` (`Island PoC`)** | **`a6fe26b`** (`HEAD~1`) | `0` yeni syscall ile `Device Broker` (`dry-broker.elf` `0x0008`) + izole `Mock Driver Island` (`dry-mock-drv.elf` `0x0209`), nesil-damgalı `Endpoint`/`IoRing`/`Notification` kiralaması, `HLT` uyku/uyanma (`0` boşta syscall), `#UD` çöküşü -> CDT `revoke` -> `1.41 ms` kurtarma, bayat yetki reddi (`4/4`) ve `PMM` per-CPU şarjör muhasebesi düzeltmesi | **`90/90` QEMU + `5/5` Matris** | Saf CPU mock dönüşümüdür; gerçek Linux sürücüsü, PCIe MSI-X, FLR veya hypervisor içermez; önyükleme modül dizisi `16/16` dolmuştur (`R-18`). |
+| **`Milestone 2C-0` (`Island PoC` & Kontrol-Düzlemi Kilidi)** | **`a6fe26b`**, **`49b6682`** | `0` yeni syscall ile yalnızca kontrol düzlemi olan `Device Broker` (`dry-broker.elf` `0x0008`, istemci veri yönlendirmesi `-EPERM`, `unauth_denied=4`) + izole `Mock Driver Island` (`dry-mock-drv.elf` `0x0209`), 32-bit nesil-damgalı `Endpoint`/`IoRing`/`Notification` kiralaması (`d_p50=5.270 cyc`, `batch=32` `804 cyc/op` vs Broker `10.165 cyc`), `#UD` -> `RIGHT_REVOKE` tam CDT `revoke` (`stale_revoked=5/5`) -> `1.42 ms` kurtarma ve `PMM` şarjör muhasebesi düzeltmesi | **`90/90` QEMU + `5/5` Matris** | Saf CPU mock dönüşümüdür; gerçek Linux sürücüsü, PCIe MSI-X, FLR veya hypervisor içermez; önyükleme modül dizisi `16/16` dolmuştur (`R-18`). |
 
 *(Tamamlanmamış `Milestone 2A-4`, `Milestone 2C` ve `Faz 3..5` aşamaları kesin olarak `PLANNED` durumundadır.)*
 
@@ -153,7 +164,10 @@ Sonraki oturumda aynı hataların tekrarlanmaması için bugün kökten yakalan�
    - *Çözüm:* Bayat capability doğrulamaları `Err(EREVOKED | EBADCAP)` sözleşmesine bağlandı.
 8. **`LineBuilder` `160 B` Kırpılması ve QMP ASCII Tuş Eşlemesi (`userspace/src/shell.rs`, `tools/qemu_p5_island_validators.py`):**
    - *Kök Neden:* `LineBuilder` sabit `160 B` tamponu aşan seri günlük satırlarını kırpar; ayrıca `qmp.type_ascii` yardımcısı `_` karakterini desteklemez.
-   - *Çözüm:* Telemetri satırları `< 115 B` atomik satırlara bölündü ve QMP kabuk dosya adlarında `-` kullanıldı.
+   - *Çözüm:* Telemetri satırları `< 120 B` atomik satırlara bölündü ve QMP kabuk dosya adlarında `-` kullanıldı.
+9. **Kontrol-Düzlemi Sızıntısı ve `IoRing` Alt-Ağaç İptal Eksikliği (`49b6682`, `dry_broker.rs`, `dry_mock_drv.rs`, `island_proto.rs`):**
+   - *Kök Neden:* (a) `BROKER_OP_FORWARD_TRANSFORM` başlangıçta `BADGE_BROKER_CLIENT` çağrılarına açıktı ve `Device Broker`'ın sıcak veri yoluna girmesine izin veriyordu; (b) `dry_mock_drv` tarafından Broker'a verilen `ring_cap` üzerinde `RIGHT_REVOKE` bulunmadığından ada süreci sonlanmadan çağrılan `sys_cap_revoke(ring_cap, 1)` (`cspace_delete_cap`) canlı istemci çocukları varken `CapError::BusyActiveObject (-EBUSY)` ile başarısız olabiliyordu; (c) `island_session_badge` 8-bit (`0xff`) maske kullanıyordu.
+   - *Çözüm:* (a) `BROKER_OP_FORWARD_TRANSFORM` normal istemcilere `-EPERM` ile kapatıldı (`unauth_denied = 4`), yalnızca yönetici A/B tanılama ölçümüne izin verildi; (b) `ring_cap` Broker'a `RIGHT_REVOKE` ile verildi (istemci kiralamaları `GRANT`/`REVOKE` olmadan daraltıldı) ve `revoke_generation_caps()` içinde önce `sys_cap_revoke(ring_cap, 0)` (`cspace_revoke_children` + istemci `VSpace` `unmap` + SMP TLB shootdown), ardından `sys_cap_revoke(ring_cap, 1)` koşturuldu (`stale_revoked = 5/5`); (c) oturum rozeti 32-bit nesil alanına (`0x0209_1000_0000_0000 | gen32`) genişletildi.
 
 ---
 
@@ -167,39 +181,40 @@ Sonraki oturumda aynı hataların tekrarlanmaması için bugün kökten yakalan�
   - `Limine 10.8.5` (`BOOTX64.EFI` commit `7a9013f305de0bea1f6310e76e7baba30499fef0`, protokol `6e85ddd6f928`)
   - `Python 3.14.10` (`xorriso` **gerekmez**; `qemu_boot_test.py` doğrudan QEMU UEFI VVFAT `fat:rw:...` sürücüsü kullanır)
 
-### Tekrarlanabilir Komutlar ve `a6fe26b` (`12 Kasım 2026`) Doğrulanmış Sonuçları
+### Tekrarlanabilir Komutlar ve `a6fe26b` / `49b6682` (`12 Kasım 2026`) Doğrulanmış Sonuçları
 
 ```bash
 # 1. Araç zinciri doğrulaması + Clippy (-D warnings: userspace & kernel) + Release ELF64 derlemesi
 python3 tools/qemu_boot_test.py --build-only
-# -> SONUÇ (a6fe26b): PASS (0 uyarı, 16 userspace ELF64 + dry-kernel derlendi)
+# -> SONUÇ (49b6682): PASS (0 uyarı, 16 userspace ELF64 + dry-kernel derlendi)
 
 # 2. Yalnızca doğrudan cargo clippy kontrolleri
 cargo clippy --manifest-path userspace/Cargo.toml --target x86_64-unknown-none --bins -- -D warnings
 cargo clippy --manifest-path kernel/Cargo.toml --target kernel/x86_64-dry-kernel.json \
   -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -- -D warnings
-# -> SONUÇ (a6fe26b): PASS (0 uyarı)
+# -> SONUÇ (49b6682): PASS (0 uyarı)
 
-# 3. Milestone 2C-0 Adaptive Driver Island PoC E2E + performans/batch paketi (~12 sn)
+# 3. Milestone 2C-0 Adaptive Driver Island PoC E2E + performans/batch paketi (~9 sn)
 python3 tools/qemu_boot_test.py --island-only
-# -> SONUÇ (a6fe26b): 2/2 PASS (p5a + p5b, leaked_frames=0; JSON: tools/compat_bench/results_poc_2c0_island.json)
+# -> SONUÇ (49b6682): 2/2 PASS (p5a: unauth_denied=4, stale_revoked=5, leaked_frames=0;
+#    p5b: d_p50=5270cyc vs b_p50=10165cyc, b1=4556->b32=804cycop, pmm_act=31, leaked_frames=0)
 
-# 4. Milestone 2B VirtIO-Blk kalıcılık, SIGKILL güç kesintisi kurtarma & DRY Vault/DMA güvenliği (~22 sn)
+# 4. Milestone 2B VirtIO-Blk kalıcılık, SIGKILL güç kesintisi kurtarma & DRY Vault/DMA güvenliği (~27 sn)
 python3 tools/qemu_boot_test.py --p4-only
-# -> SONUÇ (a6fe26b): 3/3 PASS (p4a + p4b + p4c, leaked_frames=0)
+# -> SONUÇ (49b6682): 3/3 PASS (p4a + p4b + p4c, leaked_frames=0)
 
-# 5. SMP (1/2/4/8/20 vCPU) & RAM (256M/512M/1G/2G) Masaüstü Matrisi (~25 sn)
+# 5. SMP (1/2/4/8/20 vCPU) & RAM (256M/512M/1G/2G) Masaüstü Matrisi (~26 sn)
 python3 tools/qemu_boot_test.py --p3-matrix
-# -> SONUÇ (a6fe26b): 5/5 PASS (leaked_frames=0, 20 vCPU / 2 GiB free_4k=516.741)
+# -> SONUÇ (49b6682): 5/5 PASS (leaked_frames=0, 20 vCPU / 2 GiB free_4k=516.741)
 
 # 6. Tam Deterministik QEMU/KVM Regresyon Paketi (~240 sn)
 python3 tools/qemu_boot_test.py
-# -> SONUÇ (a6fe26b): 90/90 PASS (56 Faz 0-1C + 9 P1 + 14 P2 + 6 P3 + 3 P4 + 2 2C-0; 0 FAIL)
+# -> SONUÇ (a6fe26b tabanı; 49b6682'de dry-kernel değişmedi): 90/90 PASS (0 FAIL, leaked_frames=0)
 
 # 7. Çekirdek sıcak/soğuk syscall yığın çerçevesi denetimi
 objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel | \
   grep -A8 -E "(rust_syscall_dispatch|sys_cold_dispatch|sys_irq_ack).*:"
-# -> SONUÇ (a6fe26b): rust_syscall_dispatch=248 B (0xf8), sys_cold_dispatch=264 B (0x108), sys_irq_ack=40 B (0x28)
+# -> SONUÇ: rust_syscall_dispatch=248 B (0xf8), sys_cold_dispatch=264 B (0x108), sys_irq_ack=40 B (0x28)
 
 # 8. Track B konak uyumluluk deneylerini yeniden üretme (isteğe bağlı)
 python3 tools/compat_bench/audit_driver_classes.py
@@ -209,9 +224,24 @@ rustc -O tools/compat_bench/ioring_batch_bench.rs -o /tmp/ioring_batch_bench && 
 
 ---
 
-## 4.6 Adaptive Driver Islands Araştırmasının Durumu (`ADR-016`)
+## 4.6 Kesinleşmiş `ADR-016` Mimari Sözleşmesi ve Adaptive Driver Islands Durumu
 
-> **Kesin Dürüstlük Beyanı:** DRY OS üzerinde henüz **gerçek Linux ELF uygulaması, Windows PE uygulaması veya gerçek yabancı çekirdek sürücüsü uyumluluğu çalıştırılmamıştır**. Tamamlanan çalışma; kanıta dayalı mimari araştırma (`docs/COMPATIBILITY_ISLANDS_RESEARCH.md`), 4 konak/çekirdek deneyi (`EXP-B1..B4`: `docs/COMPATIBILITY_EXPERIMENTS_DATA.md`) ve `Milestone 2C-0` yaşam döngüsü prototipidir (`docs/EXPERIMENTS_2C0_ISLAND_POC.md`).
+> **Kesin Dürüstlük Beyanı:** DRY OS üzerinde henüz **gerçek Linux ELF uygulaması, Windows PE uygulaması veya gerçek yabancı çekirdek sürücüsü uyumluluğu çalıştırılmamıştır**. Tamamlanan çalışma; kanıta dayalı mimari araştırma (`docs/COMPATIBILITY_ISLANDS_RESEARCH.md`), 4 konak/çekirdek deneyi (`EXP-B1..B4`: `docs/COMPATIBILITY_EXPERIMENTS_DATA.md`) ve `Milestone 2C-0` kontrol/veri düzlemi prototipidir (`docs/EXPERIMENTS_2C0_ISLAND_POC.md`).
+
+### Kesin Kontrol / Veri Düzlemi Ayrımı, Ring 3 Konumu ve Invariant'lar (`INV-ISL-01..06`)
+
+- **Gerekçe ve Ölçüm Kanıtı (`p5b`, `2 vCPU`, `3.113 GHz` TSC):** Veri trafiğini `Device Broker` üzerinden çift sıçramalı geçirmek `b_p50 = 10.165 cyc` (`3.27 µs`) gecikmeye yol açarken, doğrudan kiralanan `Endpoint` **`d_p50 = 5.270 cyc` (`1.69 µs`, `1.93x` daha hızlı)** ve `batch=32` `IoRingSharedPage` **`804 cyc/op` (`0.26 µs/op`, Broker RPC'ye göre `12.64x`, `batch=1`'e göre `5.67x`)** sağlar. Bu nedenle `Device Broker` yalnızca kontrol düzlemidir; normal `BADGE_BROKER_CLIENT` veri yönlendirme çağrıları `-EPERM` ile reddedilir (`INV-ISL-01`).
+- **Linux API Uyumluluk Katmanının Konumu (`%100 Ring 3`, `0` Çekirdek Satırı — `INV-ISL-05`):**
+  - *Sürücü uyumluluğu (`Kademe 2`):* `libdry_lx_<sınıf>` (`< 5.000` LOC C çalışma zamanı) doğrudan ilgili izole `GPL-2.0-only` Ring 3 Driver Island sürecinin içine bağlanır (ortak `LinuxKPI` yasaktır).
+  - *Uygulama uyumluluğu (`Kademe 3A`):* `dry-linux-abi` kişilik sunucusu + `libdry_posix` (`SEAL_RO_EXPORT`) tamamen Ring 3'te çalışır. **`dry-kernel` (`Ring 0`) Linux ABI/POSIX bağımlılıklarıyla asla kirletilmez.**
+- **`Mock Driver Island` (`2C-0`) ile Gerçek `Linux Driver Island` (`2C-1` / `Faz 3B`) Arasındaki Fark:**
+
+| Boyut | `Mock Driver Island` (`2C-0` — `DONE`) | Gerçek `Linux Driver Island` (`2C-1` / `Faz 3B` — `PLANNED`) |
+| :--- | :--- | :--- |
+| **Dil & Kaynak** | Saf `no_std` Rust (`dry-mock-drv.elf`, `305` satır) | Değiştirilmemiş upstream Linux C sürücü bileşeni (`H2`: örn. `e1000e` `200` sembol / `igc` `247` sembol, `GPL-2.0-only`) + Ring 3 `libdry_lx_net` |
+| **Donanım & DMA** | `0` `PciDev` BAR, `0` DMA çerçevesi, `0` donanım kesmesi | `CapObjectKind::PciDev` (`SYS_DEV_MAP` UC BAR) + sabitlenmiş `DmaArena` (`SYS_DMA_ALLOC`, gölge `vmemmap` `struct page[]`, çöküşte `BME=0` + `FLR`) + `IrqCap`/MSI-X |
+| **Olay Döngüsü** | Çift-kip (`drv_ep` veya `sq_notif` + `50 ms` bekçi) | `Milestone 2A-4a` `TCB`-bağlı birleşik `Endpoint + Notification` beklemesi (`0` zaman aşımı bekçisi) |
+| **Kanıtladığı Şey** | Kontrol/veri ayrımı (`INV-ISL-01..04`), `HLT` uyanışı (`4.40 µs`), `#UD` sonrası tam CDT `revoke` (`5/5`) ve `1.42 ms` kurtarma | Gerçek C sürücüsünün Ring 3 uyumluluk katmanı üzerinde donanım MMIO/DMA/IRQ ile paket/komut taşıması |
 
 ### 7 Yaklaşımın Ayrı Ayrı Teknik Değerlendirmesi
 
@@ -282,8 +312,10 @@ rustc -O tools/compat_bench/ioring_batch_bench.rs -o /tmp/ioring_batch_bench && 
   3. `0da9d9d`, `ce61fea`, `58ccda6`, `2a361c3` — `Milestone 2A-3` (`Launcher`, 4 yerel uygulama, `dry-vfs`, `dry-power` ACPI S5/Reset/`HLT`; `85/85` + `5/5`)
   4. `8c9bc257f68322b4d7c4a0cf8a7b2b254ae89d7f` (`8c9bc25`) — `Milestone 2B` (`VirtIO-Blk` `IoRing`, CoW `DRYFS_v1`, `DRY Vault`, `BME=0`; `88/88` + `5/5`)
   5. `57d213dd12323154e9e04cc57b717d00f2246fb0` (`57d213d`) — `Track B` Uyumluluk Araştırması (`ADR-016`, `EXP-B1..B4`)
-  6. **`a6fe26bbacf72aea5cb827517fdab0bd28aae2e7` (`a6fe26b`) — Bu Görev (`Milestone 2C-0` Kod, Test ve Deney Verisi Commit'i)**
-  7. **`HEAD` (`docs(handover)` Commit'i, `HEAD~1 == a6fe26b`)** — Yalnızca bu `HANDOVER.md` dosyasını son commit hash'leriyle mühürleyen devir commit'i.
+  6. `a6fe26bbacf72aea5cb827517fdab0bd28aae2e7` (`a6fe26b`) — `Milestone 2C-0` (`Device Broker` + `Mock Driver Island` PoC; `90/90` + `5/5`)
+  7. `812fddc11a87fe40a4336f2469762a077e77885b` (`812fddc`) — İlk `Milestone 2C-0` devir teslim belgesi
+  8. **`49b668217ae94bce3a569325654b4e9feb889da6` (`49b6682`) — Son Mimari Karar Kilidi (`Device Broker` kontrol-düzlemi zorlaması, `RIGHT_REVOKE` tam `IoRing` alt-ağaç iptali ve kanonik belge senkronizasyonu)**
+  9. **`HEAD` (`docs(handover)` Commit'i, `HEAD~1 == 49b6682`)** — Bu `HANDOVER.md` dosyasını yarınki ajan başlangıç talimatları ve bağımsız GPT/Claude kod inceleme rehberiyle mühürleyen kapanış commit'i (`kod farkı = 0`).
 - **Beklenen `git status -s` Çıktısı ve Bilerek Korunan Dosyalar:**
   ```text
    M experiments/h1-sched/src/runqueue.rs
@@ -297,18 +329,35 @@ rustc -O tools/compat_bench/ioring_batch_bench.rs -o /tmp/ioring_batch_bench && 
 
 ---
 
-## 4.9 Sonraki Oturumun Yol Haritası (Somut Uygulama Sırası)
+## 4.9 Kesinleştirilmiş Sonraki Milestone Sırası ve `Milestone 2A-4a` Tasarım Sözleşmeleri
 
-1. **Adım 1 — Başlangıç Doğrulaması (`~1 dk`):**
-   - `git status -s` (`yalnızca 2 experiments/h1-sched dosyası M olmalı`), `git log -n 3 --oneline` ve `python3 tools/qemu_boot_test.py --island-only` + `--p4-only` çalıştırarak `a6fe26b` tabanının yerel ortamda yeşil olduğunu teyit et.
-2. **Adım 2 — Önerilen Küçük ve Sınırlı Milestone (`Milestone 2A-4a: Core Execution & Trap Prerequisites`):**
-   - **Görev A (`R-18` Kapasite Artırımı):** `kernel/src/limine.rs` (`MAX_LATCHED_MODULES: 16 -> 32`), `kernel/src/irq/session.rs` (`[CAP_NULL; 32]`) ve `userspace/src/vfs_mem.rs` (`MAX_BOOT_ENTRIES: 20 -> 36`) sabitlerini güncelle.
-   - **Görev B (`XSAVEOPT` / `XRSTOR` FPU/SIMD Bağlam İzolasyonu):** `CR4.OSFXSR | CR4.OSXMMEXCPT | CR4.OSXSAVE` etkinleştirerek `TCB` başına hizalı FPU/SSE/AVX kayıt alanı ekle (hem `DRY Desktop` vektör çizimi hem `dry-linux-abi` ELF64 ikilileri için zorunlu bağımlılık).
-   - **Görev C (`TCB`-Bağlı `Notification` + `FaultEndpoint` Temeli):** Tek iş parçacıklı sunucuların `Endpoint + Notification` olaylarını birlikte beklemesini sağla ve Ring 3 `#PF` / yabancı `SYSCALL` (`RAX < 0x1000` kişilik bayrağı) tuzaklarını yetkili `FaultEndpoint`'e yansıt.
-3. **Beklenen Testler ve Başarı Kriterleri:**
-   - Mevcut `90/90` QEMU regresyon + `5/5` SMP/RAM matrisinin `%100` korunması (`leaked_frames = 0`, `rust_syscall_dispatch == 248 B`).
-   - Çok-iş-parçacıklı SSE/XMM yazmaç izolasyon testi (`0` çapraz-süreç XMM bozulması) ve `FaultEndpoint` sayfa hatası / yabancı `syscall` yakalama-devam ettirme E2E testi (`+3..4` yeni deterministik QEMU testi).
-4. **Kesinlikle Erken Başlanmaması Gereken İşler:**
-   - `XSAVEOPT` ve `FaultEndpoint` bitmeden `glibc`/dinamik Linux ELF veya `Wine`/`Win32` çalıştırmaya kalkışma.
-   - Fiziksel `VT-d` IOMMU ve `VcpuCap` (`VMX`/EPT) tasarlanmadan `dry-kernel` içine hypervisor, VFIO veya `NVIDIA` sürücü kodu ekleme.
-   - `liquid-glass` görsel efektlerini Ring 0'a sızdırma veya düşük donanım *fallback* olmadan ağır alfa/bulanıklık döngüleri ekleme.
+Sonraki oturumlar **aşağıdaki 4 aşamalı sırayı** bozmadan ilerlemelidir:
+
+1. **Aşama 1 — `Milestone 2A-4a` Önkoşulları (İlk Uygulanacak Paket — Kesinleştirilmiş Sözleşmeler):**
+   - **Sözleşme A — Modül Kapasitesi (`R-18`, `0` Yeni Syscall):** `kernel/src/limine.rs` (`MAX_LATCHED_MODULES: 16 -> 32` + `module_count <= MAX_LATCHED_MODULES` açık doğrulaması), `kernel/src/irq/session.rs` (`[CAP_NULL; 32]`) ve `userspace/src/vfs_mem.rs` (`MAX_BOOT_ENTRIES: 20 -> 36`).
+   - **Sözleşme B — FPU/SIMD Bağlam İzolasyonu (`0` Yeni Syscall):** BSP ve tüm AP'lerde `CR4.OSFXSR | CR4.OSXMMEXCPT | CR4.OSXSAVE` (varsa `XCR0` `x87|SSE|AVX`), `TCB` başına 64 B hizalı `FpuState` alanı, `finish_post_switch` / `context.rs` sınırında `XSAVEOPT64`/`XRSTOR64` (`FXSAVE64` *fallback*) ve yeni süreçte deterministik temiz `MXCSR = 0x1F80` başlatma (`0` çapraz-süreç XMM sızıntısı).
+   - **Sözleşme C — `FaultEndpoint` ve `TCB`-Bağlı `Notification` (Mevcut İlkeller Üzerinden):**
+     - `TCB.bound_notif`: Tek iş parçacıklı sunucular/sürücü adaları `sys_ipc_recv_ext` beklerken bağlı `Notification` sinyallerini sentetik rozet mesajı olarak alır (`dry-mock-drv` ve gerçek sürücü adalarındaki `50 ms` zaman aşımı bekçisini ortadan kaldırır).
+     - `FaultEndpoint`: Yetkili süpervizör/kişilik sunucusunun bir `TCB` veya süreç yuvasına `Endpoint` bağlaması; Ring 3 `#PF` (isteğe bağlı sayfalama/CoW) ve yabancı kişilik `SYSCALL` (`RAX` kişilik aralığı) tuzaklarında çekirdek süreci öldürmek yerine `FaultMsg { kind, rip, rsp, addr_or_nr, args }` IPC çağrısı gönderir ve yanıtla kullanıcı bağlamını devam ettirir (`rust_syscall_dispatch == 248 B` sıcak çerçeve korunur).
+2. **Aşama 2 — `Milestone 2C-1` Gerçek Linux Driver Island PoC (`Faz 3B-0`):**
+   - En küçük gerçek Linux kaynaklı sürücü bileşeninin (`H2` sınırlı PCIe NIC bileşeni: `e1000e` `200` sembol veya `igc` `247` sembol) tamamen Ring 3 `libdry_lx_net` + kontrol-düzlemi `Device Broker` + doğrudan kiralık `Endpoint`/`IoRing` + `PciDev` + `DmaArena` üzerinde çalıştırılması (`dry-kernel` içinde `0` satır Linux ABI kodu).
+3. **Aşama 3 — Genişletilmiş Linux ABI / Sürücü Uyumluluğu (`Faz 3A / 3B`):**
+   - `2C-1` PoC ölçüm ve hata kanıtlarına göre Ring 3 `dry-linux-abi` + `libdry_posix` (`musl`/temel `glibc` ELF64) ve ek `< 400` sembollü sürücü adaları.
+4. **Aşama 4 — Fiziksel DMA/IOMMU ve Ayrık GPU (`Faz 4 / P5`):**
+   - Gerçek donanımda Intel `VT-d` / AMD-Vi IOMMU ikinci-seviye sayfa tabloları, PCIe `FLR`/`RTD3` ve isteğe bağlı ayrık GPU MicroVM (`Venus`) doğrulaması.
+
+---
+
+## 4.10 Yarınki Bağımsız GPT / Claude Kod İncelemesi İçin Kritik Dosyalar (`30` Dosya — `< 1.000` Satır/Dosya)
+
+Bağımsız kod ve mimari denetçisinin (GPT / Claude) en yüksek sinyal/gürültü oranıyla incelemesi gereken kritik dosyalar, güncel satır sayıları ve denetim odakları aşağıdadır:
+
+| Alt Sistem | Kritik Dosyalar (Doğrulanmış Yol ve Satır Sayısı) | Bağımsız Denetçinin İncelemesi Gereken Noktalar |
+| :--- | :--- | :--- |
+| **1. `ADR-007` Güvenlik & `CSpace` CDT `Revoke`** | `kernel/src/security.rs` (`480`), `kernel/src/cspace/cap.rs` (`318`), `kernel/src/cspace/mod.rs` (`714`), `kernel/src/cspace/revoke.rs` (`671`) | `authorize_cspace_fast` 3-alan/kiralama kuralları; `slot.in_flight_ops` (`SeqCst`) Dekker pini; çift-nesil (`slot_gen` + nesne `gen`) ABA kalkanı; `CDT_LOCK` altında çocuk ekleme vs `cspace_revoke_children` yarışı (`R-02`). |
+| **2. `VSpace`, `W^X`, SMP TLB & `PMM`** | `kernel/src/vspace/mod.rs` (`832`), `kernel/src/vspace/tlb.rs` (`470`), `kernel/src/pmm/mod.rs` (`761`), `kernel/src/uaccess.rs` (`314`) | `W^X` ve `SEAL_RO_EXPORT` zorlaması; `active_cpus` SMP TLB shootdown ve `TLB_REQ_LOCK` ilerleme garantisi; `PER_CPU_MAGAZINES` + `iommu_pin_count` sızıntı muhasebesi; `CR4.SMAP` `stac/clac` + `#PF` `extable` sınırları. |
+| **3. `H1` SMP Zamanlayıcı & TLA+ Modeli** | `kernel/src/sched/mod.rs` (`932`), `kernel/src/sched/state.rs` (`628`), `kernel/src/sched/context.rs` (`182`), `kernel/src/sched/runqueue.rs` (`230`), `formal/h1/DrySched.tla` (`578`) | `dry_switch_to -> finish_post_switch` yığın sahipliği (`stack_owner`); `prepare_park` <-> `notif_signal` `SeqCst` çiti; `pop_masked` `active_mask` Dekker yeniden kontrolü; yarışsız `cli -> kontrol -> sti; hlt` (`R-01`). |
+| **4. Syscall Girişi & `Endpoint`/`Notification` IPC** | `kernel/src/syscall/entry.rs` (`267`), `kernel/src/syscall/mod.rs` (`745`), `kernel/src/syscall/cold.rs` (`417`), `kernel/src/ipc/endpoint.rs` (`895`), `kernel/src/ipc/notif.rs` (`535`) | `swapgs` / kullanıcı `RSP` güvenliği; `248 B` sıcak çerçeve bütçesi (`R-11`); birleşik `ep_reply_recv` tek-kazananlı uyandırma, `ReplyToken` nesil doğrulaması ve 4-sıçramalı Öncelik Bağışı döngü sınırı. |
+| **5. Donanım `IOAPIC`, `PciDev`, DMA `BME=0` & `VaultCtrl`** | `kernel/src/irq/mod.rs` (`808`), `kernel/src/pci.rs` (`680`), `kernel/src/vault_ctrl.rs` (`129`) | `IRQF_ONESHOT` maskeleme + fırtına kelepçesi + `revoke` yarışı (`R-14`); `quiesce_pci_for_cspace` içinde sayfa iadesinden **önce** `PCI Command.BME = 0` temizlenmesi (`R-03`); $O(1)$ `GLOBAL_LEASE_EPOCH` atomikliği. |
+| **6. Ring 3 Depolama (`IoRing`, `DRYFS_v1`) & `DRY Vault`** | `userspace/src/ioring.rs` (`378`), `userspace/src/persist_fs.rs` (`696`), `userspace/src/bin/dry_blk.rs` (`783`), `userspace/src/vault_crypto.rs` (`255`), `userspace/src/bin/dry_vault.rs` (`509`) | SPSC `Acquire/Release` halka indis taşma güvenliği; çift A/B `CRC32` süperblok + 4 KiB CoW + çift `FLUSH` güç kesintisi atomikliği; sabit-zamanlı `PBKDF2-HMAC-SHA256` ve geçici bellek sıfırlama (`write_volatile`). |
+| **7. `Device Broker` & `Mock Driver Island` (`2C-0`)** | `userspace/src/island_proto.rs` (`182`), `userspace/src/bin/dry_broker.rs` (`505`), `userspace/src/bin/dry_mock_drv.rs` (`305`), `userspace/src/island_audit.rs` (`677`) | `INV-ISL-01..05`: `BADGE_BROKER_CLIENT` veri yönlendirme reddi (`-EPERM`), `GRANT`/`REVOKE` daraltması, `sys_cap_revoke(ring_cap, 0)` alt-ağaç iptali, 32-bit oturum rozeti ve `#UD` çöküş kurtarması. |
