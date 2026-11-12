@@ -11,16 +11,20 @@ use core::sync::atomic::Ordering;
 use crate::apic::{active_apic_mode, uptime_telemetry};
 use crate::cspace::cap::{CapError, CapPtr};
 use crate::cspace::objects::{
-    cspace_alloc_frame, cspace_vspace_map_2m, cspace_vspace_map_4k, cspace_vspace_unmap_4k,
+    cspace_alloc_frame, cspace_vspace_map_2m, cspace_vspace_map_4k, cspace_vspace_unmap_2m,
+    cspace_vspace_unmap_4k,
 };
 use crate::cspace::revoke::{cspace_delete_cap, cspace_destroy_object, cspace_revoke_children};
 use crate::cspace::{cspace_derive, with_pinned_cap};
 use crate::display::{is_framebuffer_available, sys_fb_map};
 use crate::ipc::endpoint::ep_create;
-use crate::ipc::map_cap_err_to_sys;
+use crate::ipc::{map_cap_err_to_sys, total_ipc_msgs};
 use crate::ipc::notif::notif_create;
 use crate::irq::ioport::sys_ioport_rw;
-use crate::irq::{ioapic_present, irq_telemetry, sys_irq_ack, sys_irq_bind};
+use crate::irq::{
+    ioapic_present, irq_line_delivered, irq_telemetry, sys_irq_ack, sys_irq_bind,
+    IRQ_KEYBOARD_PS2, IRQ_MOUSE_PS2,
+};
 use crate::percpu::get_percpu_by_idx;
 use crate::pmm::{free_global_frames_snapshot, inventory, PageOrder};
 use crate::proc::process_vspace_cap;
@@ -42,8 +46,9 @@ pub const VSPACE_MAP_OP_4K_RW: u64 = 1;
 pub const VSPACE_MAP_OP_2M_RO: u64 = 2;
 pub const VSPACE_MAP_OP_2M_RW: u64 = 3;
 pub const VSPACE_MAP_OP_UNMAP_4K: u64 = 4;
+pub const VSPACE_MAP_OP_UNMAP_2M: u64 = 5;
 
-/// Sanitized 80-byte system telemetry POD copied to CPL=3 by `SYS_SYSINFO` (zero kernel ptrs/PFNs).
+/// Sanitized 104-byte system telemetry POD copied to CPL=3 by `SYS_SYSINFO` (zero kernel ptrs/PFNs).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct UserSysInfo {
@@ -62,9 +67,12 @@ pub struct UserSysInfo {
     pub total_ctx_switches: u64,
     pub usable_frames_4k: u32,
     pub free_frames_4k: u32,
+    pub irq1_delivered: u64,
+    pub irq12_delivered: u64,
+    pub total_ipc_msgs: u64,
 }
 
-const _: () = assert!(size_of::<UserSysInfo>() == 80);
+const _: () = assert!(size_of::<UserSysInfo>() == 104);
 
 fn decode_target_obj_label(subj_label: SecLabel, spec: u64) -> Result<SecLabel, SysError> {
     if spec == 0 {
@@ -146,9 +154,12 @@ fn sys_sysinfo_impl(user_out_ptr: u64) -> Result<isize, SysError> {
         total_ctx_switches: total_ctx_switches(),
         usable_frames_4k: (inv.usable_frames + inv.reclaimable_frames).min(u32::MAX as u64) as u32,
         free_frames_4k: free_frames.min(u32::MAX as u64) as u32,
+        irq1_delivered: irq_line_delivered(IRQ_KEYBOARD_PS2),
+        irq12_delivered: irq_line_delivered(IRQ_MOUSE_PS2),
+        total_ipc_msgs: total_ipc_msgs(online),
     };
 
-    // SAFETY: `UserSysInfo` is `#[repr(C)]` POD (`80` bytes) with `_pad0 = 0`.
+    // SAFETY: `UserSysInfo` is `#[repr(C)]` POD (`104` bytes) with `_pad0 = 0`.
     let bytes = unsafe {
         core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<UserSysInfo>())
     };
@@ -204,6 +215,9 @@ fn sys_vspace_map_impl(
         }
         VSPACE_MAP_OP_UNMAP_4K => {
             cspace_vspace_unmap_4k(cspace_id, subj, vs_cap, frame_cap, vaddr, now)
+        }
+        VSPACE_MAP_OP_UNMAP_2M => {
+            cspace_vspace_unmap_2m(cspace_id, subj, vs_cap, frame_cap, vaddr, now)
         }
         _ => return Err(SysError::Inval),
     };

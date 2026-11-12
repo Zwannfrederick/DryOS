@@ -558,7 +558,10 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 sys_ipc_send_ext(cs_id, subj, a0, tag, mrs, a2, a3)
             };
             match res {
-                Ok(_) => (0, 0),
+                Ok(_) => {
+                    crate::ipc::note_cpu_ipc_msg();
+                    (0, 0)
+                }
                 Err(e) => (e.as_raw(), 0),
             }
         }
@@ -613,6 +616,7 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             };
             match res {
                 Ok(out) => {
+                    crate::ipc::note_cpu_ipc_msg();
                     frame.r12 = out.mrs[0];
                     frame.r13 = out.mrs[1];
                     frame.r14 = out.mrs[2];
@@ -650,7 +654,10 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 sys_ipc_reply_ext(cs_id, subj, a0, a1, tag, mrs, a3)
             };
             match res {
-                Ok(()) => (0, 0),
+                Ok(()) => {
+                    crate::ipc::note_cpu_ipc_msg();
+                    (0, 0)
+                }
                 Err(e) => (e.as_raw(), 0),
             }
         }
@@ -687,6 +694,7 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             };
             match res {
                 Ok(out) => {
+                    crate::ipc::note_cpu_ipc_msg();
                     frame.r12 = out.mrs[0];
                     frame.r13 = out.mrs[1];
                     frame.r14 = out.mrs[2];
@@ -705,7 +713,10 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
             match notif_signal(cs_id, subj, CapPtr(a0), a1) {
-                Ok(bits) => (0, bits),
+                Ok(bits) => {
+                    crate::ipc::note_cpu_ipc_msg();
+                    (0, bits)
+                }
                 Err(e) => (e.as_raw(), 0),
             }
         }

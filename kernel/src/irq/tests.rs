@@ -13,19 +13,19 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::apic::{send_fixed_ipi, VEC_EXT_IRQ_BASE};
 use crate::arch::{cli, sti};
 use crate::cspace::cap::{CapError, CapPtr};
-use crate::cspace::objects::cspace_alloc_frame;
+use crate::cspace::objects::{cspace_alloc_frame, cspace_vspace_map_2m, cspace_vspace_map_4k};
 use crate::cspace::revoke::{attach_cap_mapping_record, cspace_delete_cap, cspace_destroy_object, cspace_revoke_children};
 use crate::cspace::{create_cspace, cspace_derive, cspace_lookup_fast, cspace_transfer, destroy_cspace};
-use crate::display::{is_framebuffer_available, mint_root_framebuffer_cap};
+use crate::display::{is_framebuffer_available, mint_root_framebuffer_cap, sys_fb_map};
 use crate::ipc::notif::{notif_create, notif_wait};
 use crate::irq::ioport::{
     mint_root_ioport_cap, sys_ioport_rw, I8042_DATA_PORT, I8042_STATUS_CMD_PORT, IOPORT_OP_INB,
     IOPORT_OP_OUTB,
 };
 use crate::irq::{
-    ioapic_present, irq_telemetry, mint_root_irq_cap, sys_irq_ack, sys_irq_bind, IRQF_ONESHOT,
-    IRQ_ACK_MASK, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, IRQ_KEYBOARD_PS2, IRQ_TEST_SW_LINE,
-    STORM_BURST_LIMIT,
+    ioapic_present, irq_line_delivered, irq_telemetry, mint_root_irq_cap, sys_irq_ack,
+    sys_irq_bind, IRQF_ONESHOT, IRQ_ACK_MASK, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, IRQ_KEYBOARD_PS2,
+    IRQ_MOUSE_PS2, IRQ_TEST_SW_LINE, STORM_BURST_LIMIT,
 };
 use crate::limine::get_boot_module;
 use crate::percpu::get_percpu_by_idx;
@@ -60,6 +60,8 @@ struct P1InitBootInfo {
     irq1_cap: u64,
     i8042_port_cap: u64,
     session_mode: u64,
+    irq12_cap: u64,
+    sysmon_mod_cap: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,10 @@ pub enum IrqFaultCmdline {
     UnauthIrqAck,
     DoubleIrqAck,
     DisplayCapLeak,
+    Irq12UnauthBind,
+    Irq12SplitOwner,
+    WmSurfaceRoEscalation,
+    FbBackingOob,
 }
 
 impl IrqFaultCmdline {
@@ -81,6 +87,14 @@ impl IrqFaultCmdline {
             Self::DoubleIrqAck
         } else if cmd.contains("irq_fault=display_cap_leak") {
             Self::DisplayCapLeak
+        } else if cmd.contains("irq_fault=irq12_unauth_bind") {
+            Self::Irq12UnauthBind
+        } else if cmd.contains("irq_fault=irq12_split_owner") {
+            Self::Irq12SplitOwner
+        } else if cmd.contains("irq_fault=wm_surface_ro_escalation") {
+            Self::WmSurfaceRoEscalation
+        } else if cmd.contains("irq_fault=fb_backing_oob") {
+            Self::FbBackingOob
         } else {
             Self::None
         }
@@ -190,6 +204,129 @@ pub fn maybe_run_irq_fault_test(cmdline: &str, _online_cpus: usize) {
             irq_invariant_panic(format_args!(
                 "Display capability leak into Userspace shell compartment rejected ({:?})",
                 fb_or_io_err
+            ));
+        }
+        IrqFaultCmdline::Irq12UnauthBind => {
+            let irq12 = mint_root_irq_cap(rcs, root_lbl, IRQ_MOUSE_PS2, 1u64 << 12).unwrap();
+            let (ntf_u, _) = notif_create(ucs, user_lbl, user_lbl, 0).unwrap();
+            let e_mint_u = mint_root_irq_cap(ucs, user_lbl, IRQ_MOUSE_PS2, 1u64 << 12).unwrap_err();
+            let e_bind_u = sys_irq_bind(ucs, user_lbl, irq12, ntf_u, IRQF_ONESHOT).unwrap_err();
+            assert_eq!(e_mint_u, CapError::DomainViolation);
+            assert_eq!(e_bind_u, SysError::Perm);
+            irq_invariant_panic(format_args!(
+                "Unauthorized Userspace IRQ12 mouse bind rejected (mint={:?}, bind={:?})",
+                e_mint_u, e_bind_u
+            ));
+        }
+        IrqFaultCmdline::Irq12SplitOwner => {
+            let _owner1 = mint_root_irq_cap(rcs, root_lbl, IRQ_MOUSE_PS2, 1u64 << 12).unwrap();
+            let dup_err =
+                mint_root_irq_cap(rcs, root_lbl, IRQ_MOUSE_PS2, 1u64 << 12).unwrap_err();
+            assert_eq!(dup_err, CapError::BusyActiveObject);
+            irq_invariant_panic(format_args!(
+                "Split/duplicate IRQ12 PS/2 mouse ownership rejected ({:?})",
+                dup_err
+            ));
+        }
+        IrqFaultCmdline::WmSurfaceRoEscalation => {
+            let sysmon_lbl = SecLabel::new(
+                SecDomain::Userspace,
+                SecFlags::NONE,
+                encode_compartment(9, 3),
+                1,
+            );
+            let (scs, _) = create_cspace(sysmon_lbl, 0x77).unwrap();
+            let (surf_rw, _) =
+                cspace_alloc_frame(ucs, user_lbl, user_lbl, PageOrder::Order4KiB, false, 0)
+                    .unwrap();
+            let ro_rights = CapRights(CapRights::READ.0 | CapRights::MAP.0);
+            let surf_ro = cspace_transfer(ucs, user_lbl, surf_rw, scs, ro_rights, 0, 0, 0).unwrap();
+            let vs_h = crate::vspace::create_vspace(sysmon_lbl).unwrap();
+            let vs_cap = crate::cspace::insert_root_cap(
+                scs,
+                crate::cspace::cap::CapObjectKind::VSpace,
+                vs_h.id as u32,
+                vs_h.generation,
+                CapRights::VSPACE_ROOT,
+                sysmon_lbl,
+                0,
+                0,
+            )
+            .unwrap();
+            let rw_err = cspace_vspace_map_4k(
+                scs,
+                sysmon_lbl,
+                vs_cap,
+                surf_ro.dst_cap,
+                0x2000_0000,
+                VmProt::USER_RW,
+                0,
+            )
+            .unwrap_err();
+            let _ = crate::vspace::destroy_vspace(vs_h);
+            assert_eq!(rw_err, CapError::InsufficientRights);
+            irq_invariant_panic(format_args!(
+                "Cross-window RO->RW surface escalation rejected ({:?})",
+                rw_err
+            ));
+        }
+        IrqFaultCmdline::FbBackingOob => {
+            let vs_h = crate::vspace::create_vspace(root_lbl).unwrap();
+            let vs_cap = crate::cspace::insert_root_cap(
+                rcs,
+                crate::cspace::cap::CapObjectKind::VSpace,
+                vs_h.id as u32,
+                vs_h.generation,
+                CapRights::VSPACE_ROOT,
+                root_lbl,
+                0,
+                0,
+            )
+            .unwrap();
+            let oob_err = if is_framebuffer_available() {
+                let fb_cap = mint_root_framebuffer_cap(rcs, root_lbl).unwrap();
+                // Mapping `4,096,000` B (`1280x800x32`) starting 1 MiB below `USER_VADDR_LIMIT`
+                // overflows user canonical address space and must fail closed (`SysError::Inval`).
+                sys_fb_map(rcs, root_lbl, vs_h.id, fb_cap.0, 0x0000_7fff_fff0_0000, 0x80_0000)
+                    .unwrap_err()
+            } else {
+                SysError::Inval
+            };
+            let unaligned_err =
+                sys_fb_map(rcs, root_lbl, vs_h.id, 0, 0x0000_7a00_0000_0123, 0x80_0000)
+                    .unwrap_err();
+            let (fr2m, _) =
+                cspace_alloc_frame(rcs, root_lbl, root_lbl, PageOrder::Order2MiB, false, 0)
+                    .unwrap();
+            let back_align_err = cspace_vspace_map_2m(
+                rcs,
+                root_lbl,
+                vs_cap,
+                fr2m,
+                0x2000_1000,
+                VmProt::USER_RW,
+                0,
+            )
+            .unwrap_err();
+            let back_oob_err = cspace_vspace_map_2m(
+                rcs,
+                root_lbl,
+                vs_cap,
+                fr2m,
+                0x0000_8000_0000_0000,
+                VmProt::USER_RW,
+                0,
+            )
+            .unwrap_err();
+            let _ = cspace_destroy_object(rcs, root_lbl, fr2m, 0);
+            let _ = crate::vspace::destroy_vspace(vs_h);
+            assert_eq!(oob_err, SysError::Inval);
+            assert_eq!(unaligned_err, SysError::Inval);
+            assert_eq!(back_align_err, CapError::PagingError);
+            assert_eq!(back_oob_err, CapError::PagingError);
+            irq_invariant_panic(format_args!(
+                "Framebuffer OOB/undersized/unaligned map bounds rejected (oob={:?}, align={:?}, back={:?})",
+                oob_err, unaligned_err, back_oob_err
             ));
         }
     }
@@ -464,20 +601,30 @@ pub fn verify_irq_and_ioport_security(cmdline: &str, online_cpus: usize) {
     crate::irq::bench::run_irq_and_ioport_benchmarks(online_cpus);
 }
 
-/// Launch the live interactive Ring 3 `P1` session (`dry-init` + `dry-input` + `dry-shell` + `dry-display`)
-/// when `interactive=1` is present on the kernel command line.
+/// Launch the live interactive Ring 3 `P1` (`interactive=1`, `session_mode=1`) or `Milestone 2A-2`
+/// multi-window desktop (`desktop=1`, `session_mode=2..4`) session.
 #[inline(never)]
 pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
-    if !cmdline.contains("interactive=1") {
+    let is_desktop = cmdline.contains("desktop=1");
+    if !cmdline.contains("interactive=1") && !is_desktop {
         return;
     }
 
     let init_elf = get_boot_module("dry-init.elf").expect("missing dry-init.elf");
     let _ = get_boot_module("dry-input.elf").expect("missing dry-input.elf");
     let _ = get_boot_module("dry-shell.elf").expect("missing dry-shell.elf");
+    if is_desktop {
+        let _ = get_boot_module("dry-sysmon.elf").expect("missing dry-sysmon.elf");
+    }
 
-    let session_mode = if cmdline.contains("p1_test_crash=1") {
-        2u64
+    let session_mode = if is_desktop {
+        if cmdline.contains("desktop_sec=1") {
+            3u64
+        } else if cmdline.contains("desktop_bench=1") {
+            4u64
+        } else {
+            2u64
+        }
     } else {
         1u64
     };
@@ -507,12 +654,18 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             let disp_cap = mint_boot_module_cap(cs, lbl, "dry-display.elf").unwrap_or(CapPtr::NULL);
             let input_cap = mint_boot_module_cap(cs, lbl, "dry-input.elf")?;
             let shell_cap = mint_boot_module_cap(cs, lbl, "dry-shell.elf")?;
+            let sysmon_cap = mint_boot_module_cap(cs, lbl, "dry-sysmon.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
                 CapPtr::NULL
             };
             let irq1_cap = mint_root_irq_cap(cs, lbl, IRQ_KEYBOARD_PS2, 1u64 << IRQ_KEYBOARD_PS2)?;
+            let irq12_cap = if session_mode >= 2 {
+                mint_root_irq_cap(cs, lbl, IRQ_MOUSE_PS2, 1u64 << IRQ_MOUSE_PS2)?
+            } else {
+                CapPtr::NULL
+            };
             let i8042_cap =
                 mint_root_ioport_cap(cs, lbl, &[I8042_DATA_PORT, I8042_STATUS_CMD_PORT])?;
 
@@ -528,6 +681,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 irq1_cap: irq1_cap.0,
                 i8042_port_cap: i8042_cap.0,
                 session_mode,
+                irq12_cap: irq12_cap.0,
+                sysmon_mod_cap: sysmon_cap.0,
             };
             // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame.
             unsafe {
@@ -603,6 +758,20 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
 
     let (ext_irqs, irq_acks, _, _) = irq_telemetry();
     let (io_ops, io_denied) = crate::irq::ioport::ioport_telemetry();
+    if session_mode >= 2 {
+        serial_println!(
+            "[DRY-P2-SESSION] PASS: cpus={} mode={} irq1={} irq12={} ext_irqs={} irq_acks={} ioport_ops={} ioport_denied={} leaked_frames={}",
+            online_cpus,
+            session_mode,
+            irq_line_delivered(IRQ_KEYBOARD_PS2),
+            irq_line_delivered(IRQ_MOUSE_PS2),
+            ext_irqs,
+            irq_acks,
+            io_ops,
+            io_denied,
+            leaked
+        );
+    }
     serial_println!(
         "[DRY-P1-SESSION] PASS: cpus={} ext_irqs={} irq_acks={} ioport_ops={} ioport_denied={} leaked_frames={}",
         online_cpus,

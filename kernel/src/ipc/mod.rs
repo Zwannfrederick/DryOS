@@ -16,13 +16,40 @@ pub mod notif;
 pub mod tests;
 
 use core::mem::size_of;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cspace::cap::{ unpack_obj_meta, unpack_state_gen, CSpaceId, CapError, CapObjectKind, CapPtr, SlotState };
 use crate::cspace::{CNODE_SLOTS, CSPACE_TABLE};
+use crate::gdt_tss::MAX_CPUS;
 use crate::percpu::current_percpu;
 use crate::security::CapRights;
 use crate::uaccess::SysError;
+
+#[repr(C, align(64))]
+struct CpuIpcCounter(AtomicU64);
+
+impl CpuIpcCounter {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+}
+
+static CPU_IPC_COUNTERS: [CpuIpcCounter; MAX_CPUS] = [const { CpuIpcCounter::new() }; MAX_CPUS];
+
+#[inline(always)]
+pub fn note_cpu_ipc_msg() {
+    let idx = (current_percpu().cpu_idx as usize) & (MAX_CPUS - 1);
+    CPU_IPC_COUNTERS[idx].0.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn total_ipc_msgs(online_cpus: usize) -> u64 {
+    let mut sum = 0u64;
+    for slot in CPU_IPC_COUNTERS.iter().take(online_cpus.min(MAX_CPUS)) {
+        sum = sum.wrapping_add(slot.0.load(Ordering::Relaxed));
+    }
+    sum
+}
 
 pub const MAX_INLINE_WORDS: usize = 4;
 pub const MAX_IPC_EXTRA_BYTES: usize = 256;

@@ -40,6 +40,7 @@ use crate::uaccess::SysError;
 
 pub const MAX_IRQ_LINES: usize = EXT_IRQ_VECTOR_COUNT;
 pub const IRQ_KEYBOARD_PS2: u8 = 1;
+pub const IRQ_MOUSE_PS2: u8 = 12;
 pub const IRQ_TEST_SW_LINE: u8 = 15;
 
 pub const IRQF_ONESHOT: u64 = 1 << 0;
@@ -268,6 +269,7 @@ struct IrqLineSlot {
     allocated: AtomicBool,
     generation: AtomicU32,
     lock: AtomicBool,
+    delivered_total: AtomicU64,
     inner: UnsafeCell<IrqLineInner>,
 }
 
@@ -280,6 +282,7 @@ impl IrqLineSlot {
             allocated: AtomicBool::new(false),
             generation: AtomicU32::new(1),
             lock: AtomicBool::new(false),
+            delivered_total: AtomicU64::new(0),
             inner: UnsafeCell::new(IrqLineInner::empty(idx)),
         }
     }
@@ -390,8 +393,9 @@ pub fn init_ioapic_and_irq_subsystem(hhdm_offset: u64, bsp_lapic_id: u32) -> boo
     }
 
     let r1 = isa_irq_route(IRQ_KEYBOARD_PS2);
+    let r12 = isa_irq_route(IRQ_MOUSE_PS2);
     serial_println!(
-        "[DRY-IOAPIC] PASS: acpi_id={} hw_id={} ver={:#x} phys={:#x} gsi_base={} max_redir={} dest_lapic={} irq1_gsi={} irq1_vec={:#x}",
+        "[DRY-IOAPIC] PASS: acpi_id={} hw_id={} ver={:#x} phys={:#x} gsi_base={} max_redir={} dest_lapic={} irq1_gsi={} irq1_vec={:#x} irq12_gsi={} irq12_vec={:#x}",
         madt.ioapic_id,
         hw_id,
         ver,
@@ -400,7 +404,9 @@ pub fn init_ioapic_and_irq_subsystem(hhdm_offset: u64, bsp_lapic_id: u32) -> boo
         max_redir,
         bsp_lapic_id,
         r1.gsi,
-        VEC_EXT_IRQ_BASE + IRQ_KEYBOARD_PS2
+        VEC_EXT_IRQ_BASE + IRQ_KEYBOARD_PS2,
+        r12.gsi,
+        VEC_EXT_IRQ_BASE + IRQ_MOUSE_PS2
     );
     true
 }
@@ -408,6 +414,16 @@ pub fn init_ioapic_and_irq_subsystem(hhdm_offset: u64, bsp_lapic_id: u32) -> boo
 #[inline]
 pub fn ioapic_present() -> bool {
     IOAPIC.present.load(Ordering::Acquire)
+}
+
+#[inline]
+pub fn irq_line_delivered(irq_line: u8) -> u64 {
+    let idx = irq_line as usize;
+    if idx >= MAX_IRQ_LINES {
+        0
+    } else {
+        IRQ_LINES[idx].delivered_total.load(Ordering::Relaxed)
+    }
 }
 
 #[inline]
@@ -766,6 +782,7 @@ pub fn on_external_irq(vector: u8) {
 
             inner.oneshot_pending_ack = true;
             inner.delivered_count = inner.delivered_count.saturating_add(1);
+            slot.delivered_total.fetch_add(1, Ordering::Relaxed);
             signal_target = Some((inner.notif_obj_id, inner.notif_obj_gen, inner.signal_bits));
         });
     } else {

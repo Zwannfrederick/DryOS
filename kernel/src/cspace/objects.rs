@@ -315,6 +315,37 @@ pub fn cspace_vspace_unmap_4k(
     })
 }
 
+/// Unmap a capability-backed 2 MiB hugepage mapping at `vaddr` and synchronize remote TLBs.
+pub fn cspace_vspace_unmap_2m(
+    cspace_id: CSpaceId,
+    subj_label: SecLabel,
+    vspace_cap: CapPtr,
+    frame2m_cap: CapPtr,
+    vaddr: u64,
+    now_epoch: u32,
+) -> Result<(), CapError> {
+    let vs_req = CapRights(CapRights::MAP.0 | CapRights::WRITE.0);
+    with_pinned_cap(cspace_id, subj_label, vspace_cap, vs_req, now_epoch, |vs_res| {
+        if vs_res.obj_kind != CapObjectKind::VSpace {
+            return Err(CapError::WrongObjectKind);
+        }
+        with_pinned_cap(cspace_id, subj_label, frame2m_cap, CapRights::MAP, now_epoch, |fr_res| {
+            if fr_res.obj_kind != CapObjectKind::Frame2M {
+                return Err(CapError::WrongObjectKind);
+            }
+            let vs_h = VSpaceHandle {
+                id: vs_res.obj_id as u16,
+                generation: vs_res.expected_obj_gen,
+            };
+            if !detach_matching_cap_mapping_record(fr_res.global_slot, vs_h.id, vaddr) {
+                return Err(CapError::PagingError);
+            }
+            let _ = crate::vspace::huge::unmap_2m(vs_h, vaddr).map_err(|_| CapError::PagingError)?;
+            Ok(())
+        })
+    })
+}
+
 /// Update 4 KiB PTE permissions, re-validating both `vspace_cap` and `frame_cap` rights (`W^X` + no RO->RW escalation).
 pub fn cspace_vspace_protect_4k(
     cspace_id: CSpaceId,

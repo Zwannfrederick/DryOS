@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! Device-agnostic Ring 3 input event contract & bounded non-blocking `InputRingQueue`.
 //!
-//! Separates hardware backends (`ps2.rs`, future USB HID) from downstream consumers (`dry-shell`,
-//! desktop compositor) while preserving strict event ordering and deterministic overflow accounting.
+//! Separates hardware backends (`ps2.rs`, future USB HID) from downstream consumers (`dry-display`
+//! window manager, `dry-shell`, `dry-sysmon`) while preserving strict `seq` ordering, 48-bit TSC
+//! timestamps, motion coalescing under burst load, and deterministic overflow accounting.
 
 pub const DEV_ID_PS2_KBD: u16 = 0x0001;
+pub const DEV_ID_PS2_MOUSE: u16 = 0x0002;
 pub const DEV_ID_SYNTH_TEST: u16 = 0x00ff;
 
 pub const MOD_SHIFT: u8 = 1 << 0;
@@ -14,30 +16,40 @@ pub const MOD_ALT: u8 = 1 << 2;
 pub const EV_FLAG_REPEAT: u8 = 1 << 0;
 pub const EV_FLAG_EXTENDED: u8 = 1 << 1;
 
+pub const MOUSE_BTN_LEFT: u8 = 1 << 0;
+pub const MOUSE_BTN_RIGHT: u8 = 1 << 1;
+pub const MOUSE_BTN_MIDDLE: u8 = 1 << 2;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEventKind {
     None = 0,
     KeyPress = 1,
     KeyRelease = 2,
-    PointerMove = 3,
-    PointerButton = 4,
+    MouseMove = 3,
+    MouseButtonDown = 4,
+    MouseButtonUp = 5,
+    MouseScroll = 6,
 }
 
 impl InputEventKind {
+    pub const POINTER_MOVE: Self = Self::MouseMove;
+
     #[inline]
     pub const fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::KeyPress,
             2 => Self::KeyRelease,
-            3 => Self::PointerMove,
-            4 => Self::PointerButton,
+            3 => Self::MouseMove,
+            4 => Self::MouseButtonDown,
+            5 => Self::MouseButtonUp,
+            6 => Self::MouseScroll,
             _ => Self::None,
         }
     }
 }
 
-/// Canonical device-agnostic input event (`KeyPress`/`KeyRelease` + forward-compatible pointer model).
+/// Canonical device-agnostic input event (`KeyPress`/`KeyRelease` + `MouseMove`/`MouseButton*`/`MouseScroll`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputEvent {
@@ -52,6 +64,9 @@ pub struct InputEvent {
     pub dx: i16,
     pub dy: i16,
     pub buttons: u8,
+    pub wheel: i8,
+    /// Low 48 bits of `rdtsc_user()` captured when the event was decoded in `dry-input`.
+    pub timestamp_tsc48: u64,
 }
 
 impl InputEvent {
@@ -67,9 +82,11 @@ impl InputEvent {
         dx: 0,
         dy: 0,
         buttons: 0,
+        wheel: 0,
+        timestamp_tsc48: 0,
     };
 
-    /// Pack event + cumulative `overflow_count` into the 4 inline IPC registers (`R12..R15`).
+    /// Pack event + low-16-bit `overflow_count` + 48-bit TSC timestamp into inline IPC `R12..R15`.
     #[inline]
     pub const fn to_ipc_mrs(self, overflow_count: u64) -> [u64; 4] {
         let mr0 = (self.seq as u64)
@@ -82,8 +99,15 @@ impl InputEvent {
             | ((self.flags as u64) << 40);
         let mr2 = ((self.dx as u16) as u64)
             | (((self.dy as u16) as u64) << 16)
-            | ((self.buttons as u64) << 32);
-        [mr0, mr1, mr2, overflow_count]
+            | ((self.buttons as u64) << 32)
+            | (((self.wheel as u8) as u64) << 40);
+        let ovf16 = if overflow_count > 0xffff {
+            0xffff
+        } else {
+            overflow_count & 0xffff
+        };
+        let mr3 = ovf16 | ((self.timestamp_tsc48 & 0xffff_ffff_ffff) << 16);
+        [mr0, mr1, mr2, mr3]
     }
 
     /// Unpack `(InputEvent, overflow_count)` from the 4 inline IPC registers (`R12..R15`).
@@ -101,8 +125,20 @@ impl InputEvent {
             dx: ((mrs[2] & 0xffff) as u16) as i16,
             dy: (((mrs[2] >> 16) & 0xffff) as u16) as i16,
             buttons: ((mrs[2] >> 32) & 0xff) as u8,
+            wheel: (((mrs[2] >> 40) & 0xff) as u8) as i8,
+            timestamp_tsc48: mrs[3] >> 16,
         };
-        (ev, mrs[3])
+        (ev, mrs[3] & 0xffff)
+    }
+
+    /// Compute elapsed TSC cycles modulo `2^48` between `timestamp_tsc48` and `now_tsc`.
+    #[inline]
+    pub const fn latency_cycles(self, now_tsc: u64) -> u64 {
+        if self.timestamp_tsc48 == 0 {
+            0
+        } else {
+            (now_tsc.wrapping_sub(self.timestamp_tsc48)) & 0xffff_ffff_ffff
+        }
     }
 }
 
@@ -113,6 +149,7 @@ pub struct InputRingQueue<const N: usize> {
     tail: usize,
     len: usize,
     overflow_count: u64,
+    coalesced_moves: u64,
 }
 
 impl<const N: usize> InputRingQueue<N> {
@@ -123,6 +160,7 @@ impl<const N: usize> InputRingQueue<N> {
             tail: 0,
             len: 0,
             overflow_count: 0,
+            coalesced_moves: 0,
         }
     }
 
@@ -141,7 +179,12 @@ impl<const N: usize> InputRingQueue<N> {
         self.overflow_count
     }
 
-    /// Enqueue `ev` without blocking; drops incoming event and increments `overflow_count` if full.
+    #[inline]
+    pub const fn coalesced_moves(&self) -> u64 {
+        self.coalesced_moves
+    }
+
+    /// Enqueue `ev` strictly in FIFO order; drops incoming event and increments `overflow_count` if full.
     #[inline]
     pub fn push(&mut self, ev: InputEvent) -> bool {
         if self.len >= N {
@@ -152,6 +195,31 @@ impl<const N: usize> InputRingQueue<N> {
         self.tail = (self.tail + 1) % N;
         self.len += 1;
         true
+    }
+
+    /// Enqueue `ev`, coalescing consecutive `MouseMove` deltas into the tail entry when queued so
+    /// high-rate pointer motion bursts never starve discrete keyboard or mouse-button transitions.
+    #[inline]
+    pub fn push_coalescing(&mut self, ev: InputEvent) -> bool {
+        if ev.kind == InputEventKind::MouseMove && self.len > 0 {
+            let last_idx = (self.tail + N - 1) % N;
+            let last = &mut self.buf[last_idx];
+            if last.kind == InputEventKind::MouseMove
+                && last.buttons == ev.buttons
+                && last.modifiers == ev.modifiers
+            {
+                if let (Some(ndx), Some(ndy)) = (last.dx.checked_add(ev.dx), last.dy.checked_add(ev.dy))
+                {
+                    last.dx = ndx;
+                    last.dy = ndy;
+                    last.seq = ev.seq;
+                    last.timestamp_tsc48 = ev.timestamp_tsc48;
+                    self.coalesced_moves = self.coalesced_moves.wrapping_add(1);
+                    return true;
+                }
+            }
+        }
+        self.push(ev)
     }
 
     #[inline]

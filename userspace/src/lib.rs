@@ -3,12 +3,14 @@
 
 #![no_std]
 
+pub mod compositor;
 pub mod gfx;
 pub mod input;
 pub mod keymap;
 pub mod ps2;
 pub mod shell;
 pub mod surface;
+pub mod wm;
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -80,6 +82,7 @@ pub const VSPACE_MAP_OP_4K_RW: u64 = 1;
 pub const VSPACE_MAP_OP_2M_RO: u64 = 2;
 pub const VSPACE_MAP_OP_2M_RW: u64 = 3;
 pub const VSPACE_MAP_OP_UNMAP_4K: u64 = 4;
+pub const VSPACE_MAP_OP_UNMAP_2M: u64 = 5;
 
 // Capability right bits (`kernel/src/security.rs`)
 pub const RIGHT_READ: u16 = 1 << 0;
@@ -98,7 +101,15 @@ pub const RIGHT_REPLY: u16 = 1 << 12;
 pub const RIGHT_WAIT: u16 = 1 << 13;
 pub const RIGHT_SPAWN: u16 = 1 << 14;
 
-// IPC opcodes shared across `dry-init`, `dry-echo`, `dry-display`, `dry-input`, and `dry-shell`
+// Unforgeable capability badges minted by `dry-init` onto `disp_ep` (`Milestone 2A-2` WM policy)
+pub const BADGE_SUPERVISOR: u64 = 0x0001_ffff;
+pub const BADGE_INPUT_SVC: u64 = 0x0003_ffff;
+pub const BADGE_WIN_LEGACY_P1: u64 = 0x54e2;
+pub const BADGE_WIN_SHELL: u64 = 0x0102_0001;
+pub const BADGE_WIN_SYSMON: u64 = 0x0103_0002;
+pub const BADGE_WIN_ROGUE_PROBE: u64 = 0x0109_0099;
+
+// IPC opcodes shared across `dry-init`, `dry-echo`, `dry-display`, `dry-input`, `dry-shell`, and `dry-sysmon`
 pub const IPC_OP_PING_TRACE: u32 = 1;
 pub const IPC_OP_PING_SILENT: u32 = 2;
 pub const IPC_OP_PONG: u32 = 3;
@@ -110,18 +121,34 @@ pub const IPC_OP_INPUT_INIT_PORT: u32 = 10;
 pub const IPC_OP_INPUT_WAIT: u32 = 11;
 pub const IPC_OP_INPUT_EVENT: u32 = 12;
 pub const IPC_OP_INPUT_OVERFLOW_TEST: u32 = 13;
+pub const IPC_OP_INPUT_INIT_MOUSE: u32 = 14;
+pub const IPC_OP_INPUT_SET_WM_SINK: u32 = 15;
+pub const IPC_OP_INPUT_QUERY_STATS: u32 = 16;
 
 pub const IPC_OP_SURFACE_ATTACH: u32 = 20;
 pub const IPC_OP_SURFACE_PRESENT: u32 = 21;
 pub const IPC_OP_SURFACE_MOVE: u32 = 22;
 pub const IPC_OP_SURFACE_FOCUS: u32 = 23;
+pub const IPC_OP_WIN_BIND_NOTIF: u32 = 24;
+pub const IPC_OP_WIN_WAIT_EVENT: u32 = 25;
+pub const IPC_OP_WIN_POLL_EVENT: u32 = 26;
+pub const IPC_OP_WIN_CLOSE: u32 = 27;
+pub const IPC_OP_WM_INPUT_EVENT: u32 = 28;
+pub const IPC_OP_WM_TOGGLE_TILING: u32 = 29;
 
 pub const IPC_OP_SUP_HELLO: u32 = 30;
 pub const IPC_OP_SUP_RECONNECT_INPUT: u32 = 31;
 pub const IPC_OP_SUP_SHUTDOWN: u32 = 32;
+pub const IPC_OP_SUP_APP_EXITED: u32 = 33;
+pub const IPC_OP_WM_OWNER_GONE: u32 = 34;
+pub const IPC_OP_WIN_EMPTY: u32 = 35;
+pub const IPC_OP_WIN_CLOSED: u32 = 36;
+pub const IPC_OP_ERR_PERM: u32 = 37;
+pub const IPC_OP_ERR_INVAL: u32 = 38;
+pub const IPC_OP_WM_QUERY_STATE: u32 = 39;
 
 /// Boot capability table mapped read-only into `dry-init` at `arg0` (`0x0070_0000`).
-/// Legacy Milestone 1C zeroes the trailing 5 qwords (`session_mode == 0`).
+/// Legacy Milestone 1C zeroes trailing fields (`session_mode == 0`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RootInitBootInfo {
@@ -134,6 +161,8 @@ pub struct RootInitBootInfo {
     pub irq1_cap: u64,
     pub i8042_port_cap: u64,
     pub session_mode: u64,
+    pub irq12_cap: u64,
+    pub sysmon_mod_cap: u64,
 }
 
 pub const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954; // "DRY_INIT"
@@ -174,7 +203,7 @@ pub struct UserFbInfo {
     pub mapped_bytes: u64,
 }
 
-/// Sanitized 80-byte system telemetry POD returned by `SYS_SYSINFO` (zero kernel pointers/PFNs).
+/// Sanitized 104-byte system telemetry POD returned by `SYS_SYSINFO` (zero kernel pointers/PFNs).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct UserSysInfo {
@@ -193,9 +222,12 @@ pub struct UserSysInfo {
     pub total_ctx_switches: u64,
     pub usable_frames_4k: u32,
     pub free_frames_4k: u32,
+    pub irq1_delivered: u64,
+    pub irq12_delivered: u64,
+    pub total_ipc_msgs: u64,
 }
 
-const _: () = assert!(size_of::<UserSysInfo>() == 80);
+const _: () = assert!(size_of::<UserSysInfo>() == 104);
 
 /// Extended IPC send/grant descriptor (`48` bytes POD, matches `kernel::ipc::UserIpcSendExt`).
 #[repr(C)]
