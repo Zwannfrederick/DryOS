@@ -19,8 +19,8 @@
 - **Uygulanan Savunma:** Çift-nesil ABA kalkanı (`slot_gen` + canlı nesne `generation`), `with_pinned_cap` içindeki `slot.in_flight_ops` (`SeqCst`) Dekker pini, `CSpace`-sahibi `TCB` yuvalarının yalnızca `cspace_destroy_object -> release_dead_tcb_slot` sonrasında havuza dönmesi ve çerçeve geri kazanımı öncesi senkron SMP TLB shootdown (`INV-CAP-05`, `INV-USR-08`).
 
 ### R-03: Kalıcı IOVA `DmaArena` İçinde DMA Sahiplik İhlali ve Çökme Sonrası Kaçak DMA
-- **Durum:** `OPEN / PLANNED` (`H2` QEMU `vfio-pci` PoC doğrulandı; Faz 2C/3 çekirdek entegrasyonu ve Faz 4/`P5` fiziksel silikon testi sırada).
-- **Azaltma:** `IoRing` kontrol halkalarının `DmaArena` dışında tutulması, TX (`IOMMU_READ`) ve RX (`IOMMU_WRITE`) ayrımı, RX başlıklarının doğrulamadan önce kopyalanması ve sürücü çöküşünde bellek iadesi öncesi zorunlu `Bus Master Enable = 0` + PCIe FLR + IOMMU temizliği.
+- **Durum:** `MITIGATED (QEMU BME=0 + Pin)` / `OPEN (Bare-Metal Fiziksel VT-d/AMD-Vi Silikon — P5)` (`Milestone 2B` `ADR-015` ile çekirdek mekanizması doğrulandı).
+- **Azaltma:** `SYS_DMA_ALLOC` çerçeveleri `DEVICE_DMA | NO_DELEGATE` ve `iommu_pin_count == 1` ile sabitlenir (`INV-CAP-08`, erken `destroy` `-EBUSY`); `IoRing` kontrol sayfaları normal çerçevelerde tutulur; sürücü çöküşünde (`#UD` canlı testi: `p4c_vault_dma_devws_security_e2e`) veya çıkışında `quiesce_pci_for_cspace` bellek iadesinden **önce** donanımda `PCI Command.BME = 0` bitini temizler (`pci_quiesce=2`, `leaked_frames=0`). Fiziksel PCIe FLR ve silikon VT-d/AMD-Vi IOTLB temizliği `P5` bare-metal kapısındadır.
 
 ### R-04: Alt-Sistem Geçişli Bağımlılık Patlaması (*Monolithic Shim Creep*)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-006`).
@@ -68,10 +68,10 @@
 - **Teknik Mekanizma:** Yabancı uyumluluk çalışma zamanlarının varsayılan kurulumu şişirmesi (`DRY Server` saflığını bozması) veya kararsız paket formatı/gerçekçi olmayan "%100 Windows/Linux uyumu" beklentisi.
 - **Azaltma:** Kodlama öncesi zorunlu paket/ABI tasarım kapısı, isteğe bağlı (*on-demand*) salt-okunur (`READ_ONLY_EXPORT`) runtime kurulumu, kesin öncelik sırası (`Native DRY -> Linux ELF -> Seçilmiş Win32`) ve `DRY Store` üzerinde görünür uyumluluk/kısıtlama rozetleri.
 
-### R-16: Kimlik Doğrulamasız Oturum Kalkanı (`DRY Vault` Öncesi), Uçucu `/ram` Dosya Sistemi ve UEFI `ACPI S3` Uyanma Sınırı (Yeni — 12 Kasım 2026)
-- **Durum:** `BOUNDED BY DESIGN` / `OPEN — Milestone 2B & P5` (`ADR-014`, `85/85` QEMU testiyle sınırı doğrulandı).
-- **Teknik Mekanizma:** (a) `DRY Vault` kimlik doğrulama servisi henüz yokken oturum kilidinin sahte parola ekranıyla güvenlik yanılsaması yaratması; (b) kalıcı blok sürücüsü yokken `/ram` dosyalarının kalıcı sanılması; (c) `< 1 MiB` 16-bit gerçek-mod uyanma trampolini ve SMP/GOP geri yükleme zinciri yokken `Suspend-to-RAM (S3)` işleminin siyah ekranla taklit edilmesi veya sistemi çökertmesi.
-- **Uygulanan Savunma:** (a) Compositor kilit kalkanı tüm uygulama girdilerini engeller (`INV-APP-05`) ancak ekranda açıkça `UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)` uyarısı gösterir; (b) `Files` ve `Terminal` arayüzleri `/ram` alanını açıkça uçucu (*volatile*) olarak etiketler, `/boot` mutasyonlarını `EROFS` ile ve çapraz kompartman erişimlerini `EPERM` ile reddeder (`INV-APP-02`, `INV-APP-03`); (c) `POWER_OP_SUSPEND_S3` sahte uyku yapmaz ve deterministik `-ENOSYS` döner (`INV-APP-06`).
+### R-16: Oturum Kilidi Doğrulaması (`DRY Vault`), Kalıcı `/persist` vs Uçucu `/ram` Ayrımı ve UEFI `ACPI S3` Uyanma Sınırı (Güncelleme — 12 Kasım 2026)
+- **Durum:** `DRY Vault` & Kalıcı `/persist` `MITIGATED (QEMU — Milestone 2B)` / `ACPI S3` `OPEN — P5` (`ADR-014`, `ADR-015`).
+- **Teknik Mekanizma:** (a) Oturum kilidinin düz metin veya sahte parola kontrolüyle aşılması; (b) `/persist` üzerinde güç kesintisinde veri bozulması veya `/ram` uçucu alanının kalıcı sanılması; (c) `< 1 MiB` 16-bit gerçek-mod uyanma trampolini yokken `Suspend-to-RAM (S3)` işleminin sahte ekran karartmasıyla taklit edilmesi.
+- **Uygulanan Savunma:** (a) `Milestone 2B` ile `Session Lock` kalkanı `dry-vault.elf` (`0x0007`) tuzlu `PBKDF2-HMAC-SHA256` doğrulayıcısına (`/persist/vault.sec` `RootSystem | NO_DELEGATE`, `ct_eq_32`, `0` düz metin) ve $O(1)$ `GLOBAL_LEASE_EPOCH` ilerletmesine bağlandı (`docs/p4_vault_auth_lock.png`); (b) `/persist` çift A/B `CRC32` süperblok + 4 KiB CoW + `VIRTIO_BLK_T_FLUSH` ile güç kesintisi (`SIGKILL`) altında doğrulandı (`p4b`), `/ram` ise açıkça uçucu etiketlendi; (c) `POWER_OP_SUSPEND_S3` sahte uyku yapmaz ve deterministik `-ENOSYS` döner (`INV-APP-06`).
 
 ---
 

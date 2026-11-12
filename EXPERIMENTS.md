@@ -907,3 +907,19 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
   1. **Açılış & Etkileşim:** 7 eşzamanlı Ring 3 sistem/uygulama süreciyle (`dry-init`, `dry-vfs`, `dry-power`, `dry-display`, `dry-input`, `dry-shell`, `dry-sysmon`) masaüstü hazır olma süresi **`229 .. 235 ms`** (`2 vCPU`); `in2comp p50 = 48.981 cyc` (`~15.7 µs`), tek-satır `ROW_PRESENT = ~41k cyc` (`~13 µs`).
   2. **Bellek & Yığın Disiplini:** `pmm/tests.rs` OOM öz-testinin intrüzif HHDM sayfa listesine taşınmasıyla çekirdek `.bss` **`-512 KiB` küçüldü** (`kernel_meta_frames: 1.782 -> 1.654`) ve `256 MiB` (`60.891` serbest çerçeve) -> **`2 GiB` (`516.802` serbest çerçeve, `20 vCPU`)** ölçeklenmesi doğrulandı. `rust_syscall_dispatch` (`248 B`), `sys_cold_dispatch` (`216 B`) ve `sys_irq_ack` (`40 B`) yığın çerçeveleri **`+0 B`** büyüdü.
   3. **Güç & Oturum Yaşam Döngüsü:** Masaüstü `HLT` boşta kalma (`16.209` çağrı, `VEC_RESCHED_WAKE` IPI ile `0` kayıp uyanma), manuel + 5 sn otomatik `DPMS` (`1.024.000/1.024.000` `0x000000` piksel ve anlık uyanma), girdi-engelleyici `Session Lock` (`lock_blocked=3`, `docs/p3c_lock_shield.png`), `isa-debug-exit` kapalıyken gerçek donanım **ACPI S5 kapanış** (`PM1a=0x604`, `rc=0`) ve **FADT yeniden başlatma** (`0xcf9`<-`0x0f`, `rc=0`), ayrıca `< 1 MiB` gerçek-mod uyanma trampolini eksikliği nedeniyle dürüst **`S3 = -ENOSYS`** davranışı doğrulandı.
+
+---
+
+## Bölüm O — Faz 2 `Milestone 2B` (`Persistent VirtIO-Blk Storage, Lock-Free IoRing, Crash-Safe DRYFS_v1 & DRY Vault`): Özeti
+
+- **Tarih:** 12 Kasım 2026 (`ADR-015`)
+- **Tam Ayrıntılı Tablolar ve Kök Neden Bulguları:** [`docs/EXPERIMENTS_2B.md`](docs/EXPERIMENTS_2B.md)
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  python3 tools/qemu_boot_test.py --p4-only    # 3/3 Milestone 2B kalıcılık + SIGKILL kurtarma + Vault/DMA güvenliği
+  python3 tools/qemu_boot_test.py --p3-matrix  # 5/5 SMP (1/2/4/8/20 vCPU) & RAM (256M..2G) matrisi
+  python3 tools/qemu_boot_test.py              # 88/88 tam deterministik regresyon paketi
+  ```
+- **Özet Bulgular (`88/88` QEMU/KVM + `5/5` Matris Yeşil, `leaked_frames = 0`):**
+  1. **Kalıcı `DRYFS_v1` ve `SIGKILL` Güç Kesintisi Kurtarması:** Ring 3 `dry-blk.elf` (`VirtIO 1.0 Modern`) + kilitsiz `IoRing` (`SQ`/`CQ` + `Notification`) üzerinde çift A/B `CRC32` süperblok ve 4 KiB CoW bloklarıyla `/persist` bağlama noktası doğrulandı; 2 ardışık önyükleme boyunca dosyalar, `hardlink`, `/persist/desktop.cfg` tercihleri ve `PBKDF2` parola doğrulayıcısı korundu (`p4a`); aktif süperblok bozulup `SIGKILL` uygulandığında karşı yuvadan otomatik kurtarma (`recovered=true`) kanıtlandı (`p4b`).
+  2. **`DRY Vault`, `BME=0` DMA Susturma ve `DEV_WORKSPACE` Kısıtlaması:** Tuzlu `PBKDF2-HMAC-SHA256` (`/persist/vault.sec`, ham diskte `0` düz metin parola) ile gerçek parola doğrulamalı `Session Lock` (`docs/p4_vault_auth_lock.png`), $O(1)$ `GLOBAL_LEASE_EPOCH` iptali (`-EREVOKED`), `SEAL_RO_EXPORT` `W^X` zorlaması, `DEV_WORKSPACE` (`0x002a`) donanım/DMA reddi (`dma_denied=2`, `vault_denied=1`) ve canlı `dry-blk` `#UD` çöküşünde `PCI Command.BME = 0` donanım susturması (`pci_quiesce=2`) doğrulandı (`p4c`). Sıcak `rust_syscall_dispatch` yığın çerçevesi **`248 B` (`+0 B`)** korundu.

@@ -685,34 +685,77 @@ impl DesktopCompositor {
             self.pal.bg_win,
             clip,
         );
-        self.draw_str_clipped(
-            cx + 18,
-            cy + 72,
-            b"AUTH   : UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)",
-            self.pal.fg_warn,
-            self.pal.bg_win,
-            clip,
-        );
-        self.draw_str_clipped(
-            cx + 18,
-            cy + 98,
-            b"Active Ring 3 apps continue executing isolated underneath.",
-            self.pal.fg_muted,
-            self.pal.bg_win,
-            clip,
-        );
+        if wm.vault_auth_required {
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 70,
+                b"AUTH   : DRY VAULT PASSPHRASE REQUIRED (PBKDF2-SHA256)",
+                self.pal.fg_accent,
+                self.pal.bg_win,
+                clip,
+            );
+            let mut plb = LineBuilder::new();
+            plb.push_bytes(b"Passphrase [ ");
+            for _ in 0..(wm.lock_pin_len as usize).min(24) {
+                plb.push_byte(b'*');
+            }
+            plb.push_bytes(b"_ ] (Type + Enter)");
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 96,
+                plb.as_bytes(),
+                self.pal.fg_primary,
+                self.pal.bg_win,
+                clip,
+            );
 
-        let mut blb = LineBuilder::new();
-        blb.push_bytes(b"Blocked key/mouse inputs while locked: ");
-        blb.push_u64(wm.locked_blocked_events);
-        self.draw_str_clipped(
-            cx + 18,
-            cy + 124,
-            blb.as_bytes(),
-            self.pal.fg_primary,
-            self.pal.bg_win,
-            clip,
-        );
+            let mut flb = LineBuilder::new();
+            flb.push_bytes(b"Auth failures: ");
+            flb.push_u64(wm.vault_auth_failures as u64);
+            flb.push_bytes(b" | Blocked inputs: ");
+            flb.push_u64(wm.locked_blocked_events);
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 124,
+                flb.as_bytes(),
+                if wm.vault_auth_failures > 0 {
+                    self.pal.fg_warn
+                } else {
+                    self.pal.fg_muted
+                },
+                self.pal.bg_win,
+                clip,
+            );
+        } else {
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 72,
+                b"AUTH   : UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)",
+                self.pal.fg_warn,
+                self.pal.bg_win,
+                clip,
+            );
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 98,
+                b"Active Ring 3 apps continue executing isolated underneath.",
+                self.pal.fg_muted,
+                self.pal.bg_win,
+                clip,
+            );
+
+            let mut blb = LineBuilder::new();
+            blb.push_bytes(b"Blocked key/mouse inputs while locked: ");
+            blb.push_u64(wm.locked_blocked_events);
+            self.draw_str_clipped(
+                cx + 18,
+                cy + 124,
+                blb.as_bytes(),
+                self.pal.fg_primary,
+                self.pal.bg_win,
+                clip,
+            );
+        }
 
         let btn = wm.unlock_button_rect();
         self.fill_back_clipped(btn, clip, self.pal.border_focus);
@@ -721,7 +764,11 @@ impl DesktopCompositor {
         self.draw_str_clipped(
             btn.x + 16,
             btn.y + 6,
-            b"[ UNLOCK SESSION (Enter/Click) ]",
+            if wm.vault_auth_required {
+                b"[ AUTHENTICATE & UNLOCK (Enter) ]"
+            } else {
+                b"[ UNLOCK SESSION (Enter/Click) ]"
+            },
             self.pal.fg_accent,
             self.pal.bg_pill,
             clip,

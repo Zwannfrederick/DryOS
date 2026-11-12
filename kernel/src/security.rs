@@ -140,6 +140,12 @@ impl CapRights {
     pub const POWER_ROOT: Self = Self(
         Self::READ.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
     );
+    pub const PCI_ROOT: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
+    pub const VAULT_ROOT: Self = Self(
+        Self::READ.0 | Self::GRANT.0 | Self::MANAGE.0 | Self::REVOKE.0,
+    );
 
     #[inline(always)]
     pub const fn contains(self, rhs: Self) -> bool {

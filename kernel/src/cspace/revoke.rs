@@ -449,6 +449,16 @@ pub fn cspace_destroy_object(
                 return Err(CapError::StaleGenerationAba);
             }
         }
+        CapObjectKind::PciDev => {
+            if !crate::pci::is_pci_cap_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
+        CapObjectKind::VaultCtrl => {
+            if !crate::vault_ctrl::is_vault_cap_live(resolved.obj_id, resolved.expected_obj_gen) {
+                return Err(CapError::StaleGenerationAba);
+            }
+        }
         CapObjectKind::Untyped => {
             let tok = UntypedCapToken {
                 slot_idx: resolved.obj_id as u16,
@@ -570,6 +580,8 @@ pub fn cspace_destroy_object(
         CapObjectKind::BootModule
         | CapObjectKind::Framebuffer
         | CapObjectKind::PowerCtrl
+        | CapObjectKind::PciDev
+        | CapObjectKind::VaultCtrl
         | CapObjectKind::None => {}
     }
 

@@ -20,6 +20,7 @@
 
 pub mod bench;
 pub mod ioport;
+pub mod session;
 pub mod tests;
 
 use core::cell::UnsafeCell;

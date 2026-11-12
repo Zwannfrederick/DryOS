@@ -64,6 +64,16 @@ pub unsafe fn outl(port: u16, val: u32) {
 }
 
 #[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let val: u32;
+    // SAFETY: Caller guarantees `port` is a valid 32-bit architectural I/O port.
+    unsafe {
+        asm!("in eax, dx", out("eax") val, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    val
+}
+
+#[inline]
 pub unsafe fn wrmsr(msr: u32, val: u64) {
     let low = val as u32;
     let high = (val >> 32) as u32;

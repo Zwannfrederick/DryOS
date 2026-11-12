@@ -176,7 +176,12 @@ class _DesktopSessionHarness:
             if marker in item:
                 return item
         full = "".join(self.serial_lines)
-        print(f"FULL SERIAL OUTPUT ({self.name}):\n{full}", file=sys.stderr)
+        tail = full[-16384:] if len(full) > 16384 else full
+        try:
+            sys.stderr.write(f"FULL SERIAL OUTPUT ({self.name}):\n{tail}\n")
+            sys.stderr.flush()
+        except BlockingIOError:
+            pass
         raise RuntimeError(f"[{self.name}] Timed out waiting for serial marker {marker!r}")
 
     def boot_to_desktop_ready(self) -> _DesktopQmpClient:

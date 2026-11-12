@@ -135,6 +135,7 @@ pub enum DesktopAction {
     RequestReboot,
     RequestSuspendS3,
     RequestPoweroffHw,
+    SubmitVaultUnlock(u8),
 }
 
 impl DesktopAction {
@@ -160,6 +161,7 @@ impl DesktopAction {
             Self::RequestReboot => [16, 0],
             Self::RequestSuspendS3 => [17, 0],
             Self::RequestPoweroffHw => [18, 0],
+            Self::SubmitVaultUnlock(len) => [19, len as u64],
         }
     }
 
@@ -193,6 +195,7 @@ impl DesktopAction {
             16 => Self::RequestReboot,
             17 => Self::RequestSuspendS3,
             18 => Self::RequestPoweroffHw,
+            19 => Self::SubmitVaultUnlock((w1 & 0x3f) as u8),
             _ => Self::None,
         }
     }
@@ -254,6 +257,9 @@ pub const fn compartment_short_name(comp_id: u16, domain: u8) -> &'static [u8] {
         (1, 0x0003) => b"dry-input",
         (1, 0x0004) => b"dry-vfs",
         (1, 0x0005) => b"dry-power",
+        (1, 0x0006) => b"dry-blk",
+        (1, 0x0007) => b"dry-vault",
+        (1, 0x002a) => b"dev-ws",
         (_, 0x0101) => b"dry-echo",
         (_, 0x0102) => b"Terminal",
         (_, 0x0103) => b"LifeStation",

@@ -10,220 +10,14 @@
 
 use crate::action::{ActionQueue, AppId, DesktopAction, APP_COUNT};
 use crate::gfx::{DirtyRegion, Rect, CURSOR_H, CURSOR_W};
-use crate::input::{InputEvent, InputEventKind, InputRingQueue, MOD_ALT, MOUSE_BTN_LEFT};
-use crate::keymap::{KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP};
-use crate::surface::{SurfaceSnapshot, TERM_COLS, TERM_ROWS};
+use crate::input::{InputEvent, InputEventKind, MOD_ALT, MOUSE_BTN_LEFT};
+use crate::keymap::{
+    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
+};
+use crate::surface::{TERM_COLS, TERM_ROWS};
+use crate::vault_crypto::scrub_bytes;
 
-pub const MAX_WINDOWS: usize = 8;
-pub const WIN_EVENT_QUEUE_CAP: usize = 32;
-pub const SUP_BIT_WM_ACTION: u64 = 1 << 0;
-
-pub const TOPBAR_H: usize = 28;
-pub const WIN_PAD_X: usize = 12;
-pub const WIN_TITLE_H: usize = 28;
-pub const WIN_PAD_BOTTOM: usize = 10;
-pub const WIN_BORDER: usize = 2;
-pub const SHADOW_OFF: usize = 6;
-
-pub const TITLE_KIND_TERMINAL: u8 = 0;
-pub const TITLE_KIND_SYSMON: u8 = 1;
-pub const TITLE_KIND_GENERIC: u8 = 2;
-pub const TITLE_KIND_FILES: u8 = 3;
-pub const TITLE_KIND_SETTINGS: u8 = 4;
-pub const TITLE_KIND_DIALOG: u8 = 5;
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowRole {
-    Normal = 0,
-    /// Modal/helper dialog role: stays auto-floating above tiled/stacked/tabbed workspaces.
-    DialogTransient = 1,
-}
-
-impl WindowRole {
-    #[inline]
-    pub const fn from_u8(v: u8) -> Self {
-        if v == 1 {
-            Self::DialogTransient
-        } else {
-            Self::Normal
-        }
-    }
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LayoutMode {
-    Floating = 0,
-    SideBySideTiled = 1,
-    Stacked = 2,
-    Tabbed = 3,
-}
-
-impl LayoutMode {
-    #[inline]
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Floating),
-            1 => Some(Self::SideBySideTiled),
-            2 => Some(Self::Stacked),
-            3 => Some(Self::Tabbed),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    pub const fn next_mode(self) -> Self {
-        match self {
-            Self::Floating => Self::SideBySideTiled,
-            Self::SideBySideTiled => Self::Stacked,
-            Self::Stacked => Self::Tabbed,
-            Self::Tabbed => Self::Floating,
-        }
-    }
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionVisualState {
-    Active = 0,
-    DisplayBlanked = 1,
-    SessionLocked = 2,
-}
-
-impl SessionVisualState {
-    #[inline]
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Active),
-            1 => Some(Self::DisplayBlanked),
-            2 => Some(Self::SessionLocked),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HitPart {
-    TitleBar,
-    CloseButton,
-    ClientBody,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WmError {
-    PermDenied,
-    InvalidGeometry,
-    NoFreeSlots,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WmInputAction {
-    None,
-    CursorMoved,
-    FocusChanged(u32),
-    WindowDragged(u32),
-    DragEnded(u32, usize, usize),
-    CloseRequested(u32),
-    LayoutToggled(LayoutMode),
-    KeyRouted(u32),
-    WheelRouted(u32),
-    KeyMoved(u32, usize, usize),
-    DesktopActionQueued(DesktopAction),
-    DpmsWoke,
-    LockBlocked,
-}
-
-pub struct WindowSlot {
-    pub allocated: bool,
-    pub id: u32,
-    pub owner_badge: u64,
-    pub role: WindowRole,
-    pub title_kind: u8,
-    pub visible: bool,
-    pub focused: bool,
-    pub close_requested: bool,
-    pub cols: u16,
-    pub rows: u16,
-    pub rect: Rect,
-    pub saved_floating_rect: Rect,
-    pub surf_cap: u64,
-    pub surf_vaddr: u64,
-    pub notif_cap: u64,
-    pub waiter_reply_tok: u64,
-    pub ev_queue: InputRingQueue<WIN_EVENT_QUEUE_CAP>,
-    pub snapshot: SurfaceSnapshot,
-}
-
-impl WindowSlot {
-    pub const fn empty() -> Self {
-        Self {
-            allocated: false,
-            id: 0,
-            owner_badge: 0,
-            role: WindowRole::Normal,
-            title_kind: TITLE_KIND_TERMINAL,
-            visible: false,
-            focused: false,
-            close_requested: false,
-            cols: TERM_COLS as u16,
-            rows: TERM_ROWS as u16,
-            rect: Rect::EMPTY,
-            saved_floating_rect: Rect::EMPTY,
-            surf_cap: 0,
-            surf_vaddr: 0,
-            notif_cap: 0,
-            waiter_reply_tok: 0,
-            ev_queue: InputRingQueue::new(),
-            snapshot: SurfaceSnapshot::new(),
-        }
-    }
-
-    #[inline]
-    pub const fn outer_rect(&self) -> Rect {
-        if !self.allocated || !self.visible {
-            Rect::EMPTY
-        } else {
-            Rect::new(
-                self.rect.x,
-                self.rect.y,
-                self.rect.w + SHADOW_OFF,
-                self.rect.h + SHADOW_OFF,
-            )
-        }
-    }
-
-    #[inline]
-    pub const fn titlebar_rect(&self) -> Rect {
-        Rect::new(
-            self.rect.x + WIN_BORDER,
-            self.rect.y + WIN_BORDER,
-            self.rect.w.saturating_sub(WIN_BORDER * 2),
-            WIN_TITLE_H,
-        )
-    }
-
-    #[inline]
-    pub const fn close_btn_rect(&self) -> Rect {
-        let bx = (self.rect.x + self.rect.w).saturating_sub(WIN_BORDER + 28);
-        Rect::new(bx, self.rect.y + WIN_BORDER + 4, 22, 20)
-    }
-
-    #[inline]
-    pub const fn grid_origin(&self) -> (usize, usize) {
-        (
-            self.rect.x + WIN_BORDER + WIN_PAD_X,
-            self.rect.y + WIN_BORDER + WIN_TITLE_H + 4,
-        )
-    }
-}
-
-#[inline]
-pub const fn compute_window_size(cols: u16, rows: u16) -> (usize, usize) {
-    let w = (cols as usize) * 8 + WIN_PAD_X * 2 + WIN_BORDER * 2;
-    let h = WIN_TITLE_H + (rows as usize) * 16 + WIN_PAD_BOTTOM + WIN_BORDER * 2;
-    (w, h)
-}
+pub use crate::wm_types::*;
 
 pub struct WindowManager {
     pub screen_w: usize,
@@ -261,6 +55,10 @@ pub struct WindowManager {
     pub dpms_blank_count: u64,
     pub dpms_wake_count: u64,
     pub locked_blocked_events: u64,
+    pub vault_auth_required: bool,
+    pub lock_pin_buf: [u8; 32],
+    pub lock_pin_len: u8,
+    pub vault_auth_failures: u32,
 }
 
 impl WindowManager {
@@ -300,7 +98,24 @@ impl WindowManager {
             dpms_blank_count: 0,
             dpms_wake_count: 0,
             locked_blocked_events: 0,
+            vault_auth_required: false,
+            lock_pin_buf: [0; 32],
+            lock_pin_len: 0,
+            vault_auth_failures: 0,
         }
+    }
+
+    pub fn clear_lock_pin(&mut self) {
+        scrub_bytes(&mut self.lock_pin_buf);
+        self.lock_pin_len = 0;
+    }
+
+    pub fn take_lock_pin(&mut self) -> ([u8; 32], usize) {
+        let len = (self.lock_pin_len as usize).min(32);
+        let mut out = [0u8; 32];
+        out[..len].copy_from_slice(&self.lock_pin_buf[..len]);
+        self.clear_lock_pin();
+        (out, len)
     }
 
     pub fn init_screen(&mut self, w: usize, h: usize) {
@@ -352,6 +167,9 @@ impl WindowManager {
     ) {
         if next != SessionVisualState::Active {
             self.dragging_slot = None;
+        }
+        if next == SessionVisualState::SessionLocked || self.session_state == SessionVisualState::SessionLocked {
+            self.clear_lock_pin();
         }
         if next == SessionVisualState::DisplayBlanked
             && self.session_state != SessionVisualState::DisplayBlanked
@@ -752,15 +570,65 @@ impl WindowManager {
                     if (ev.scancode as u8) == MOUSE_BTN_LEFT
                         && self.unlock_button_rect().contains(self.cursor_x, self.cursor_y)
                     {
+                        if self.vault_auth_required {
+                            if self.lock_pin_len > 0 {
+                                scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                                return self.queue_desktop_action(DesktopAction::SubmitVaultUnlock(
+                                    self.lock_pin_len,
+                                ));
+                            }
+                            self.locked_blocked_events =
+                                self.locked_blocked_events.wrapping_add(1);
+                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                            return WmInputAction::LockBlocked;
+                        }
                         self.session_state = SessionVisualState::Active;
                         scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
                         return self.queue_desktop_action(DesktopAction::UnlockSession);
                     }
                     self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
-                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
+                    scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
                     return WmInputAction::LockBlocked;
                 }
                 InputEventKind::KeyPress => {
+                    if self.vault_auth_required {
+                        if ev.keycode == KEY_ENTER {
+                            if self.lock_pin_len > 0 {
+                                scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                                return self.queue_desktop_action(DesktopAction::SubmitVaultUnlock(
+                                    self.lock_pin_len,
+                                ));
+                            }
+                            self.locked_blocked_events =
+                                self.locked_blocked_events.wrapping_add(1);
+                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                            return WmInputAction::LockBlocked;
+                        }
+                        if ev.keycode == KEY_BACKSPACE {
+                            if self.lock_pin_len > 0 {
+                                self.lock_pin_len -= 1;
+                                self.lock_pin_buf[self.lock_pin_len as usize] = 0;
+                            }
+                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                            return WmInputAction::LockPinEdited;
+                        }
+                        if ev.keycode == KEY_ESC {
+                            self.clear_lock_pin();
+                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                            return WmInputAction::LockPinEdited;
+                        }
+                        if (0x21..=0x7e).contains(&ev.ascii) && (ev.modifiers & MOD_ALT) == 0 {
+                            if (self.lock_pin_len as usize) < self.lock_pin_buf.len() {
+                                self.lock_pin_buf[self.lock_pin_len as usize] = ev.ascii;
+                                self.lock_pin_len += 1;
+                            }
+                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                            return WmInputAction::LockPinEdited;
+                        }
+                        self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
+                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
+                        return WmInputAction::LockBlocked;
+                    }
                     if ev.keycode == KEY_ENTER {
                         self.session_state = SessionVisualState::Active;
                         scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));

@@ -35,9 +35,9 @@ use crate::security::{
 };
 use crate::syscall::{
     UserCapInfo, DRY_SYSCALL_ABI_VERSION, SYS_CAP_DERIVE, SYS_CAP_QUERY, SYS_CAP_REVOKE,
-    SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC, SYS_IOPORT_RW, SYS_IRQ_ACK, SYS_IRQ_BIND,
-    SYS_NOTIFY_CREATE, SYS_POWER_CTL, SYS_PROC_KILL, SYS_PROC_LIST, SYS_PROC_SPAWN, SYS_PROC_WAIT,
-    SYS_SYSINFO, SYS_VSPACE_MAP,
+    SYS_DEV_MAP, SYS_DMA_ALLOC, SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC, SYS_IOPORT_RW,
+    SYS_IRQ_ACK, SYS_IRQ_BIND, SYS_NOTIFY_CREATE, SYS_POWER_CTL, SYS_PROC_KILL, SYS_PROC_LIST,
+    SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO, SYS_VAULT_CTL, SYS_VSPACE_MAP,
 };
 use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::VmProt;
@@ -183,9 +183,10 @@ fn sys_frame_alloc_impl(
         1 => PageOrder::Order2MiB,
         _ => return Err(SysError::Inval),
     };
-    let now = current_lease_epoch();
+    // Root-allocated process frames carry `lease_epoch = 0` (`permanent`); callers attenuate into
+    // time/epoch-bounded leases via `SYS_CAP_DERIVE` (`INV-SEC-04`, `INV-SEC-07`).
     let (cap, _fh) =
-        cspace_alloc_frame(cspace_id, subj, subj, order, false, now).map_err(map_cap_err_to_sys)?;
+        cspace_alloc_frame(cspace_id, subj, subj, order, false, 0).map_err(map_cap_err_to_sys)?;
     Ok(cap.0)
 }
 
@@ -383,6 +384,31 @@ pub(crate) fn sys_cold_dispatch(
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
             match crate::power::sys_power_ctl(cs_id, subj, a0, a1) {
                 Ok(v) => (v, 0),
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_DEV_MAP => {
+            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            let vs_id = cur_tcb.vspace_id.load(Ordering::Acquire);
+            match crate::pci::sys_dev_map(cs_id, subj, vs_id, a0, a1, a2) {
+                Ok(pages) => (pages, 0),
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_DMA_ALLOC => {
+            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            match crate::pci::sys_dma_alloc(pid, cs_id, subj, a0, a1, a2) {
+                Ok(pair) => pair,
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_VAULT_CTL => {
+            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            match crate::vault_ctrl::sys_vault_ctl(cs_id, subj, a0, a1, a2, a3) {
+                Ok(pair) => pair,
                 Err(e) => (e.as_raw(), 0),
             }
         }

@@ -1,6 +1,6 @@
 # DRY OS — Ürün Vizyonu, Kurulum Profilleri ve Ürün Yol Haritası (`P0` – `P5`)
 
-> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2A-3` / `Functional Desktop Foundation` Güncellemesi)  
+> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2B` / `Persistent Storage, IoRing, DRYFS_v1 & DRY Vault` Güncellemesi)  
 > **Başlangıç Referansları:** `Milestone 1C` (`1df3842e3ff1676c46349f072c623836a56f846a`) & `Low-Level Optimization Pass v1` (`69522a3482d3000dc796a6717446dbc8bb1cb25e`)  
 > **Durum Sözleşmesi:** Bu belgedeki her hedef açıkça **`DONE`**, **`IN PROGRESS`**, **`PLANNED`** veya **`BLOCKED`** olarak işaretlenmiştir. `ROADMAP.md` içindeki mevcut teknik milestone numaraları (`Faz 0..5`, `Milestone 1A..1C`) değiştirilmeden korunmuş ve Bölüm 3'te ürün aşamalarıyla eşlenmiştir.
 
@@ -40,8 +40,8 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 | Ürün Aşaması | Durum | Eşleşen Teknik Milestone (`ROADMAP.md`) | Temel Çıktı ve Doğrulama Kapısı |
 | :--- | :---: | :--- | :--- |
 | **`P0` — Mikroçekirdek Temeli** | **`DONE` (QEMU `56/56`)** | `Faz 0` (`H1`, `H2`), `Milestone 1A`, `1B-A..1B-D`, `1C` (`1df3842`), `Opt Pass v1` (`69522a3`) | SMP (`1..20 vCPU`), `H1`, `PMM`, `VSpace`, `CSpace`/`ADR-007`, Ring 3 ELF64, IPC, kök servisler ve ilk Ring 3 GOP ekranı |
-| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1..2A-3`: `DONE`, `85/85` QEMU + `5/5` Matris)* | `Faz 2 — Milestone 2A-1..2A-3` (`DONE`) + `2A-4` & `2B` (`PLANNED`) | PS/2 klavye (`UsQwerty`+`TurkishQ`) + IntelliMouse tekerlekli fare, Ring 3 `dry-vfs` (`/boot`+`/ram`), `dry-power` (ACPI S5/Reset + `HLT`) (`DONE`); USB HID, `IoRing`, kalıcı disk `VFS` (`PLANNED`) |
-| **`P2` — DRY Desktop Alpha/Beta** | **`IN PROGRESS`** *(İşlevsel Masaüstü Temeli `Milestone 2A-3`: `DONE`, `85/85` QEMU)* | `Faz 2 — Milestone 2A-2` & `2A-3` (`DONE`) + `2A-4/2B/2C` (`PLANNED`) | `Floating`/`SideBySideTiled`/`Stacked`/`Tabbed` WM, `DialogTransient`, `DesktopAction`, `Launcher` + 4 yerel uygulama (`Terminal`, `Life Station`, `Files`, `Settings`), `DPMS` & `Session Lock` (`DONE`); `liquid-glass`, `Clean/Diagnostic Boot`, `DRY Vault` Login (`PLANNED`) |
+| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1..2B`: `DONE`, `88/88` QEMU + `5/5` Matris)* | `Faz 2 — Milestone 2A-1..2A-3` & `2B` (`DONE`) + `2A-4/2C` (`PLANNED`) | PS/2 klavye/fare, Ring 3 `dry-vfs` (`/boot` + uçucu `/ram` + kalıcı CoW `/persist` `DRYFS_v1`), `dry-blk` (`VirtIO-Blk` + `IoRing`), `dry-power` (`DONE`); USB HID, NVMe (`PLANNED`) |
+| **`P2` — DRY Desktop Alpha/Beta** | **`IN PROGRESS`** *(`Milestone 2A-2..2B`: `DONE`, `88/88` QEMU)* | `Faz 2 — Milestone 2A-2..2B` (`DONE`) + `2A-4/2C` (`PLANNED`) | Hibrit WM, `Launcher` + 4 yerel uygulama, kalıcı `/persist/desktop.cfg`, `DRY Vault` tuzlu `PBKDF2-SHA256` kimlik doğrulamalı `Session Lock` + $O(1)$ `lease_epoch` (`DONE`); `liquid-glass`, `Clean/Diagnostic Boot` (`PLANNED`) |
 | **`P3` — Linux & Windows Uyumluluğu** | **`PLANNED`** *(`H2` PoC: `DONE`)* | `Faz 3` (Linux ELF + Sürücü Adaları) & `Faz 5` (Seçilmiş Win32) | Önce Linux ELF/ABI/POSIX/VFS + `H2` sürücü adaları; ardından seçilmiş Windows PE/Win32 uygulamaları |
 | **`P4` — Paketleme ve Dağıtım** | **`PLANNED`** | `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) | Tasarım-öncelikli `drypkg` + `DRY Store`, isteğe bağlı runtime, imzalı paket, `Desktop`/`Server` kurulum profilleri, atomik *rollback* |
 | **`P5` — Production Readiness** | **`PLANNED`** | `Faz 4` (Bare-Metal, IOMMU, Soak, Benchmark) | Gerçek donanım + USB live boot, Desktop/Server iş yükü testleri, adil Linux A/B benchmarkları, 72s+ soak/fuzz ve açık raporlar |

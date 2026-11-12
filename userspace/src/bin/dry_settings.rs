@@ -370,13 +370,23 @@ impl SettingsUi {
             STYLE_HEADER,
         );
         write_row_cols(surf, SET_COLS, 1, &div, STYLE_MUTED);
-        write_row_cols(
-            surf,
-            SET_COLS,
-            2,
-            b" NOTICE: Volatile RAM session -- resets on reboot (no disk)",
-            STYLE_WARN,
-        );
+        if self.prefs.persist_backed {
+            write_row_cols(
+                surf,
+                SET_COLS,
+                2,
+                b" STORAGE: /persist/desktop.cfg [PERSISTENT CoW + VirtIO FLUSH]",
+                STYLE_OK,
+            );
+        } else {
+            write_row_cols(
+                surf,
+                SET_COLS,
+                2,
+                b" NOTICE: Volatile RAM session -- resets on reboot (no disk)",
+                STYLE_WARN,
+            );
+        }
         write_row_cols(surf, SET_COLS, 3, &div, STYLE_MUTED);
 
         let layout_str: &[u8] = match self.prefs.layout_mode {
@@ -412,6 +422,12 @@ impl SettingsUi {
             _ => b"< Off (Never Blank) >",
         };
 
+        let shield_str: &[u8] = if self.prefs.persist_backed {
+            b"[Enter/L] Lock + DRY Vault Auth"
+        } else {
+            b"[Enter/L] Lock Session (No Auth)"
+        };
+
         let rows_spec: [(&[u8], &[u8]); ROW_COUNT] = [
             (b"[1] Window Layout   : ", layout_str),
             (b"[2] Keyboard Layout : ", km_str),
@@ -419,7 +435,7 @@ impl SettingsUi {
             (b"[4] Display Theme   : ", theme_str),
             (b"[5] Cursor Size [C] : ", cur_str),
             (b"[6] Idle DPMS Blank : ", blank_str),
-            (b"[7] Session Shield  : ", b"[Enter/L] Lock Session (No Auth)"),
+            (b"[7] Session Shield  : ", shield_str),
         ];
 
         for (i, (label, val)) in rows_spec.iter().enumerate() {

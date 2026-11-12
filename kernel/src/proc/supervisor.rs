@@ -101,15 +101,19 @@ pub fn sys_proc_spawn(
     }
 
     let child_dom_code = (domain_and_comp & 0xff) as u8;
+    let child_flags_code = ((domain_and_comp >> 8) & 0xff) as u8;
     let child_comp = ((domain_and_comp >> 16) & 0xffff) as u16;
     let cpu_hint = ((domain_and_comp >> 32) & 0xffff) as usize;
 
-    let child_domain = match child_dom_code {
-        0 => SecDomain::Userspace,
-        1 => SecDomain::RootSystem,
+    let (child_domain, child_flags) = match (child_dom_code, child_flags_code) {
+        (0, 0) => (SecDomain::Userspace, SecFlags::NONE),
+        (1, 0) => (SecDomain::RootSystem, SecFlags::NONE),
+        (1, f) if f == SecFlags::DEV_WORKSPACE.0 => {
+            (SecDomain::RootSystem, SecFlags::DEV_WORKSPACE)
+        }
         _ => return Err(SysError::Perm),
     };
-    let child_label = SecLabel::new(child_domain, SecFlags::NONE, child_comp, 1);
+    let child_label = SecLabel::new(child_domain, child_flags, child_comp, 1);
 
     let now_epoch = current_lease_epoch();
     let req_mod = CapRights(CapRights::READ.0 | CapRights::SPAWN.0);

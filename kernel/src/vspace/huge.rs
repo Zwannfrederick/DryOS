@@ -31,6 +31,25 @@ pub fn map_2m(
     frame: FrameHandle,
     prot: VmProt,
 ) -> Result<(), VSpaceError> {
+    map_2m_internal(handle, vaddr, frame, prot, false)
+}
+
+pub(crate) fn map_2m_cap_authorized(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    frame: FrameHandle,
+    prot: VmProt,
+) -> Result<(), VSpaceError> {
+    map_2m_internal(handle, vaddr, frame, prot, true)
+}
+
+fn map_2m_internal(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    frame: FrameHandle,
+    prot: VmProt,
+    cap_authorized: bool,
+) -> Result<(), VSpaceError> {
     validate_user_range(vaddr, PAGE_SIZE_2M, PAGE_SIZE_2M)?;
     if (frame.pfn as usize) & (HUGE_2M_FRAMES - 1) != 0 {
         return Err(VSpaceError::UnalignedAddress);
@@ -72,6 +91,7 @@ pub fn map_2m(
                 PageOrder::Order2MiB,
                 owner_label,
                 prot.contains(VmProt::WRITE),
+                cap_authorized,
             );
             let _ = pt_frame_adjust_entries(pd_pfn, 1);
             write_volatile(pd.add(i2), (frame.phys_addr() & PTE_PHYS_MASK_2M) | leaf_flags);

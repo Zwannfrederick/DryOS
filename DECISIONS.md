@@ -291,3 +291,31 @@
   4. **`INV-APP-04 (DialogPreservesTilingTree)`:** `WindowRole::DialogTransient` pencereler `Tiling`/`Stacked`/`Tabbed` kiplerinde dahi her zaman `Floating` kalır ve arka düzeni bozmaz.
   5. **`INV-APP-05 (LockShieldBlocksAppInput)`:** Oturum kilitliyken hiçbir tuş veya fare olayı arka plandaki uygulama kuyruklarına sızmaz (`lock_blocked` sayacıyla doğrulanır).
   6. **`INV-APP-06 (HonestS3NoFakeSleep)`:** Donanım uyanma vektörü hazır olmadan `POWER_OP_SUSPEND_S3` ekran karartarak sahte uyku üretmez; deterministik `-ENOSYS` döner.
+
+---
+
+## ADR-015: Yetenek-Kapılı `PciDev` & Pinned `DEVICE_DMA` (`BME=0` Quiesce), Kilitsiz `IoRing`, Çökme-Güvenli `DRYFS_v1` (`/persist`) ve `DRY Vault` Kimlik Doğrulamalı Kiralama Mimarisi
+
+- **Durum:** Kabul Edildi ve `Milestone 2B` (`Persistent Storage, Lock-Free IoRing, Crash-Safe DRYFS_v1 & DRY Vault Security Enforcement`) ile Uygulandı (`88/88` QEMU/KVM + `5/5` SMP/RAM Matrisi, 12 Kasım 2026)
+- **Bağlam:** `Milestone 2A-3` sonrasında işletim sisteminin uçucu `/ram` ve kimlik doğrulamasız kilit kalkanı sınırlarını aşarak gerçek kalıcı depolamaya, yüksek verimli blok G/Ç veri düzlemine ve kriptografik olarak doğrulanan `ADR-007` güvenlik sınırlarına (`DRY Vault` oturum kilidi, $O(1)$ `lease_epoch` iptali, `READ_ONLY_EXPORT` mühürleme ve `DEV_WORKSPACE` donanım kısıtlaması) geçmesi gerekmektedir. Bu yetenekler eklenirken `dry-kernel` içine blok sürücüsü, dosya sistemi veya parola politikası sokulmamalı ve sürücü çöküşünde kaçak DMA (`R-03`) kesin olarak önlenmelidir.
+- **Karar:**
+  1. **Çekirdekte Yalnızca Yetenek Kapısı ve Donanım `BME=0` Susturma (`kernel/src/{pci,vault_ctrl}.rs`, `0` Çekirdek FS/Kripto Kodu):**
+     - `CapObjectKind::PciDev (14)` ve `SYS_DEV_MAP (29)`: BSP önyüklemede PCI `1AF4:1042`/`1001` VirtIO 1.0 Modern blok cihazının `COMMON`/`NOTIFY`/`ISR`/`DEVICE` MMIO yapılarını doğrular ve yalnızca yetkili `RootSystem` sürücüsüne `VmProt::USER_MMIO_UC` olarak eşler (`0` fiziksel adres sızıntısı).
+     - `SYS_DMA_ALLOC (30)`: Yalnızca `DEV_WORKSPACE` olmayan `SecDomain::RootSystem` sürücüsüne `SecFlags::DEVICE_DMA | NO_DELEGATE` etiketli ve `iommu_pin_count == 1` sabitlenmiş 4 KiB DMA çerçeveleri verir (`INV-CAP-08`). Sürücü çöktüğünde, sonlandığında veya capability iptal edildiğinde çekirdek `quiesce_pci_for_cspace` ile **önce donanımda PCI `Command.BME = 0` bitini temizler**, ardından DMA pinlerini çözüp sayfaları PMM'e iade eder (`R-03`).
+     - `CapObjectKind::VaultCtrl (15)` ve `SYS_VAULT_CTL (31)`: `QUERY_EPOCH (0)` mevcut kiralama dönemini okur; `ADVANCE_EPOCH (1)` `GLOBAL_LEASE_EPOCH` sayacını atomik artırarak eski dönemli tüm kiralamaları $O(1)$ sürede geçersiz kılar (`SecError::Revoked` -> `-EREVOKED`, `INV-SEC-07`); `SEAL_RO_EXPORT (2)` kullanıcı belleğinden salt-okunur (`READ_ONLY_EXPORT`, `W^X`) çerçeve mühürler (`INV-SEC-03`). Sıcak `rust_syscall_dispatch` yığın çerçevesi `248 B` korunmuştur.
+  2. **Ring 3 VirtIO 1.0 Blok Sürücüsü (`dry-blk.elf` `0x0006`) ve Kilitsiz `IoRing` (`userspace/src/ioring.rs`):**
+     - `dry-vfs` ile `dry-blk` arasındaki veri düzlemi paylaşımlı `IoRingSharedPage` (`SQ`/`CQ`, `CAP = 32`, `Acquire`/`Release` atomik indisler) + 4 KiB veri tamponu + iki `Notification` kapı zili (`sq_notif`, `cq_notif`) üzerinden çalışır; oturum kapanışında `BLK_OP_DETACH_RING` ile temiz ayrılır.
+  3. **Çökme-Güvenli Kalıcı `DRYFS_v1` (`userspace/src/persist_fs.rs`, `/persist` Bağlama Noktası):**
+     - Disk düzeni: Blok `0` ve Blok `1` çift A/B IEEE `CRC32` süperblokları (`DryFsSuperblock`, `tx_seq`, `24` dizin yuvası), Blok `2..N` ise **4 KiB Copy-on-Write (CoW)** veri bloklarıdır.
+     - Atomik taahhüt protokolü: Yeni veri asla aktif süperbloğun işaret ettiği bloğun üzerine yazılmaz; önce boş CoW bloğuna yazılıp `VIRTIO_BLK_T_FLUSH` bariyeri uygulanır, ardından `tx_seq + 1` ve `CRC32` ile pasif süperblok yuvası (`tx_seq & 1`) yazılıp ikinci `FLUSH` bariyeri uygulanır. Ani güç kesintisinde (`SIGKILL`) veya bozuk süperblokta karşı yuva otomatik kurtarılır.
+     - Her kalıcı düğüm `ADR-007` `SecLabel` alanlarını taşır; bağlama noktaları arası (`/ram <-> /persist`) ve kompartmanlar arası `VFS_OP_LINK` yetki yükseltmeleri `-EXDEV` / `-EPERM` ile reddedilir (`INV-SEC-05`).
+  4. **Ring 3 `DRY Vault` (`dry-vault.elf` `0x0007`), Kriptografik Oturum Kilidi ve `DEV_WORKSPACE` (`0x002a`):**
+     - Saf `no_std` `SHA-256` / `HMAC-SHA256` / tuzlu `PBKDF2-HMAC-SHA256` (`vault_crypto.rs`) doğrulayıcısı `/persist/vault.sec` içinde `RootSystem | NO_DELEGATE` (`PRIV`) etiketiyle saklanır; ham disk üzerinde düz metin parola bulunmaz, karşılaştırma sabit-zamanlıdır (`ct_eq_32`) ve geçici tamponlar `write_volatile` ile sıfırlanır.
+     - Masaüstü `Session Lock` artık gerçek `DRY Vault` parola doğrulaması gerektirir; yanlış parolalar reddedilip sayılır, doğru parola hem oturumu açar hem de `GLOBAL_LEASE_EPOCH` sayacını ilerletir. Masaüstü tercihleri `/persist/desktop.cfg` üzerinde yeniden başlatmalar boyunca korunur.
+- **Test Edilebilir Güvenlik Invariant'ları (`INV-P4-01` .. `INV-P4-06`):**
+  1. **`INV-P4-01 (DmaPinAndBmeQuiesceBeforeFree)`:** Aktif DMA sayfaları `iommu_pin_count == 1` taşır ve sürücü çöküşünde/çıkışında `PCI Command.BME = 0` kapatılmadan serbest bırakılmaz (`pci_quiesce >= 1`, `leaked_frames = 0`).
+  2. **`INV-P4-02 (DevWorkspaceNoHardwareOrUnleasedDelegation)`:** `SecFlags::DEV_WORKSPACE` kompartmanına süresiz (`lease_epoch == 0`) yetki devri ve içeriden `SYS_DMA_ALLOC`, `SYS_DEV_MAP`, `SYS_VAULT_CTL(ADVANCE_EPOCH)` veya özel `RootSystem` dosyalarına erişim `-EPERM` ile reddedilir.
+  3. **`INV-P4-03 (VaultEpochO1Revocation)`:** `VAULT_CTL_ADVANCE_EPOCH` çağrıldığı anda önceki döneme ait tüm kiralık yetkiler $O(1)$ sürede `-EREVOKED` döner.
+  4. **`INV-P4-04 (ReadOnlyExportImmutableWx)`:** `SEAL_RO_EXPORT` ile mühürlenen çerçeveler hiçbir zaman `RW` veya `EXEC` eşlenemez (`-EPERM`), yalnızca `RO` okunabilir (`INV-SEC-03`).
+  5. **`INV-P4-05 (CrashSafeCowDualSuperblock)`:** Aktif süperblok bozulsa veya yazım ortasında güç kesilse dahi karşı A/B süperblok `CRC32` doğrulamasıyla kayıpsız geri yüklenir.
+  6. **`INV-P4-06 (NoPlaintextPassphraseOnDisk)`:** `/persist/vault.sec` ve ham blok imajı düz metin parola içermez; yalnızca rastgele tuz + `PBKDF2-HMAC-SHA256` doğrulayıcısı saklanır.

@@ -9,13 +9,16 @@ use crate::action::LatencyRing;
 use crate::compositor::DesktopCompositor;
 use crate::gfx::Rect;
 use crate::shell::LineBuilder;
+use crate::vault_crypto::scrub_bytes;
+use crate::vault_proto::{pack_passphrase_mrs, pack_vault_label};
 use crate::wm::{LayoutMode, SessionVisualState, WindowManager, TOPBAR_H};
 use crate::{
     pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_reply_inline, sys_write_debug,
     UserIpcRecvExt, BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
     IPC_OP_PONG, IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER,
-    IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
-    IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TOGGLE_TILING,
+    IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_SET_LAYOUT,
+    IPC_OP_WM_SET_PREFS, IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TAKE_LOCK_PIN,
+    IPC_OP_WM_TOGGLE_TILING,
 };
 
 pub fn wm_log_line(lb: &LineBuilder) {
@@ -276,6 +279,60 @@ pub fn handle_wm_admin_op(
                     ],
                 );
             }
+            true
+        }
+        IPC_OP_WM_SET_AUTH_LOCK => {
+            if ext.sender_badge != BADGE_SUPERVISOR {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            wm.vault_auth_required = (mrs[0] & 1) != 0;
+            wm.vault_auth_failures = mrs[1] as u32;
+            if mrs[2] != 0 {
+                wm.clear_lock_pin();
+            }
+            comp.scene_dirty.mark(Rect::new(0, 0, wm.screen_w, wm.screen_h));
+            let (px, cyc) = comp.flush_all(wm);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
+                    [px, cyc, 0, 0],
+                );
+            }
+            true
+        }
+        IPC_OP_WM_TAKE_LOCK_PIN => {
+            if ext.sender_badge != BADGE_SUPERVISOR {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            let (mut raw_pin, plen) = wm.take_lock_pin();
+            comp.scene_dirty.mark(Rect::new(0, 0, wm.screen_w, wm.screen_h));
+            let _ = comp.flush_all(wm);
+            if plen == 0 {
+                scrub_bytes(&mut raw_pin);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                return true;
+            }
+            let Ok((_, mut out_mrs)) = pack_passphrase_mrs(&raw_pin[..plen]) else {
+                scrub_bytes(&mut raw_pin);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                return true;
+            };
+            scrub_bytes(&mut raw_pin);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(pack_vault_label(IPC_OP_PONG, plen as u16), 0, 4, 0),
+                    out_mrs,
+                );
+            }
+            out_mrs.fill(0);
             true
         }
         IPC_OP_WM_QUERY_STATE => {

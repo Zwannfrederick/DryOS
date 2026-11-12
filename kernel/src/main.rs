@@ -15,6 +15,7 @@ mod ipc;
 mod irq;
 mod limine;
 mod mem_verify;
+mod pci;
 mod percpu;
 mod pmm;
 mod power;
@@ -25,6 +26,7 @@ mod serial;
 mod smp;
 mod syscall;
 mod uaccess;
+mod vault_ctrl;
 mod vspace;
 
 use core::arch::{asm, global_asm};
@@ -180,6 +182,7 @@ extern "C" fn bsp_kmain() -> ! {
     );
     let _pmm_inv = pmm::init_pmm(&mem);
     let _fb_valid = display::init_framebuffer(&mem, cmdline);
+    let _pci_blk = pci::init_pci_devices();
     let acpi_madt = acpi::discover_acpi_madt(
         mem.hhdm_offset,
         mem.kernel_phys_base,
@@ -283,11 +286,17 @@ extern "C" fn bsp_kmain() -> ! {
         if cmdline.contains("interactive=1")
             || cmdline.contains("desktop=1")
             || cmdline.contains("desktop3=1")
+            || cmdline.contains("desktop4=1")
         {
             syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
-            irq::tests::maybe_run_p1_interactive_session(cmdline, smp.cpu_count);
+            irq::session::maybe_run_p1_interactive_session(cmdline, smp.cpu_count);
             sched::shutdown_ap_scheduler_service();
-            if cmdline.contains("desktop3=1") {
+            if cmdline.contains("desktop4=1") {
+                serial_println!(
+                    "[DRY-BOOT-OK] Milestone 2B (Persistent Storage, Labeled VFS & DRY Vault) {}-vCPU session verified cleanly.",
+                    smp.cpu_count
+                );
+            } else if cmdline.contains("desktop3=1") {
                 serial_println!(
                     "[DRY-BOOT-OK] Milestone 2A-3 (Functional Desktop & Native Apps) {}-vCPU session verified cleanly.",
                     smp.cpu_count

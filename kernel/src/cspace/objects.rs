@@ -29,9 +29,11 @@ use crate::sched::{
 use crate::security::{
     pack_seclabel_u64, CapRights, CapabilityMeta, SecDomain, SecError, SecFlags, SecLabel,
 };
-use crate::vspace::huge::map_2m;
+use crate::vspace::huge::map_2m_cap_authorized;
 use crate::vspace::pte::VmProt;
-use crate::vspace::{create_vspace, destroy_vspace, map_4k, protect_4k, unmap_4k, VSpaceHandle};
+use crate::vspace::{
+    create_vspace, destroy_vspace, map_4k_cap_authorized, protect_4k, unmap_4k, VSpaceHandle,
+};
 
 /// Allocate a physical `Frame4K` or `Frame2M` bound to `obj_label` and install its root capability.
 pub fn cspace_alloc_frame(
@@ -137,6 +139,61 @@ pub fn cspace_create_readonly_export_frame(
     }
 }
 
+/// Seal a `RootSystem` `READ_ONLY_EXPORT` 4 KiB frame directly from a validated user slice (`0` large stack buffers).
+pub fn cspace_create_readonly_export_from_user(
+    root_cspace: CSpaceId,
+    root_subj: SecLabel,
+    user_ptr: u64,
+    byte_len: usize,
+) -> Result<CapPtr, crate::uaccess::SysError> {
+    use crate::ipc::map_cap_err_to_sys;
+    use crate::uaccess::{copy_from_user, SysError};
+
+    if root_subj.domain != SecDomain::RootSystem
+        || root_subj.flags.contains(SecFlags::DEV_WORKSPACE)
+    {
+        return Err(SysError::Perm);
+    }
+    if byte_len > PAGE_SIZE {
+        return Err(SysError::Inval);
+    }
+    let export_label = SecLabel::new(
+        SecDomain::RootSystem,
+        SecFlags::READ_ONLY_EXPORT,
+        root_subj.compartment_id,
+        root_subj.policy_tag,
+    );
+    let fh = alloc_pages(PageOrder::Order4KiB, export_label, AllocFlags::ZERO)
+        .map_err(|_| SysError::NoMem)?;
+    if byte_len > 0 {
+        // SAFETY: `fh` is freshly allocated, zeroed, unmapped, and `byte_len <= PAGE_SIZE`.
+        let dst = unsafe { core::slice::from_raw_parts_mut(fh.hhdm_ptr(), byte_len) };
+        if let Err(e) = copy_from_user(dst, user_ptr) {
+            free_pages(fh, PageOrder::Order4KiB, export_label);
+            return Err(e);
+        }
+    }
+    let m = frame_meta(fh.pfn).unwrap();
+    m.word1.store(pack_seclabel(export_label), Ordering::Release);
+
+    match insert_root_cap(
+        root_cspace,
+        CapObjectKind::Frame4K,
+        fh.pfn,
+        fh.generation,
+        CapRights::FRAME_CODE_ROOT,
+        export_label,
+        0,
+        0,
+    ) {
+        Ok(cap) => Ok(cap),
+        Err(e) => {
+            free_pages(fh, PageOrder::Order4KiB, export_label);
+            Err(map_cap_err_to_sys(e))
+        }
+    }
+}
+
 /// Create an isolated user `VSpace` and bind its root capability into `cspace_id` (`Stage A.7`).
 pub fn cspace_vspace_create(
     cspace_id: CSpaceId,
@@ -221,7 +278,7 @@ pub fn cspace_vspace_map_4k(
                 pfn: fr_res.obj_id,
                 generation: fr_res.expected_obj_gen,
             };
-            map_4k(vs_h, vaddr, fr_h, prot).map_err(|_| CapError::PagingError)?;
+            map_4k_cap_authorized(vs_h, vaddr, fr_h, prot).map_err(|_| CapError::PagingError)?;
             if let Err(e) = attach_cap_mapping_record(
                 fr_res.global_slot,
                 frame_cap.slot_gen(),
@@ -270,7 +327,7 @@ pub fn cspace_vspace_map_2m(
                 pfn: fr_res.obj_id,
                 generation: fr_res.expected_obj_gen,
             };
-            map_2m(vs_h, vaddr, fr_h, prot).map_err(|_| CapError::PagingError)?;
+            map_2m_cap_authorized(vs_h, vaddr, fr_h, prot).map_err(|_| CapError::PagingError)?;
             if let Err(e) = attach_cap_mapping_record(
                 fr_res.global_slot,
                 frame2m_cap.slot_gen(),

@@ -3,22 +3,34 @@
 
 #![no_std]
 
+pub mod abi_ext;
 pub mod action;
 pub mod compositor;
 pub mod display_banner;
 pub mod gfx;
 pub mod init_legacy;
 pub mod input;
+pub mod ioring;
 pub mod keymap;
+pub mod persist_fs;
 pub mod ps2;
 pub mod shell;
+pub mod shell_ext;
+pub mod sup_audit;
+pub mod sup_ctx;
 pub mod sup_services;
 pub mod supervisor;
 pub mod surface;
+pub mod vault_crypto;
+pub mod vault_proto;
+pub mod vfs_mem;
 pub mod vfs_proto;
 pub mod wm;
 pub mod wm_ipc;
 pub mod wm_layout;
+pub mod wm_types;
+
+pub use abi_ext::*;
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -238,7 +250,13 @@ pub struct RootInitBootInfo {
     pub power_mod_cap: u64,
     pub power_ctrl_cap: u64,
     pub boot_manifest_count: u64,
+    pub blk_mod_cap: u64,
+    pub vault_mod_cap: u64,
+    pub pci_blk_cap: u64,
+    pub vault_ctrl_cap: u64,
 }
+
+const _: () = assert!(size_of::<RootInitBootInfo>() <= BOOT_MANIFEST_OFFSET as usize);
 
 #[repr(C)]
 #[derive(Clone, Copy)]

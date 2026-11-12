@@ -308,6 +308,7 @@ pub(crate) fn map_ref_inc_data_frame(
     order: PageOrder,
     expected_owner: SecLabel,
     writable: bool,
+    cap_authorized: bool,
 ) {
     let count = order.frame_count();
     for off in 0..count {
@@ -319,8 +320,10 @@ pub(crate) fn map_ref_inc_data_frame(
             ));
         };
         let owner = unpack_seclabel(meta.word1.load(Ordering::Acquire));
+        let ro_export_violated = writable && owner.flags.contains(SecFlags::READ_ONLY_EXPORT);
         let same_owner = owner.domain == expected_owner.domain
-            && owner.compartment_id == expected_owner.compartment_id;
+            && owner.compartment_id == expected_owner.compartment_id
+            && !ro_export_violated;
         let ro_system_export = !writable
             && owner.domain == SecDomain::RootSystem
             && owner.flags.contains(SecFlags::READ_ONLY_EXPORT)
@@ -329,7 +332,19 @@ pub(crate) fn map_ref_inc_data_frame(
             && owner.domain == SecDomain::Userspace
             && !owner.flags.contains(SecFlags::NO_DELEGATE)
             && expected_owner.domain != SecDomain::Kernel;
-        if !same_owner && !ro_system_export && !ro_user_delegate {
+        let cap_rw_delegate = cap_authorized
+            && !ro_export_violated
+            && !owner.flags.contains(SecFlags::NO_DELEGATE)
+            && owner.domain != SecDomain::Kernel
+            && expected_owner.domain != SecDomain::Kernel
+            && match expected_owner.domain {
+                SecDomain::RootSystem => {
+                    owner.domain == SecDomain::RootSystem || owner.domain == SecDomain::Userspace
+                }
+                SecDomain::Userspace => owner.domain == SecDomain::Userspace,
+                SecDomain::Kernel => false,
+            };
+        if !same_owner && !ro_system_export && !ro_user_delegate && !cap_rw_delegate {
             pmm_invariant_panic(format_args!(
                 "Frame ownership / domain / pin violation: map pfn={:#x} owner=({:?},{}) expected=({:?},{})",
                 pfn, owner.domain, owner.compartment_id, expected_owner.domain, expected_owner.compartment_id

@@ -74,6 +74,9 @@ pub const SYS_VSPACE_MAP: u64 = 25;
 pub const SYS_PROC_LIST: u64 = 26;
 pub const SYS_PROC_KILL: u64 = 27;
 pub const SYS_POWER_CTL: u64 = 28;
+pub const SYS_DEV_MAP: u64 = 29;
+pub const SYS_DMA_ALLOC: u64 = 30;
+pub const SYS_VAULT_CTL: u64 = 31;
 
 pub const MAX_WRITE_DEBUG_LEN: usize = 512;
 

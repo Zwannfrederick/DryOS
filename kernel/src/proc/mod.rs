@@ -237,9 +237,11 @@ pub fn process_vspace_cap(pid: u32) -> Option<CapPtr> {
 }
 
 fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_cap: CapPtr) {
-    let now_epoch = current_lease_epoch();
+    // `R-03` & `INV-CAP-08`: Quiesce PCI Bus Master (`Command.BME = 0`) and unpin any `DEVICE_DMA`
+    // frames BEFORE unmapping `VSpace` or destroying `Frame4K` capabilities!
+    crate::pci::quiesce_pci_for_cspace(cspace_id);
     if vs_cap != CapPtr::NULL {
-        let _ = cspace_destroy_object(cspace_id, subj_label, vs_cap, now_epoch);
+        let _ = cspace_destroy_object(cspace_id, subj_label, vs_cap, 0);
     }
     let cnode = &CSPACE_TABLE[cspace_id as usize];
     let guard = cnode.guard.load(Ordering::Relaxed);
@@ -262,7 +264,7 @@ fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_
         {
             let _ = unmap_all_records_for_slot(global_slot_id(cspace_id, idx as u16));
             let ptr = CapPtr::pack(guard, radix, sgen, idx as u16);
-            let _ = cspace_destroy_object(cspace_id, subj_label, ptr, now_epoch);
+            let _ = cspace_destroy_object(cspace_id, subj_label, ptr, 0);
         }
     }
     let _ = destroy_cspace(cspace_id);
@@ -786,10 +788,9 @@ pub fn reclaim_process(handle: ProcessHandle) -> Result<ReclaimStatus, ProcError
     let subj_label = unpack_seclabel_u64(slot.subj_label_raw.load(Ordering::Acquire));
     let tcb_cap = CapPtr(slot.tcb_cap_raw.load(Ordering::Acquire));
     let vs_cap = CapPtr(slot.vs_cap_raw.load(Ordering::Acquire));
-    let now_epoch = current_lease_epoch();
 
-    // 1. Destroy quiescent `TCB` capability.
-    cspace_destroy_object(cspace_id, subj_label, tcb_cap, now_epoch).map_err(ProcError::Cap)?;
+    // 1. Destroy quiescent `TCB` capability (`now_epoch = 0` so rotated Vault epochs never block reaping).
+    cspace_destroy_object(cspace_id, subj_label, tcb_cap, 0).map_err(ProcError::Cap)?;
     // 2 & 3. Destroy `VSpace` + all owned `Frame4K`/`Frame2M`/`Untyped` caps + `CSpace`.
     destroy_cspace_owned_resources(cspace_id, subj_label, vs_cap);
 

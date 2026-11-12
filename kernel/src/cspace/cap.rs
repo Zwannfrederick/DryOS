@@ -81,6 +81,8 @@ pub enum CapObjectKind {
     IrqLine = 11,
     IoPort = 12,
     PowerCtrl = 13,
+    PciDev = 14,
+    VaultCtrl = 15,
 }
 
 impl CapObjectKind {
@@ -100,6 +102,8 @@ impl CapObjectKind {
             11 => Self::IrqLine,
             12 => Self::IoPort,
             13 => Self::PowerCtrl,
+            14 => Self::PciDev,
+            15 => Self::VaultCtrl,
             _ => Self::None,
         }
     }

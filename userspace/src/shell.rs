@@ -39,6 +39,7 @@ pub enum ShellCommand<'a> {
     CrashInput,
     SecAudit,
     Shutdown,
+    StorageVault(&'a [u8], &'a [u8]),
     UnsupportedPosix(u8),
     Unknown(&'a [u8]),
 }
@@ -99,6 +100,11 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"crash-input" => ShellCommand::CrashInput,
         b"sec-audit" => ShellCommand::SecAudit,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
+        b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"vault-status"
+        | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
+        | b"corrupt-sb0-test" => {
+            ShellCommand::StorageVault(verb, rest)
+        }
         _ => ShellCommand::Unknown(verb),
     }
 }
@@ -529,6 +535,8 @@ impl ShellEngine {
         self.push_line(b"  apps              Registered native apps & supervisor state", STYLE_DEFAULT);
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
+        self.push_line(b"  ls|cat|write|rm|ln|sync  VFS (/persist, /ram, /boot) ops", STYLE_DEFAULT);
+        self.push_line(b"  vault-status|vault-unlock|vault-lock|vault-passwd  DRY Vault", STYLE_DEFAULT);
         self.push_line(b"  blank|lock|reboot|poweroff|shutdown|suspend  Power & session", STYLE_DEFAULT);
         self.push_line(b"Keys: Up/Down history | PgUp/PgDn/Wheel scroll | Alt+1..4 apps", STYLE_MUTED);
     }

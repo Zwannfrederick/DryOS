@@ -1,25 +1,35 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Supervisor Core Service Spawners (`dry-vfs`, `dry-power`) & Live Runtime Preference Sync (`Milestone 2A-3`).
+//! Supervisor Core Service Spawners (`dry-vfs`, `dry-blk`, `dry-vault`, `dry-power`) &
+//! Persistent Runtime Preference Sync (`Milestone 2A-3` & `Milestone 2B`).
 
 use crate::init_legacy::{domain_spec, log_line};
 use crate::shell::LineBuilder;
-use crate::vfs_proto::vfs_seed_boot_entry;
+use crate::vfs_proto::{
+    vfs_create_file, vfs_mount_blk, vfs_read_file, vfs_seed_boot_entry, vfs_sync, vfs_write_small,
+};
 use crate::wm::SessionVisualState;
 use crate::{
     msg_tag_label, pack_msg_tag, sys_cap_derive, sys_cap_revoke, sys_ep_create, sys_ipc_call_inline,
     sys_ipc_call_with_grant, sys_proc_spawn, sys_proc_wait, sys_write_debug, BootModManifestEntry,
-    RootInitBootInfo, BADGE_SUPERVISOR, BADGE_SUP_DISPLAY, BADGE_SUP_ROGUE, BOOT_MANIFEST_OFFSET,
-    IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_SET_PREFS,
-    IPC_OP_PONG, IPC_OP_PWR_REBOOT, IPC_OP_PWR_SHUTDOWN_S5, IPC_OP_PWR_SUSPEND_S3,
-    IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
+    RootInitBootInfo, BADGE_SUPERVISOR, BADGE_SUP_DISPLAY, BADGE_SUP_ROGUE, BADGE_VAULT_SUP,
+    BADGE_VFS_VAULT_ROOT, BLK_OP_QUERY_INFO, BOOT_MANIFEST_OFFSET, EEXIST, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_SET_PREFS, IPC_OP_PONG,
+    IPC_OP_PWR_REBOOT, IPC_OP_PWR_SHUTDOWN_S5, IPC_OP_PWR_SUSPEND_S3, IPC_OP_WM_BIND_SUP_NOTIF,
+    IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
     IPC_OP_WM_SET_SESSION_STATE, RIGHT_CALL, RIGHT_GRANT, RIGHT_MANAGE, RIGHT_MAP, RIGHT_READ,
-    RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WRITE,
+    RIGHT_RECV, RIGHT_REPLY, RIGHT_REVOKE, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WRITE, VAULT_OP_STATUS,
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
 const DISPLAY_COMP_ID: u16 = 0x0002;
 pub const VFS_COMP_ID: u16 = 0x0004;
 pub const POWER_COMP_ID: u16 = 0x0005;
+pub const BLK_COMP_ID: u16 = 0x0006;
+pub const VAULT_COMP_ID: u16 = 0x0007;
+pub const DEV_WS_COMP_ID: u16 = 0x002a;
+
+const DESKTOP_CFG_MAGIC: [u8; 8] = *b"DRYCFG01";
+const DESKTOP_CFG_PATH: &[u8] = b"/persist/desktop.cfg";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinalPowerMode {
@@ -29,7 +39,8 @@ pub enum FinalPowerMode {
     HardwareReboot,
 }
 
-/// Live runtime session preferences maintained by `dry-init` (volatile RAM; no fake disk persistence).
+/// Live runtime session preferences maintained by `dry-init` (persisted to `/persist/desktop.cfg`
+/// when a VirtIO-Blk `DRYFS_v1` volume is mounted; otherwise honest volatile RAM).
 #[derive(Clone, Copy)]
 pub struct SupervisorPrefs {
     pub layout_mode: u8,
@@ -38,6 +49,7 @@ pub struct SupervisorPrefs {
     /// Bit 0 = `high_contrast`, Bit 1 = `cursor_large`.
     pub theme_flags: u8,
     pub blank_timeout_sec: u16,
+    pub persist_backed: bool,
 }
 
 impl SupervisorPrefs {
@@ -48,6 +60,7 @@ impl SupervisorPrefs {
             pointer_speed: 1,
             theme_flags: 0,
             blank_timeout_sec: 0,
+            persist_backed: false,
         }
     }
 
@@ -58,6 +71,7 @@ impl SupervisorPrefs {
             | ((self.pointer_speed as u64) << 16)
             | ((self.theme_flags as u64) << 24)
             | ((self.blank_timeout_sec as u64) << 32)
+            | ((self.persist_backed as u64) << 48)
     }
 
     #[inline]
@@ -68,6 +82,7 @@ impl SupervisorPrefs {
             pointer_speed: ((mr0 >> 16) & 0xff) as u8,
             theme_flags: ((mr0 >> 24) & 0xff) as u8,
             blank_timeout_sec: ((mr0 >> 32) & 0xffff) as u16,
+            persist_backed: ((mr0 >> 48) & 1) != 0,
         }
     }
 }
@@ -79,7 +94,6 @@ impl Default for SupervisorPrefs {
 }
 
 /// Spawn `dry-display` (`0x0002`) in `p3_mode` and bind supervisor notification/wake channels.
-/// Returns `(disp_handle, disp_ep, disp_sup_cap)`.
 pub fn spawn_and_bind_p3_display(
     boot: &RootInitBootInfo,
     sup_ep: u64,
@@ -130,7 +144,6 @@ pub fn spawn_and_bind_p3_display(
 }
 
 /// Spawn `dry-vfs` (`0x0004`) if `boot.vfs_mod_cap != 0` and seed `/boot` from Limine's boot manifest.
-/// Returns `(vfs_handle, vfs_ep, vfs_sup_cap)`.
 pub fn spawn_and_seed_vfs(
     boot_info_addr: u64,
     boot: &RootInitBootInfo,
@@ -166,7 +179,9 @@ pub fn spawn_and_seed_vfs(
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(entry.name.len());
-            if nlen > 0 && vfs_seed_boot_entry(vfs_sup_cap, &entry.name[..nlen], entry.size_bytes).is_ok() {
+            if nlen > 0
+                && vfs_seed_boot_entry(vfs_sup_cap, &entry.name[..nlen], entry.size_bytes).is_ok()
+            {
                 seeded += 1;
             }
         }
@@ -182,8 +197,198 @@ pub fn spawn_and_seed_vfs(
     Ok((vfs_handle, vfs_ep, vfs_sup_cap))
 }
 
+/// Spawn `dry-blk` (`0x0006`) if `boot.blk_mod_cap != 0 && boot.pci_blk_cap != 0`.
+/// Returns `(blk_handle, blk_ep, blk_sup_cap, total_sectors)`.
+pub fn spawn_blk_service(boot: &RootInitBootInfo) -> Result<(u64, u64, u64, u64), i32> {
+    if boot.blk_mod_cap == 0 || boot.pci_blk_cap == 0 || boot.session_mode < 20 {
+        return Ok((0, 0, 0, 0));
+    }
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
+
+    let blk_ep = sys_ep_create(ipc_spec).map_err(|_| 170)?;
+    let blk_sup_cap = sys_cap_derive(blk_ep, cli_rights, 0, BADGE_SUPERVISOR).map_err(|_| 170)?;
+    let pci_deleg = sys_cap_derive(
+        boot.pci_blk_cap,
+        RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT,
+        0,
+        0,
+    )
+    .map_err(|_| 171)?;
+    let (blk_handle, blk_pid) = sys_proc_spawn(
+        boot.blk_mod_cap,
+        1,
+        BLK_COMP_ID,
+        (blk_ep, srv_rights, 0x6b1c),
+        (pci_deleg, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP),
+    )
+    .map_err(|_| 172)?;
+
+    let mut total_sectors = 0u64;
+    if let Ok((rtag, _, rmrs)) =
+        sys_ipc_call_inline(blk_sup_cap, pack_msg_tag(BLK_OP_QUERY_INFO, 0, 0, 0), [0; 4], 0)
+    {
+        if msg_tag_label(rtag) == IPC_OP_PONG {
+            total_sectors = rmrs[0];
+        }
+    }
+
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-INIT] Block service ready pid=");
+    lb.push_u64(blk_pid);
+    lb.push_bytes(b" sectors=");
+    lb.push_u64(total_sectors);
+    log_line(&lb);
+
+    Ok((blk_handle, blk_ep, blk_sup_cap, total_sectors))
+}
+
+/// Mount `/persist` (`DRYFS_v1`) on `dry-vfs` and restore saved preferences from `/persist/desktop.cfg`.
+pub fn mount_persist_and_load_prefs(
+    vfs_sup_cap: u64,
+    blk_ep: u64,
+    disp_sup_cap: u64,
+    input_sup_cap: u64,
+    tsc_mhz: u64,
+    prefs: &mut SupervisorPrefs,
+) {
+    if vfs_sup_cap == 0 || blk_ep == 0 {
+        return;
+    }
+    let Ok((fresh, tx_seq, recovered)) = vfs_mount_blk(vfs_sup_cap, blk_ep) else {
+        return;
+    };
+    prefs.persist_backed = true;
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-INIT] Mounted /persist (DRYFS_v1) fresh=");
+    lb.push_bytes(if fresh { b"true" } else { b"false" });
+    lb.push_bytes(b" tx_seq=");
+    lb.push_u64(tx_seq);
+    lb.push_bytes(b" recovered=");
+    lb.push_bytes(if recovered { b"true" } else { b"false" });
+    log_line(&lb);
+
+    let mut raw = [0u8; 16];
+    if let Ok((got, _)) = vfs_read_file(vfs_sup_cap, DESKTOP_CFG_PATH, 0, &mut raw) {
+        if got == 16 && raw[0..8] == DESKTOP_CFG_MAGIC {
+            let word = u64::from_le_bytes([
+                raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
+            ]);
+            let saved = SupervisorPrefs::unpack_mr0(word);
+            let _ = apply_layout_action(disp_sup_cap, prefs, saved.layout_mode.min(3));
+            let _ = apply_input_prefs(
+                input_sup_cap,
+                prefs,
+                Some(saved.keymap.min(1)),
+                Some(saved.pointer_speed.clamp(1, 2)),
+            );
+            let _ = apply_display_prefs(disp_sup_cap, prefs, saved.theme_flags & 0x3);
+            if saved.blank_timeout_sec > 0 {
+                let _ = apply_blank_timeout(
+                    disp_sup_cap,
+                    tsc_mhz,
+                    prefs,
+                    saved.blank_timeout_sec.min(3600),
+                );
+            }
+            prefs.persist_backed = true;
+            let mut rlb = LineBuilder::new();
+            rlb.push_bytes(b"[DRY-INIT] Restored desktop.cfg layout=");
+            rlb.push_u64(prefs.layout_mode as u64);
+            rlb.push_bytes(b" theme=0x");
+            rlb.push_hex_u64(prefs.theme_flags as u64);
+            rlb.push_bytes(b" km=");
+            rlb.push_u64(prefs.keymap as u64);
+            log_line(&rlb);
+        }
+    }
+}
+
+/// Persist live runtime preferences atomically into `/persist/desktop.cfg` via CoW + `FLUSH`.
+pub fn save_prefs_to_persist(vfs_sup_cap: u64, prefs: &SupervisorPrefs) {
+    if !prefs.persist_backed || vfs_sup_cap == 0 {
+        return;
+    }
+    match vfs_create_file(vfs_sup_cap, DESKTOP_CFG_PATH, 0) {
+        Ok(_) | Err(EEXIST) => {}
+        Err(_) => return,
+    }
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&DESKTOP_CFG_MAGIC);
+    let clean_word = prefs.pack_mr0() & 0x0000_ffff_ffff_ffff;
+    payload[8..16].copy_from_slice(&clean_word.to_le_bytes());
+    let _ = vfs_write_small(vfs_sup_cap, DESKTOP_CFG_PATH, &payload, false);
+}
+
+/// Spawn `dry-vault` (`0x0007`) if `boot.vault_mod_cap != 0 && boot.vault_ctrl_cap != 0`.
+pub fn spawn_vault_service(
+    boot: &RootInitBootInfo,
+    vfs_ep: u64,
+    disp_sup_cap: u64,
+) -> Result<(u64, u64, u64), i32> {
+    if boot.vault_mod_cap == 0 || boot.vault_ctrl_cap == 0 || boot.session_mode < 20 {
+        return Ok((0, 0, 0));
+    }
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
+
+    let vault_ep = sys_ep_create(ipc_spec).map_err(|_| 174)?;
+    let vault_sup_cap =
+        sys_cap_derive(vault_ep, cli_rights, 0, BADGE_VAULT_SUP).map_err(|_| 174)?;
+    let ctrl_deleg = sys_cap_derive(
+        boot.vault_ctrl_cap,
+        RIGHT_READ | RIGHT_MANAGE | RIGHT_REVOKE | RIGHT_GRANT,
+        0,
+        0,
+    )
+    .map_err(|_| 175)?;
+
+    let (vault_handle, vault_pid) = sys_proc_spawn(
+        boot.vault_mod_cap,
+        1,
+        VAULT_COMP_ID,
+        (vault_ep, srv_rights, 0x7a17),
+        (ctrl_deleg, RIGHT_READ | RIGHT_MANAGE | RIGHT_REVOKE),
+    )
+    .map_err(|_| 176)?;
+
+    // Handshake: grant badged `vfs_ep` (`BADGE_VFS_VAULT_ROOT`) so `dry-vault` loads/seeds `/persist/vault.sec`.
+    if vfs_ep != 0 {
+        if let Err(e) = sys_ipc_call_with_grant(
+            vault_sup_cap,
+            VAULT_OP_STATUS,
+            [1, 0, 0, 0],
+            vfs_ep,
+            cli_rights,
+            BADGE_VFS_VAULT_ROOT,
+            0,
+        ) {
+            let mut elb = LineBuilder::new();
+            elb.push_bytes(b"[DRY-INIT-WARN] Vault VFS handshake failed neg_errno=");
+            elb.push_u64((-e) as u64);
+            log_line(&elb);
+        }
+    }
+    if disp_sup_cap != 0 {
+        let _ = sys_ipc_call_inline(
+            disp_sup_cap,
+            pack_msg_tag(IPC_OP_WM_SET_AUTH_LOCK, 0, 3, 0),
+            [1, 0, 1, 0],
+            0,
+        );
+    }
+
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-INIT] DRY Vault service ready pid=");
+    lb.push_u64(vault_pid);
+    log_line(&lb);
+
+    Ok((vault_handle, vault_ep, vault_sup_cap))
+}
+
 /// Spawn `dry-power` (`0x0005`) if `boot.power_mod_cap != 0` and delegate `CapObjectKind::PowerCtrl`.
-/// Returns `(pwr_handle, pwr_ep, pwr_sup_cap)`.
 pub fn spawn_and_bind_power_service(boot: &RootInitBootInfo) -> Result<(u64, u64, u64), i32> {
     if boot.power_mod_cap == 0 || boot.power_ctrl_cap == 0 {
         return Ok((0, 0, 0));
@@ -241,6 +446,7 @@ pub fn shutdown_vfs_service(vfs_handle: u64, vfs_ep: u64, vfs_sup_cap: u64) -> R
     if vfs_ep == 0 {
         return Ok(());
     }
+    let _ = vfs_sync(vfs_sup_cap);
     let _ = sys_ipc_call_inline(
         vfs_sup_cap,
         pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
@@ -255,14 +461,57 @@ pub fn shutdown_vfs_service(vfs_handle: u64, vfs_ep: u64, vfs_sup_cap: u64) -> R
     Ok(())
 }
 
+pub fn shutdown_vault_and_blk(
+    vault_handle: u64,
+    vault_ep: u64,
+    vault_sup_cap: u64,
+    blk_handle: u64,
+    blk_ep: u64,
+    blk_sup_cap: u64,
+) -> Result<(), i32> {
+    if vault_ep != 0 {
+        let _ = sys_ipc_call_inline(
+            vault_sup_cap,
+            pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+        if sys_proc_wait(vault_handle, 0, 0) != Ok((0, 0)) {
+            return Err(177);
+        }
+        let _ = sys_cap_revoke(vault_sup_cap, 1);
+        let _ = sys_cap_revoke(vault_ep, 2);
+    }
+    if blk_ep != 0 {
+        let _ = sys_ipc_call_inline(
+            blk_sup_cap,
+            pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+        if sys_proc_wait(blk_handle, 0, 0) != Ok((0, 0)) {
+            return Err(178);
+        }
+        let _ = sys_cap_revoke(blk_sup_cap, 1);
+        let _ = sys_cap_revoke(blk_ep, 2);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn teardown_p3_core_services(
     input_sup_cap: u64,
     input_ep: u64,
     input_handle: u64,
+    vault_handle: u64,
+    vault_ep: u64,
+    vault_sup_cap: u64,
     vfs_handle: u64,
     vfs_ep: u64,
     vfs_sup_cap: u64,
+    blk_handle: u64,
+    blk_ep: u64,
+    blk_sup_cap: u64,
     disp_sup_cap: u64,
     disp_ep: u64,
     disp_handle: u64,
@@ -273,6 +522,7 @@ pub fn teardown_p3_core_services(
     sup_ep: u64,
     final_mode: FinalPowerMode,
 ) -> Result<(), i32> {
+    let mut first_err: Result<(), i32> = Ok(());
     let _ = sys_ipc_call_inline(
         input_ep,
         pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
@@ -280,14 +530,29 @@ pub fn teardown_p3_core_services(
         0,
     );
     if sys_proc_wait(input_handle, 0, 0) != Ok((0, 0)) {
-        return Err(158);
+        first_err = Err(158);
     }
     if input_sup_cap != 0 {
         let _ = sys_cap_revoke(input_sup_cap, 1);
     }
     let _ = sys_cap_revoke(input_ep, 2);
 
-    shutdown_vfs_service(vfs_handle, vfs_ep, vfs_sup_cap)?;
+    // Stop `dry-vault` -> flush & stop `dry-vfs` -> stop `dry-blk` in strict dependency order!
+    if let Err(e) = shutdown_vault_and_blk(vault_handle, vault_ep, vault_sup_cap, 0, 0, 0) {
+        if first_err.is_ok() {
+            first_err = Err(e);
+        }
+    }
+    if let Err(e) = shutdown_vfs_service(vfs_handle, vfs_ep, vfs_sup_cap) {
+        if first_err.is_ok() {
+            first_err = Err(e);
+        }
+    }
+    if let Err(e) = shutdown_vault_and_blk(0, 0, 0, blk_handle, blk_ep, blk_sup_cap) {
+        if first_err.is_ok() {
+            first_err = Err(e);
+        }
+    }
 
     if disp_ep != 0 {
         let _ = sys_ipc_call_inline(
@@ -296,15 +561,16 @@ pub fn teardown_p3_core_services(
             [0; 4],
             0,
         );
-        if sys_proc_wait(disp_handle, 0, 0) != Ok((0, 0)) {
-            return Err(159);
+        if sys_proc_wait(disp_handle, 0, 0) != Ok((0, 0)) && first_err.is_ok() {
+            first_err = Err(159);
         }
         let _ = sys_cap_revoke(disp_sup_cap, 1);
         let _ = sys_cap_revoke(disp_ep, 2);
     }
 
     if final_mode == FinalPowerMode::HardwareShutdownS5 && pwr_sup_cap != 0 {
-        let _ = sys_write_debug(b"[DRY-INIT] Controlled teardown complete -> invoking dry-power S5\n");
+        let _ =
+            sys_write_debug(b"[DRY-INIT] Controlled teardown complete -> invoking dry-power S5\n");
         let _ = sys_ipc_call_inline(
             pwr_sup_cap,
             pack_msg_tag(IPC_OP_PWR_SHUTDOWN_S5, 0, 1, 0),
@@ -312,8 +578,9 @@ pub fn teardown_p3_core_services(
             0,
         );
     } else if final_mode == FinalPowerMode::HardwareReboot && pwr_sup_cap != 0 {
-        let _ =
-            sys_write_debug(b"[DRY-INIT] Controlled teardown complete -> invoking dry-power reset\n");
+        let _ = sys_write_debug(
+            b"[DRY-INIT] Controlled teardown complete -> invoking dry-power reset\n",
+        );
         let _ = sys_ipc_call_inline(
             pwr_sup_cap,
             pack_msg_tag(IPC_OP_PWR_REBOOT, 0, 1, 0),
@@ -329,8 +596,8 @@ pub fn teardown_p3_core_services(
             [0; 4],
             0,
         );
-        if sys_proc_wait(pwr_handle, 0, 0) != Ok((0, 0)) {
-            return Err(196);
+        if sys_proc_wait(pwr_handle, 0, 0) != Ok((0, 0)) && first_err.is_ok() {
+            first_err = Err(196);
         }
         let _ = sys_cap_revoke(pwr_sup_cap, 1);
         let _ = sys_cap_revoke(pwr_ep, 2);
@@ -338,7 +605,7 @@ pub fn teardown_p3_core_services(
 
     let _ = sys_cap_revoke(sup_notif, 2);
     let _ = sys_cap_revoke(sup_ep, 2);
-    Ok(())
+    first_err
 }
 
 pub fn sync_live_layout_pref(disp_sup_cap: u64, prefs: &mut SupervisorPrefs) {

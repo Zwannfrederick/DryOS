@@ -27,11 +27,12 @@ use dry_userspace::wm::{WindowRole, TITLE_KIND_SYSMON};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait,
-    sys_power_query, sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserPowerInfo,
-    UserProcInfo, UserSysInfo, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SUP_ACTION,
-    IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT,
-    IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, RIGHT_MAP,
-    RIGHT_READ, RIGHT_SIGNAL, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    sys_power_query, sys_proc_list, sys_sysinfo, sys_vault_query_epoch, sys_vspace_map,
+    sys_write_debug, UserPowerInfo, UserProcInfo, UserSysInfo, IPC_OP_INPUT_EVENT, IPC_OP_PONG,
+    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SURFACE_ATTACH,
+    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED,
+    IPC_OP_WIN_POLL_EVENT, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL, VSPACE_MAP_OP_4K_RW,
+    VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SYSMON_SURF_VADDR: u64 = 0x1800_0000;
@@ -405,9 +406,12 @@ fn render_life_station_frame(
 
     write_row_cols(surf, LIFE_COLS, 19, &div, STYLE_MUTED);
 
+    let lease_epoch = sys_vault_query_epoch().unwrap_or(1);
     let mut r20 = LineBuilder::new();
     r20.push_bytes(b"Seq #");
     r20.push_u64(refresh_seq);
+    r20.push_bytes(b"  Epoch: ");
+    r20.push_u64(lease_epoch as u64);
     r20.push_bytes(b"  Keys: ");
     r20.push_u64(keys_rcvd);
     r20.push_bytes(b"  Last: ");

@@ -52,6 +52,14 @@ path = "src/bin/dry_settings.rs"
 name = "dry-power"
 path = "src/bin/dry_power.rs"
 
+[[bin]]
+name = "dry-blk"
+path = "src/bin/dry_blk.rs"
+
+[[bin]]
+name = "dry-vault"
+path = "src/bin/dry_vault.rs"
+
 [profile.dev]
 panic = "abort"
 

@@ -388,6 +388,25 @@ pub fn map_4k(
     frame: FrameHandle,
     prot: VmProt,
 ) -> Result<(), VSpaceError> {
+    map_4k_internal(handle, vaddr, frame, prot, false)
+}
+
+pub(crate) fn map_4k_cap_authorized(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    frame: FrameHandle,
+    prot: VmProt,
+) -> Result<(), VSpaceError> {
+    map_4k_internal(handle, vaddr, frame, prot, true)
+}
+
+fn map_4k_internal(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    frame: FrameHandle,
+    prot: VmProt,
+    cap_authorized: bool,
+) -> Result<(), VSpaceError> {
     validate_user_range(vaddr, PAGE_SIZE_4K, PAGE_SIZE_4K)?;
     let leaf_flags = prot_to_pte_flags(prot, false)?;
     let (i4, i3, i2, i1) = pt_indices(vaddr);
@@ -439,6 +458,7 @@ pub fn map_4k(
                 PageOrder::Order4KiB,
                 owner_label,
                 prot.contains(VmProt::WRITE),
+                cap_authorized,
             );
             let _ = pt_frame_adjust_entries(pt_pfn, 1);
             write_volatile(pt.add(i1), frame.phys_addr() | leaf_flags);

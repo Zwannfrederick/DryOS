@@ -19,23 +19,21 @@ use dry_userspace::keymap::{
     KEY_PAGEUP, KEY_RIGHT, KEY_UP,
 };
 use dry_userspace::shell::{parse_command, LineBuilder, ShellCommand, ShellEngine, MAX_INPUT_LEN};
+use dry_userspace::shell_ext::{exec_storage_vault_command, run_live_p3_sec_probes};
 use dry_userspace::surface::{
     SharedWindowSurface, STYLE_DEFAULT, STYLE_MUTED, STYLE_OK, STYLE_WARN, TERM_COLS, TERM_ROWS,
 };
-use dry_userspace::vfs_proto::{vfs_create_file, vfs_read_file, vfs_unlink_file};
 use dry_userspace::wm::{WindowRole, TITLE_KIND_TERMINAL};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
-    sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_power_ctl,
-    sys_power_query, sys_proc_kill, sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug,
-    UserPowerInfo, UserProcInfo, UserSysInfo, EBADCAP, EPERM, EPIPE, EREVOKED, EROFS,
-    IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_INPUT_EVENT,
-    IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT, IPC_OP_PONG, IPC_OP_SUP_ACTION,
-    IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_GET_VFS_CAP, IPC_OP_SUP_HELLO, IPC_OP_SUP_MINT_ROGUE_TEST,
-    IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH,
-    IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED,
-    IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_TOGGLE_TILING, POWER_OP_REBOOT, POWER_OP_SHUTDOWN_S5,
-    RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_power_query,
+    sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserPowerInfo, UserProcInfo,
+    UserSysInfo, EBADCAP, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
+    IPC_OP_INPUT_EVENT, IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT, IPC_OP_PONG,
+    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_APPS,
+    IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE,
+    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT,
+    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SHELL_SURF_VADDR: u64 = 0x1800_0000;
@@ -110,91 +108,6 @@ fn call_sup_action(sup_ep_cap: u64, act: DesktopAction) -> Result<[u64; 4], u32>
     } else {
         Err(lbl)
     }
-}
-
-fn run_live_p3_sec_probes(sup_ep_cap: u64, engine: &mut ShellEngine) {
-    let kill_eperm = sys_proc_kill(1) == Err(EPERM);
-
-    let mut unauth_perm = false;
-    if let Ok((rtag, rogue_cap, _)) =
-        sys_ipc_call_with_grant(sup_ep_cap, IPC_OP_SUP_MINT_ROGUE_TEST, [0; 4], 0, 0, 0, 0)
-    {
-        if msg_tag_label(rtag) == IPC_OP_PONG && rogue_cap != 0 {
-            let r1 = call_sup_action(rogue_cap, DesktopAction::LaunchOrFocusApp(AppId::LifeStation));
-            let r2 = call_sup_action(rogue_cap, DesktopAction::CloseApp(AppId::Terminal));
-            let r3 = call_sup_action(rogue_cap, DesktopAction::RequestShutdown);
-            let r4 = call_sup_action(rogue_cap, DesktopAction::RequestReboot);
-            let _ = sys_cap_revoke(rogue_cap, 1);
-            unauth_perm = r1 == Err(IPC_OP_ERR_PERM)
-                && r2 == Err(IPC_OP_ERR_PERM)
-                && r3 == Err(IPC_OP_ERR_PERM)
-                && r4 == Err(IPC_OP_ERR_PERM);
-        }
-    }
-
-    let bad1 = sys_ipc_call_inline(
-        sup_ep_cap,
-        pack_msg_tag(IPC_OP_SUP_ACTION, 0, 2, 0),
-        [0xdead_beef, 999, 0, 0],
-        0,
-    )
-    .map(|(t, _, _)| msg_tag_label(t));
-    let bad2 = sys_ipc_call_inline(
-        sup_ep_cap,
-        pack_msg_tag(IPC_OP_SUP_ACTION, 0, 2, 0),
-        [1, 99, 0, 0],
-        0,
-    )
-    .map(|(t, _, _)| msg_tag_label(t));
-    let bad_ipc_inval = bad1 == Ok(IPC_OP_ERR_INVAL) && bad2 == Ok(IPC_OP_ERR_INVAL);
-
-    let mut vfs_rofs = false;
-    let mut vfs_eperm = false;
-    if let Ok((vtag, vcap, _)) =
-        sys_ipc_call_with_grant(sup_ep_cap, IPC_OP_SUP_GET_VFS_CAP, [0; 4], 0, 0, 0, 0)
-    {
-        if msg_tag_label(vtag) == IPC_OP_PONG && vcap != 0 {
-            let mut scratch = [0u8; 32];
-            vfs_rofs = vfs_create_file(vcap, b"/boot/pwn.txt", 0) == Err(EROFS);
-            vfs_eperm = vfs_read_file(vcap, b"/ram/vault_key.priv", 0, &mut scratch) == Err(EPERM)
-                && vfs_unlink_file(vcap, b"/ram/vault_key.priv") == Err(EPERM);
-            let _ = sys_cap_revoke(vcap, 1);
-        }
-    }
-
-    let pwr_eperm = sys_power_ctl(POWER_OP_SHUTDOWN_S5, 0) == Err(EPERM)
-        && sys_power_ctl(POWER_OP_REBOOT, 0xdead_beef) == Err(EPERM);
-
-    let mut lb = LineBuilder::new();
-    lb.push_bytes(b"Security audit: kill_eperm=");
-    lb.push_bytes(if kill_eperm { b"true" } else { b"false" });
-    lb.push_bytes(b" unauth_perm=");
-    lb.push_bytes(if unauth_perm { b"true" } else { b"false" });
-    lb.push_bytes(b" pwr_eperm=");
-    lb.push_bytes(if pwr_eperm { b"true" } else { b"false" });
-    engine.push_line(
-        lb.as_bytes(),
-        if kill_eperm && unauth_perm && bad_ipc_inval && vfs_rofs && vfs_eperm && pwr_eperm {
-            STYLE_OK
-        } else {
-            STYLE_WARN
-        },
-    );
-
-    let mut slb = LineBuilder::new();
-    slb.push_bytes(b"[DRY-SHELL] CMD=sec-audit kill_eperm=");
-    slb.push_bytes(if kill_eperm { b"true" } else { b"false" });
-    slb.push_bytes(b" unauth_perm=");
-    slb.push_bytes(if unauth_perm { b"true" } else { b"false" });
-    slb.push_bytes(b" bad_ipc_inval=");
-    slb.push_bytes(if bad_ipc_inval { b"true" } else { b"false" });
-    slb.push_bytes(b" vfs_rofs=");
-    slb.push_bytes(if vfs_rofs { b"true" } else { b"false" });
-    slb.push_bytes(b" vfs_eperm=");
-    slb.push_bytes(if vfs_eperm { b"true" } else { b"false" });
-    slb.push_bytes(b" pwr_eperm=");
-    slb.push_bytes(if pwr_eperm { b"true" } else { b"false" });
-    debug_line(&slb);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -309,6 +222,8 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
     }
 
     let mut input_ep_cap = init_input_ep_cap;
+    let mut cached_vfs_cap: u64 = 0;
+    let mut cached_vault_cap: u64 = 0;
     let mut logged_single_row = false;
     let _ = sys_write_debug(b"[DRY-SHELL] Interactive shell ready in CPL3 Userspace\n");
 
@@ -739,7 +654,11 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     }
                     ShellCommand::Lock => {
                         engine.push_line(
-                            b"Session lock engaged (unauthenticated until DRY Vault auth).",
+                            if session_mode >= 20 {
+                                b"DRY Vault authenticated session lock engaged (leases revoked)."
+                            } else {
+                                b"Session lock engaged (unauthenticated until DRY Vault auth)."
+                            },
                             STYLE_OK,
                         );
                         post_present_action = Some(DesktopAction::LockSession);
@@ -813,6 +732,18 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     }
                     ShellCommand::SecAudit => {
                         run_live_p3_sec_probes(sup_ep_cap, engine);
+                    }
+                    ShellCommand::StorageVault(verb, rest) => {
+                        if let Some(act) = exec_storage_vault_command(
+                            verb,
+                            rest,
+                            sup_ep_cap,
+                            &mut cached_vfs_cap,
+                            &mut cached_vault_cap,
+                            engine,
+                        ) {
+                            post_present_action = Some(act);
+                        }
                     }
                     ShellCommand::Shutdown => {
                         engine.push_line(b"Shutting down DRY OS session...", STYLE_OK);
@@ -925,6 +856,12 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
         }
     }
 
+    if cached_vfs_cap != 0 {
+        let _ = sys_cap_revoke(cached_vfs_cap, 1);
+    }
+    if cached_vault_cap != 0 {
+        let _ = sys_cap_revoke(cached_vault_cap, 1);
+    }
     let _ = sys_vspace_map(surf_cap, SHELL_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
     let _ = sys_cap_revoke(surf_cap, 2);
     sys_exit(0);

@@ -53,6 +53,7 @@ const NOTIF_SHUTDOWN_BIT: u64 = 1 << 1;
 enum MountTab {
     Boot,
     Ram,
+    Persist,
 }
 
 impl MountTab {
@@ -61,6 +62,7 @@ impl MountTab {
         match self {
             Self::Boot => b"/boot",
             Self::Ram => b"/ram",
+            Self::Persist => b"/persist",
         }
     }
 }
@@ -75,6 +77,7 @@ enum UiMode {
 
 struct ExplorerState {
     vfs_ep: u64,
+    persist_available: bool,
     mount: MountTab,
     mount_flags: u16,
     entries: [VfsDirEntry; MAX_LIST_ENTRIES],
@@ -98,6 +101,7 @@ unsafe impl Sync for SingleThreadExplorer {}
 
 static EXPLORER: SingleThreadExplorer = SingleThreadExplorer(UnsafeCell::new(ExplorerState {
     vfs_ep: 0,
+    persist_available: false,
     mount: MountTab::Boot,
     mount_flags: VFS_FLAG_READONLY,
     entries: [VfsDirEntry::EMPTY; MAX_LIST_ENTRIES],
@@ -261,6 +265,8 @@ impl ExplorerState {
         log_line(&lb);
         if self.is_readonly() {
             self.set_status(b"Mounted /boot [READ-ONLY initrd]", false);
+        } else if target == MountTab::Persist {
+            self.set_status(b"Mounted /persist [PERSISTENT VirtIO-Blk DRYFS_v1]", false);
         } else {
             self.set_status(b"Mounted /ram [VOLATILE: resets on reboot]", false);
         }
@@ -305,7 +311,14 @@ impl ExplorerState {
                         self.refresh_dir(false);
                         self.select_by_name(fname);
                         self.load_selected_preview(false);
-                        self.set_status(b"Created volatile file in /ram", false);
+                        self.set_status(
+                            if self.mount == MountTab::Persist {
+                                b"Created persistent file in /persist (CoW + FLUSH)"
+                            } else {
+                                b"Created volatile file in /ram"
+                            },
+                            false,
+                        );
                     }
                     Err(_) => self.set_status(b"Create failed (invalid or duplicate name)", true),
                 }
@@ -451,11 +464,19 @@ impl ExplorerState {
                     self.switch_mount(MountTab::Ram);
                     return false;
                 }
-                if ev.keycode == KEY_TAB {
-                    let next = if self.mount == MountTab::Boot {
-                        MountTab::Ram
+                if ev.ascii == b'3' {
+                    if self.persist_available {
+                        self.switch_mount(MountTab::Persist);
                     } else {
-                        MountTab::Boot
+                        self.set_status(b"Disabled: no VirtIO-Blk disk mounted", true);
+                    }
+                    return false;
+                }
+                if ev.keycode == KEY_TAB {
+                    let next = match (self.mount, self.persist_available) {
+                        (MountTab::Boot, _) => MountTab::Ram,
+                        (MountTab::Ram, true) => MountTab::Persist,
+                        _ => MountTab::Boot,
                     };
                     self.switch_mount(next);
                     return false;
@@ -535,10 +556,22 @@ impl ExplorerState {
         );
         write_row(surf, 1, &div, STYLE_MUTED);
 
-        let tabs = if self.mount == MountTab::Boot {
-            b" >[1: /boot (RO Initrd)]<    [2: /ram (Volatile RW)]   [Tab] Swap"
-        } else {
-            b"  [1: /boot (RO Initrd)]    >[2: /ram (Volatile RW)]<  [Tab] Swap"
+        let tabs: &[u8] = match (self.mount, self.persist_available) {
+            (MountTab::Boot, false) => {
+                b" >[1: /boot (RO Initrd)]<    [2: /ram (Volatile RW)]   [Tab] Swap"
+            }
+            (MountTab::Ram, false) => {
+                b"  [1: /boot (RO Initrd)]    >[2: /ram (Volatile RW)]<  [Tab] Swap"
+            }
+            (MountTab::Boot, true) => {
+                b" >[1:/boot RO]<  [2:/ram Vol]  [3:/persist Disk RW]   [Tab] Swap"
+            }
+            (MountTab::Ram, true) => {
+                b"  [1:/boot RO]  >[2:/ram Vol]< [3:/persist Disk RW]   [Tab] Swap"
+            }
+            (MountTab::Persist, _) => {
+                b"  [1:/boot RO]   [2:/ram Vol] >[3:/persist Disk RW]<  [Tab] Swap"
+            }
         };
         write_row(surf, 2, tabs, STYLE_ACCENT);
 
@@ -555,6 +588,13 @@ impl ExplorerState {
                 3,
                 b" NOTICE: /ram is VOLATILE RAM -- All files reset on reboot!",
                 STYLE_WARN,
+            );
+        } else {
+            write_row(
+                surf,
+                3,
+                b" BACKEND: /persist [PERSISTENT VirtIO-Blk DRYFS_v1 -- CoW + FLUSH]",
+                STYLE_OK,
             );
         }
 
@@ -656,11 +696,13 @@ impl ExplorerState {
                 );
             }
             pmode => {
-                let prefix: &[u8] = match pmode {
-                    UiMode::PromptCreate => b" CREATE /ram/> ",
-                    UiMode::PromptWrite => b" WRITE TEXT> ",
-                    UiMode::PromptRename => b" RENAME TO /ram/> ",
-                    UiMode::Browse => b"",
+                let prefix: &[u8] = match (pmode, self.mount) {
+                    (UiMode::PromptCreate, MountTab::Persist) => b" CREATE /persist/> ",
+                    (UiMode::PromptCreate, _) => b" CREATE /ram/> ",
+                    (UiMode::PromptWrite, _) => b" WRITE TEXT> ",
+                    (UiMode::PromptRename, MountTab::Persist) => b" RENAME TO /persist/> ",
+                    (UiMode::PromptRename, _) => b" RENAME TO /ram/> ",
+                    (UiMode::Browse, _) => b"",
                 };
                 let mut plb = LineBuilder::new();
                 plb.push_bytes(prefix);
@@ -725,7 +767,15 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     // SAFETY: Single-threaded Ring 3 application owning `EXPLORER`.
     let st = unsafe { &mut *EXPLORER.0.get() };
     st.vfs_ep = vfs_ep_cap;
-    st.switch_mount(MountTab::Boot);
+    if vfs_ep_cap != 0 {
+        let mut probe = [VfsDirEntry::EMPTY; 1];
+        st.persist_available = vfs_list_dir(vfs_ep_cap, b"/persist", &mut probe).is_ok();
+    }
+    st.switch_mount(if st.persist_available {
+        MountTab::Persist
+    } else {
+        MountTab::Boot
+    });
     st.render(surf);
 
     let mut win_id: u32 = 0;

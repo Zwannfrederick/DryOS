@@ -10,9 +10,11 @@
 use core::mem::size_of;
 
 use crate::{
-    msg_tag_extra_len, msg_tag_label, pack_msg_tag, raw_ipc_syscall, sys_ipc_reply_inline,
-    UserIpcRecvExt, UserIpcSendExt, EINVAL, IPC_OP_PONG, MAX_IPC_EXTRA_BYTES, MSG_FLAG_EXTRA_BUF,
-    SYS_IPC_CALL, SYS_IPC_RECV, SYS_IPC_REPLY,
+    msg_tag_extra_len, msg_tag_label, pack_msg_tag, raw_ipc_syscall, sys_ipc_call_inline,
+    sys_ipc_call_with_grant, sys_ipc_reply_inline, UserIpcRecvExt, UserIpcSendExt, BADGE_BLK_VFS,
+    EINVAL, IPC_OP_PONG, MAX_IPC_EXTRA_BYTES, MSG_FLAG_EXTRA_BUF, RIGHT_CALL, RIGHT_GRANT,
+    RIGHT_READ, RIGHT_SEND, SYS_IPC_CALL, SYS_IPC_RECV, SYS_IPC_REPLY, VFS_OP_CORRUPT_SB0_TEST,
+    VFS_OP_LINK, VFS_OP_MOUNT_BLK, VFS_OP_SYNC,
 };
 
 pub const VFS_OP_SEED_BOOT: u32 = 60;
@@ -31,6 +33,7 @@ pub const VFS_FLAG_READONLY: u16 = 1 << 1;
 pub const VFS_FLAG_VOLATILE: u16 = 1 << 2;
 pub const VFS_FLAG_PRIVATE: u16 = 1 << 3;
 pub const VFS_FLAG_EXECUTABLE: u16 = 1 << 4;
+pub const VFS_FLAG_PERSISTENT: u16 = 1 << 5;
 
 pub const VFS_MAX_NAME_LEN: usize = 35;
 pub const VFS_MAX_PATH_LEN: usize = 96;
@@ -386,5 +389,77 @@ pub fn vfs_unlink_file(vfs_ep: u64, full_path: &[u8]) -> Result<(), isize> {
         Ok(())
     } else {
         Err(mrs[0] as isize)
+    }
+}
+
+/// Mount `/persist` (`DRYFS_v1`) on `dry-vfs` by granting `blk_ep_cap` (`BADGE_SUPERVISOR` only).
+/// Returns `(fresh_formatted, tx_seq, recovered_fallback)`.
+pub fn vfs_mount_blk(vfs_ep: u64, blk_ep_cap: u64) -> Result<(bool, u64, bool), isize> {
+    let rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL | RIGHT_GRANT;
+    let (rtag, _, rmrs) = sys_ipc_call_with_grant(
+        vfs_ep,
+        VFS_OP_MOUNT_BLK,
+        [0; 4],
+        blk_ep_cap,
+        rights,
+        BADGE_BLK_VFS,
+        0,
+    )?;
+    if msg_tag_label(rtag) == IPC_OP_PONG {
+        Ok((rmrs[0] != 0, rmrs[1], rmrs[2] != 0))
+    } else {
+        Err(rmrs[0] as isize)
+    }
+}
+
+/// Explicitly flush `/persist` via `VIRTIO_BLK_T_FLUSH` write barrier.
+pub fn vfs_sync(vfs_ep: u64) -> Result<u64, isize> {
+    let (rtag, _, rmrs) =
+        sys_ipc_call_inline(vfs_ep, pack_msg_tag(VFS_OP_SYNC, 0, 0, 0), [0; 4], 0)?;
+    if msg_tag_label(rtag) == IPC_OP_PONG {
+        Ok(rmrs[0])
+    } else {
+        Err(rmrs[0] as isize)
+    }
+}
+
+/// Create a hardlink `src_path -> dst_path` (`INV-SEC-05` rejects cross-mount with `-EXDEV` and
+/// cross-compartment/cross-domain with `-EPERM`).
+pub fn vfs_link_file(vfs_ep: u64, src_path: &[u8], dst_path: &[u8]) -> Result<u32, isize> {
+    if src_path.is_empty()
+        || dst_path.is_empty()
+        || src_path.len() > VFS_MAX_PATH_LEN
+        || dst_path.len() > VFS_MAX_PATH_LEN
+        || 1 + src_path.len() + dst_path.len() > MAX_IPC_EXTRA_BYTES
+    {
+        return Err(EINVAL);
+    }
+    let mut tx = [0u8; MAX_IPC_EXTRA_BYTES];
+    tx[0] = src_path.len() as u8;
+    tx[1..(1 + src_path.len())].copy_from_slice(src_path);
+    let end = 1 + src_path.len() + dst_path.len();
+    tx[(1 + src_path.len())..end].copy_from_slice(dst_path);
+
+    let mut rx = [0u8; MAX_IPC_EXTRA_BYTES];
+    let (tag, _, mrs) = sys_ipc_call_extra(vfs_ep, VFS_OP_LINK, [0; 4], &tx[..end], &mut rx, 0)?;
+    if msg_tag_label(tag) == IPC_OP_PONG {
+        Ok(mrs[0] as u32)
+    } else {
+        Err(mrs[0] as isize)
+    }
+}
+
+/// Deliberate fault-injection test hook (`BADGE_SUPERVISOR` only): corrupt Superblock Slot 0 on disk.
+pub fn vfs_corrupt_sb0_test(vfs_ep: u64) -> Result<(), isize> {
+    let (rtag, _, rmrs) = sys_ipc_call_inline(
+        vfs_ep,
+        pack_msg_tag(VFS_OP_CORRUPT_SB0_TEST, 0, 0, 0),
+        [0; 4],
+        0,
+    )?;
+    if msg_tag_label(rtag) == IPC_OP_PONG {
+        Ok(())
+    } else {
+        Err(rmrs[0] as isize)
     }
 }

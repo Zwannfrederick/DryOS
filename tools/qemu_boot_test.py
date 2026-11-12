@@ -25,6 +25,7 @@ from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
 from qemu_p2_validators import run_p2_suite
 from qemu_p3_validators import run_p3_suite
 from qemu_p3c_validators import run_p3_hardware_matrix
+from qemu_p4_validators import run_p4_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -55,6 +56,8 @@ USERSPACE_MODS = (
     ("dry-files", "dry-files.elf"),
     ("dry-settings", "dry-settings.elf"),
     ("dry-power", "dry-power.elf"),
+    ("dry-blk", "dry-blk.elf"),
+    ("dry-vault", "dry-vault.elf"),
 )
 
 
@@ -466,6 +469,7 @@ def main() -> None:
     parser.add_argument("--p1-only", action="store_true", help="Run only Milestone 2A-1 (P1) interactive & negative security suite")
     parser.add_argument("--p3-only", action="store_true", help="Run only Milestone 2A-3 native desktop & lifecycle suite")
     parser.add_argument("--p3-matrix", action="store_true", help="Run Milestone 2A-3 SMP (1..20 vCPU) & RAM (256M..2G) desktop matrix")
+    parser.add_argument("--p4-only", action="store_true", help="Run only Milestone 2B persistent storage & DRY Vault suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -484,6 +488,11 @@ def main() -> None:
     if args.p3_only:
         n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p3} MILESTONE 2A-3 NATIVE DESKTOP & SECURITY CHECKS PASSED.")
+        return
+
+    if args.p4_only:
+        n_p4 = run_p4_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p4} MILESTONE 2B PERSISTENT STORAGE & DRY VAULT CHECKS PASSED.")
         return
 
     if args.p3_matrix:
@@ -935,10 +944,12 @@ def main() -> None:
         kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
     )
     n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p4 = run_p4_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        f"\n[QEMU-TEST] ALL {79 + n_p3} DETERMINISTIC QEMU CHECKS "
-        f"(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + {n_p3} MILESTONE 2A-3) PASSED."
+        f"\n[QEMU-TEST] ALL {79 + n_p3 + n_p4} DETERMINISTIC QEMU CHECKS "
+        f"(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
+        f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B) PASSED."
     )
 
 

@@ -158,6 +158,19 @@
     3. **`Files` (`dry-files.elf` `0x0104`):** `dry-vfs` üzerinden salt-okunur `/boot` modül inceleme ve uçucu `/ram` içinde dosya oluşturma (`[N]`), görüntüleme (`Enter`), yeniden adlandırma (`[R]`) ve silme (`[D]`).
     4. **`Settings` (`dry-settings.elf` `0x0105`):** Canlı uygulanan 7 tercih satırı (`WM Layout`, `Keymap`, `Cursor Speed`, `Theme`, `Cursor Size`, `Idle DPMS`, `Session Lock / Reboot`) ve `Tiling` düzenini bozmayan `[H]` `DialogTransient` hızlı yardım penceresi.
 
+### 2.8. `Milestone 2B`: Kalıcı VirtIO-Blk Depolama, Kilitsiz `IoRing`, Çökme-Güvenli `DRYFS_v1` ve `DRY Vault` Güvenlik Zorlaması (`[DOĞRULANDI — 88/88 QEMU/KVM + 5/5 SMP/RAM Matrisi]`)
+
+- **Çekirdek Yetenek Kapıları ve `BME=0` Donanım Susturma (`kernel/src/{pci,vault_ctrl}.rs`, `syscall/cold.rs` — `0` Çekirdek Blok/FS/Kripto Politikası):**
+  - **3 Yeni Soğuk Sistem Çağrısı (`rust_syscall_dispatch = 248 B` sıcak çerçeve korundu):**
+    1. `SYS_DEV_MAP (29)`: `CapObjectKind::PciDev (14)` doğrulamasıyla PCI VirtIO 1.0 Modern blok denetleyicisinin (`1AF4:1042`/`1001`) doğrulanmış MMIO BAR sayfalarını `VmProt::USER_MMIO_UC` olarak eşler ve fiziksel adres içermeyen 32 B `UserVirtioPciInfo` döndürür.
+    2. `SYS_DMA_ALLOC (30)`: Yalnızca `DEV_WORKSPACE` olmayan `SecDomain::RootSystem` sürücüsüne `SecFlags::DEVICE_DMA | NO_DELEGATE` etiketli, `iommu_pin_count == 1` sabitlenmiş 4 KiB DMA çerçeveleri verir (`INV-CAP-08`). Sürücü çöktüğünde/sonlandığında `quiesce_pci_for_cspace` önce donanımda PCI `Command.BME = 0` bitini kapatır, ardından DMA pinlerini çözerek sayfaları sızıntısız geri kazanır (`R-03`, `pci_quiesce >= 1`).
+    3. `SYS_VAULT_CTL (31)`: `CapObjectKind::VaultCtrl (15)` üzerinden `QUERY_EPOCH (0)`, $O(1)$ `GLOBAL_LEASE_EPOCH` ilerletme (`ADVANCE_EPOCH = 1`, eski kiralamalara `-EREVOKED`, `INV-SEC-07`) ve `READ_ONLY_EXPORT` çerçeve mühürleme (`SEAL_RO_EXPORT = 2`, `W^X` `INV-SEC-03`) sağlar.
+- **Ring 3 `dry-blk.elf` (`0x0006`), Kilitsiz `IoRing` (`ioring.rs`) ve `DRYFS_v1` (`persist_fs.rs` `/persist`):**
+  - `dry-blk.elf`, VirtIO 1.0 Modern `virtq` halkasını `SYS_DMA_ALLOC` çerçeveleri üzerinde çalıştırır; `dry-vfs.elf` ile paylaşımlı `IoRingSharedPage` (`SQ`/`CQ`, `CAP = 32`) + 4 KiB veri penceresi + `Notification` kapı zilleri üzerinden konuşur.
+  - `DRYFS_v1`, çift A/B `CRC32` süperblok (`tx_seq`) ve 4 KiB Copy-on-Write veri blokları + çift `VIRTIO_BLK_T_FLUSH` bariyeriyle güç kesintilerine (`SIGKILL`) ve süperblok bozulmalarına karşı atomik kurtarma sağlar; her inode `ADR-007` `SecLabel` taşır ve çapraz bağlama/kompartman `link` yükseltmelerini (`-EXDEV` / `-EPERM`) reddeder (`INV-SEC-05`).
+- **Ring 3 `DRY Vault` (`dry-vault.elf` `0x0007`), Kriptografik `Session Lock` ve `DEV_WORKSPACE` (`0x002a`):**
+  - Saf `no_std` tuzlu `PBKDF2-HMAC-SHA256` (`vault_crypto.rs`) doğrulayıcısı `/persist/vault.sec` (`RootSystem | NO_DELEGATE`) üzerinde saklanır (`0` düz metin parola); masaüstü `Session Lock` kalkanı gerçek parola doğrulamasıyla açılır ve `GLOBAL_LEASE_EPOCH` sayacını döndürür; masaüstü tercihleri `/persist/desktop.cfg` içinde yeniden başlatmalar boyunca yaşar; `DEV_WORKSPACE` kompartmanının donanım/DMA/Vault yetkilerine erişimi çekirdekte `-EPERM` ile engellenir.
+
 ---
 
 ## 3. Zamanlayıcı Mimarisi (`H1` Özeti)
