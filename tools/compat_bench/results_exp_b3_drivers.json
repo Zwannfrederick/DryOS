@@ -1,0 +1,385 @@
+{
+  "experiment": "Exp-B3",
+  "kernel_version": "6.18.62-1-lts",
+  "nvidia_dkms_version": "615.78.08",
+  "h2_igc_baseline_shim_loc": 3468,
+  "drivers": [
+    {
+      "driver": "virtio-net",
+      "description": "Paravirt NIC",
+      "modules": [
+        "kernel/drivers/net/virtio_net.ko.zst"
+      ],
+      "elf_ko_kib": 266.0,
+      "text_kib": 90.1,
+      "data_bss_kib": 5.7,
+      "external_undef_total": 228,
+      "buckets": {
+        "mm_hmm": 8,
+        "drm_dmabuf": 0,
+        "pci_dma_irq": 0,
+        "sched_sync_rcu": 17,
+        "net_blk_virtio": 84,
+        "acpi_pm_fw_i2c": 0,
+        "core_kobj_misc": 119
+      },
+      "dde_shim_multiplier_vs_igc": 0.92,
+      "sample_mm_drm_symbols": [
+        "__folio_put",
+        "__free_pages",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_noprof",
+        "alloc_pages_noprof",
+        "kfree",
+        "kmalloc_caches",
+        "kvfree"
+      ]
+    },
+    {
+      "driver": "virtio-gpu",
+      "description": "Paravirt GPU (DRM/VirGL)",
+      "modules": [
+        "kernel/drivers/gpu/drm/virtio/virtio-gpu.ko.zst"
+      ],
+      "elf_ko_kib": 255.8,
+      "text_kib": 71.0,
+      "data_bss_kib": 5.5,
+      "external_undef_total": 264,
+      "buckets": {
+        "mm_hmm": 12,
+        "drm_dmabuf": 138,
+        "pci_dma_irq": 5,
+        "sched_sync_rcu": 18,
+        "net_blk_virtio": 11,
+        "acpi_pm_fw_i2c": 2,
+        "core_kobj_misc": 78
+      },
+      "dde_shim_multiplier_vs_igc": 1.07,
+      "sample_mm_drm_symbols": [
+        "__drm_atomic_helper_plane_duplicate_state",
+        "__drm_dev_dbg",
+        "__drm_err",
+        "__drm_printfn_seq_file",
+        "__drm_puts_seq_file",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_noprof",
+        "aperture_remove_conflicting_pci_devices",
+        "dma_buf_detach",
+        "dma_buf_dynamic_attach",
+        "dma_buf_map_attachment",
+        "dma_buf_pin"
+      ]
+    },
+    {
+      "driver": "igc",
+      "description": "Discrete PCIe 2.5GbE NIC (H2 Proven)",
+      "modules": [
+        "kernel/drivers/net/ethernet/intel/igc/igc.ko.zst"
+      ],
+      "elf_ko_kib": 472.3,
+      "text_kib": 151.5,
+      "data_bss_kib": 11.8,
+      "external_undef_total": 247,
+      "buckets": {
+        "mm_hmm": 9,
+        "drm_dmabuf": 0,
+        "pci_dma_irq": 36,
+        "sched_sync_rcu": 23,
+        "net_blk_virtio": 59,
+        "acpi_pm_fw_i2c": 2,
+        "core_kobj_misc": 118
+      },
+      "dde_shim_multiplier_vs_igc": 1.0,
+      "sample_mm_drm_symbols": [
+        "__alloc_pages_noprof",
+        "__free_pages",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_noprof",
+        "kfree",
+        "kmalloc_caches",
+        "kvfree_call_rcu",
+        "vfree",
+        "vmalloc_array_noprof"
+      ]
+    },
+    {
+      "driver": "e1000e",
+      "description": "Discrete PCIe 1GbE NIC (H2 Proven)",
+      "modules": [
+        "kernel/drivers/net/ethernet/intel/e1000e/e1000e.ko.zst"
+      ],
+      "elf_ko_kib": 787.8,
+      "text_kib": 265.8,
+      "data_bss_kib": 26.6,
+      "external_undef_total": 200,
+      "buckets": {
+        "mm_hmm": 8,
+        "drm_dmabuf": 0,
+        "pci_dma_irq": 35,
+        "sched_sync_rcu": 19,
+        "net_blk_virtio": 34,
+        "acpi_pm_fw_i2c": 2,
+        "core_kobj_misc": 102
+      },
+      "dde_shim_multiplier_vs_igc": 0.81,
+      "sample_mm_drm_symbols": [
+        "__folio_put",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_noprof",
+        "alloc_pages_noprof",
+        "kfree",
+        "kmalloc_caches",
+        "vfree",
+        "vmalloc_noprof"
+      ]
+    },
+    {
+      "driver": "nvme",
+      "description": "PCIe NVMe Storage (core+pci)",
+      "modules": [
+        "kernel/drivers/nvme/host/nvme-core.ko.zst",
+        "kernel/drivers/nvme/host/nvme.ko.zst"
+      ],
+      "elf_ko_kib": 771.4,
+      "text_kib": 224.6,
+      "data_bss_kib": 20.5,
+      "external_undef_total": 358,
+      "buckets": {
+        "mm_hmm": 11,
+        "drm_dmabuf": 0,
+        "pci_dma_irq": 38,
+        "sched_sync_rcu": 36,
+        "net_blk_virtio": 71,
+        "acpi_pm_fw_i2c": 5,
+        "core_kobj_misc": 197
+      },
+      "dde_shim_multiplier_vs_igc": 1.45,
+      "sample_mm_drm_symbols": [
+        "__free_pages",
+        "__kmalloc_cache_node_noprof",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_node_noprof",
+        "__kmalloc_noprof",
+        "alloc_pages_noprof",
+        "kfree",
+        "kfree_sensitive",
+        "kmalloc_caches",
+        "kmem_cache_destroy",
+        "kvfree"
+      ]
+    },
+    {
+      "driver": "i915",
+      "description": "Intel Iris Xe Legacy KMS/GEM GPU",
+      "modules": [
+        "kernel/drivers/gpu/drm/i915/i915.ko.zst"
+      ],
+      "elf_ko_kib": 10384.5,
+      "text_kib": 3722.8,
+      "data_bss_kib": 139.2,
+      "external_undef_total": 1244,
+      "buckets": {
+        "mm_hmm": 34,
+        "drm_dmabuf": 574,
+        "pci_dma_irq": 53,
+        "sched_sync_rcu": 78,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 42,
+        "core_kobj_misc": 463
+      },
+      "dde_shim_multiplier_vs_igc": 5.04,
+      "sample_mm_drm_symbols": [
+        "__drm_atomic_helper_connector_duplicate_state",
+        "__drm_atomic_helper_connector_reset",
+        "__drm_atomic_helper_crtc_destroy_state",
+        "__drm_atomic_helper_crtc_duplicate_state",
+        "__drm_atomic_helper_crtc_state_reset",
+        "__drm_atomic_helper_plane_destroy_state",
+        "__drm_atomic_helper_plane_duplicate_state",
+        "__drm_atomic_helper_plane_state_reset",
+        "__drm_atomic_state_free",
+        "__drm_debug",
+        "__drm_dev_dbg",
+        "__drm_mm_interval_first"
+      ]
+    },
+    {
+      "driver": "xe",
+      "description": "Intel Xe Modern VM_BIND GPU",
+      "modules": [
+        "kernel/drivers/gpu/drm/xe/xe.ko.zst"
+      ],
+      "elf_ko_kib": 8360.3,
+      "text_kib": 2940.6,
+      "data_bss_kib": 137.6,
+      "external_undef_total": 1213,
+      "buckets": {
+        "mm_hmm": 21,
+        "drm_dmabuf": 650,
+        "pci_dma_irq": 67,
+        "sched_sync_rcu": 75,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 43,
+        "core_kobj_misc": 357
+      },
+      "dde_shim_multiplier_vs_igc": 4.91,
+      "sample_mm_drm_symbols": [
+        "__drm_atomic_helper_connector_duplicate_state",
+        "__drm_atomic_helper_connector_reset",
+        "__drm_atomic_helper_crtc_destroy_state",
+        "__drm_atomic_helper_crtc_duplicate_state",
+        "__drm_atomic_helper_crtc_state_reset",
+        "__drm_atomic_helper_plane_destroy_state",
+        "__drm_atomic_helper_plane_duplicate_state",
+        "__drm_atomic_helper_plane_state_reset",
+        "__drm_atomic_state_free",
+        "__drm_crtc_commit_free",
+        "__drm_debug",
+        "__drm_dev_dbg"
+      ]
+    },
+    {
+      "driver": "amdgpu",
+      "description": "AMD Radeon KMS/TTM GPU",
+      "modules": [
+        "kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst"
+      ],
+      "elf_ko_kib": 30612.5,
+      "text_kib": 11943.1,
+      "data_bss_kib": 868.0,
+      "external_undef_total": 1108,
+      "buckets": {
+        "mm_hmm": 28,
+        "drm_dmabuf": 461,
+        "pci_dma_irq": 75,
+        "sched_sync_rcu": 78,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 45,
+        "core_kobj_misc": 421
+      },
+      "dde_shim_multiplier_vs_igc": 4.49,
+      "sample_mm_drm_symbols": [
+        "__drm_atomic_helper_connector_destroy_state",
+        "__drm_atomic_helper_connector_duplicate_state",
+        "__drm_atomic_helper_connector_reset",
+        "__drm_atomic_helper_crtc_destroy_state",
+        "__drm_atomic_helper_crtc_duplicate_state",
+        "__drm_atomic_helper_crtc_reset",
+        "__drm_atomic_helper_plane_duplicate_state",
+        "__drm_atomic_helper_plane_reset",
+        "__drm_atomic_helper_private_obj_duplicate_state",
+        "__drm_atomic_state_free",
+        "__drm_crtc_commit_free",
+        "__drm_debug"
+      ]
+    },
+    {
+      "driver": "nvidia-core",
+      "description": "NVIDIA Open RM (GSP)",
+      "modules": [
+        "updates/dkms/nvidia.ko.zst"
+      ],
+      "elf_ko_kib": 28072.6,
+      "text_kib": 16472.7,
+      "data_bss_kib": 370.5,
+      "external_undef_total": 470,
+      "buckets": {
+        "mm_hmm": 34,
+        "drm_dmabuf": 9,
+        "pci_dma_irq": 60,
+        "sched_sync_rcu": 47,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 25,
+        "core_kobj_misc": 295
+      },
+      "dde_shim_multiplier_vs_igc": 1.9,
+      "sample_mm_drm_symbols": [
+        "__alloc_pages_noprof",
+        "__folio_put",
+        "__free_pages",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_large_noprof",
+        "__kmalloc_noprof",
+        "dma_buf_attach",
+        "dma_buf_detach",
+        "dma_buf_export",
+        "dma_buf_fd",
+        "dma_buf_get",
+        "dma_buf_map_attachment"
+      ]
+    },
+    {
+      "driver": "nvidia-uvm",
+      "description": "NVIDIA CUDA Unified Memory (HMM)",
+      "modules": [
+        "updates/dkms/nvidia-uvm.ko.zst"
+      ],
+      "elf_ko_kib": 4828.3,
+      "text_kib": 1630.3,
+      "data_bss_kib": 295.7,
+      "external_undef_total": 341,
+      "buckets": {
+        "mm_hmm": 28,
+        "drm_dmabuf": 9,
+        "pci_dma_irq": 16,
+        "sched_sync_rcu": 36,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 0,
+        "core_kobj_misc": 252
+      },
+      "dde_shim_multiplier_vs_igc": 1.38,
+      "sample_mm_drm_symbols": [
+        "__alloc_pages_noprof",
+        "__folio_lock",
+        "__folio_put",
+        "__free_pages",
+        "__kmalloc_cache_noprof",
+        "__kmalloc_noprof",
+        "alloc_pages_noprof",
+        "dma_buf_detach",
+        "dma_buf_dynamic_attach",
+        "dma_buf_export",
+        "dma_buf_fd",
+        "dma_buf_get"
+      ]
+    },
+    {
+      "driver": "nvidia-full",
+      "description": "NVIDIA Full Stack (RM+KMS+DRM+UVM)",
+      "modules": [
+        "updates/dkms/nvidia.ko.zst",
+        "updates/dkms/nvidia-modeset.ko.zst",
+        "updates/dkms/nvidia-drm.ko.zst",
+        "updates/dkms/nvidia-uvm.ko.zst"
+      ],
+      "elf_ko_kib": 37013.6,
+      "text_kib": 19892.9,
+      "data_bss_kib": 691.0,
+      "external_undef_total": 738,
+      "buckets": {
+        "mm_hmm": 42,
+        "drm_dmabuf": 175,
+        "pci_dma_irq": 63,
+        "sched_sync_rcu": 57,
+        "net_blk_virtio": 0,
+        "acpi_pm_fw_i2c": 26,
+        "core_kobj_misc": 375
+      },
+      "dde_shim_multiplier_vs_igc": 2.99,
+      "sample_mm_drm_symbols": [
+        "__alloc_pages_noprof",
+        "__drm_atomic_helper_connector_destroy_state",
+        "__drm_atomic_helper_connector_duplicate_state",
+        "__drm_atomic_helper_connector_reset",
+        "__drm_atomic_helper_crtc_destroy_state",
+        "__drm_atomic_helper_crtc_duplicate_state",
+        "__drm_atomic_helper_plane_destroy_state",
+        "__drm_atomic_helper_plane_duplicate_state",
+        "__drm_atomic_state_free",
+        "__drm_dev_dbg",
+        "__drm_err",
+        "__folio_lock"
+      ]
+    }
+  ]
+}

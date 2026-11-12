@@ -1,0 +1,12 @@
+{
+  "experiment": "Exp-B4",
+  "total_ops_per_mode": 32768,
+  "rpc_per_op_baseline": {"mops_s": 0.1263, "cyc_per_op_p50": 22158, "cyc_per_op_p95": 38384, "cyc_per_op_p99": 59031},
+  "ioring_doorbell_batches": [
+    {"batch": 1, "mops_s": 0.1090, "speedup_vs_rpc": 0.86, "cyc_per_op_p50": 26351, "cyc_per_op_p95": 37019, "cyc_per_op_p99": 58740},
+    {"batch": 4, "mops_s": 0.4182, "speedup_vs_rpc": 3.31, "cyc_per_op_p50": 6667, "cyc_per_op_p95": 10196, "cyc_per_op_p99": 16104},
+    {"batch": 8, "mops_s": 0.8465, "speedup_vs_rpc": 6.70, "cyc_per_op_p50": 3344, "cyc_per_op_p95": 4957, "cyc_per_op_p99": 8107},
+    {"batch": 16, "mops_s": 1.6911, "speedup_vs_rpc": 13.39, "cyc_per_op_p50": 1703, "cyc_per_op_p95": 2417, "cyc_per_op_p99": 3830},
+    {"batch": 32, "mops_s": 3.1074, "speedup_vs_rpc": 24.61, "cyc_per_op_p50": 886, "cyc_per_op_p95": 1467, "cyc_per_op_p99": 2155}
+  ]
+}

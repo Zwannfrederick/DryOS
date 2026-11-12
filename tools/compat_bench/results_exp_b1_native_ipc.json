@@ -1,0 +1,26 @@
+{
+  "experiment": "Exp-B1",
+  "source": "Native DRY OS v0.1.0 (Milestone 2B, 88/88 QEMU/KVM q35 ~3.114 GHz TSC)",
+  "usr_syscall_bench": [],
+  "ipc_bench_samples": [
+    "[DRY-IPC-BENCH] cpus=1 ep_lookup=95..97..109 send_recv=2084..2118..2959 call_reply=1971..2017..3153 same_cpu=1971..2017..3153 cross_cpu=1971..2017..3153 contended=6695..7863..8725",
+    "[DRY-IPC-BENCH2] cpus=1 notif_sig_wait=233..237..253 cap_transfer=2460..2497..3333 sched_wakeup=1055..1068..2114 prio_donate=179..182..252 svc_startup=48511..74572..74572",
+    "[DRY-IPC-BENCH] PASS: cpus=1 metrics=11/11 leaked_frames=0",
+    "[DRY-IPC-BENCH] cpus=2 ep_lookup=96..101..121 send_recv=3366..3771..13823 call_reply=6624..15780..22279 same_cpu=6624..15780..22279 cross_cpu=6438..7353..7639 contended=11062..23350..30628",
+    "[DRY-IPC-BENCH2] cpus=2 notif_sig_wait=233..237..285 cap_transfer=7508..8687..24857 sched_wakeup=3455..12017..12956 prio_donate=179..182..251 svc_startup=49398..66384..66384",
+    "[DRY-IPC-BENCH] PASS: cpus=2 metrics=11/11 leaked_frames=0",
+    "[DRY-IPC-BENCH] cpus=4 ep_lookup=97..99..132 send_recv=3030..5261..6002 call_reply=6229..7977..20465 same_cpu=6229..7977..20465 cross_cpu=6409..7837..9285 contended=9666..11909..13537",
+    "[DRY-IPC-BENCH2] cpus=4 notif_sig_wait=233..237..249 cap_transfer=7154..8412..9751 sched_wakeup=3238..4145..5333 prio_donate=178..184..249 svc_startup=52614..72768..72768",
+    "[DRY-IPC-BENCH] PASS: cpus=4 metrics=11/11 leaked_frames=0"
+  ],
+  "irq_bench_samples": [
+    "[DRY-IRQ-BENCH] PASS: cpus=1 samples=64 ioport_inb_p50_cyc=8746 ioport_inb_p95_cyc=8961 ioport_inb_p99_cyc=12052 irq_top_p50_cyc=12790 irq_top_p95_cyc=13081 irq_top_p99_cyc=15821 irq_ack_p50_cyc=7593 irq_ack_p95_cyc=7626 irq_ack_p99_cyc=7798 irq_wake_p50_cyc=13750 irq_wake_p95_cyc=13795 irq_wake_p99_cyc=13921",
+    "[DRY-IRQ-BENCH] PASS: cpus=2 samples=64 ioport_inb_p50_cyc=8791 ioport_inb_p95_cyc=8884 ioport_inb_p99_cyc=10671 irq_top_p50_cyc=12928 irq_top_p95_cyc=14094 irq_top_p99_cyc=28184 irq_ack_p50_cyc=7695 irq_ack_p95_cyc=7832 irq_ack_p99_cyc=25081 irq_wake_p50_cyc=15905 irq_wake_p95_cyc=16504 irq_wake_p99_cyc=32519",
+    "[DRY-IRQ-BENCH] PASS: cpus=4 samples=64 ioport_inb_p50_cyc=8754 ioport_inb_p95_cyc=8874 ioport_inb_p99_cyc=15030 irq_top_p50_cyc=12883 irq_top_p95_cyc=13979 irq_top_p99_cyc=25918 irq_ack_p50_cyc=7671 irq_ack_p95_cyc=7849 irq_ack_p99_cyc=9483 irq_wake_p50_cyc=17662 irq_wake_p95_cyc=19391 irq_wake_p99_cyc=26110"
+  ],
+  "p4_e2e_summary": [
+    "[PASS] p4a_virtio_blk_persist_across_reboots_e2e: 2x_boot_persisted=true pbkdf2_gen=2 lock_diff=868726 leaked_frames=0/0 (11.09s).",
+    "[PASS] p4b_powercut_and_superblock_recovery_e2e: sigkill_recovered=true ([DRY-INIT] Mounted /persist (DRYFS_v1) fresh=false tx_seq=5 recovered=true) leaked_frames=0 (6.40s).",
+    "[PASS] p4c_vault_dma_devws_security_e2e: dma_denied=2 pci_quiesce=2 vault_denied=1 leaked_frames=0 (4.54s)."
+  ]
+}

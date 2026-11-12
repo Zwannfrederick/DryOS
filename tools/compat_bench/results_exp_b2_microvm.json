@@ -1,0 +1,83 @@
+{
+  "experiment": "Exp-B2",
+  "host_kernel": "7.2.14-zen1-1-zen",
+  "guest_vmlinuz": "/lib/modules/6.18.62-1-lts/vmlinuz",
+  "initramfs_kib": 763.0,
+  "profiles": [
+    {
+      "profile": "uvm_128m_demand",
+      "guest_mem": "128M",
+      "mem_prealloc_vfio_model": false,
+      "cold_start_ms": {
+        "runs": 5,
+        "min": 883.71,
+        "p50": 902.8,
+        "max": 961.95
+      },
+      "warm_hlt_wakeup_rtt_us": {
+        "samples": 100,
+        "inter_ping_sleep_ms": 15,
+        "min": 120.45,
+        "p50": 199.76,
+        "p95": 333.68,
+        "p99": 1290.49,
+        "max": 2772.75
+      },
+      "quiescent_3s_host_cpu_pct": 1.333,
+      "host_memory": {
+        "VmRSS_mib": 169.58,
+        "RssAnon_mib": 146.89
+      }
+    },
+    {
+      "profile": "uvm_256m_demand",
+      "guest_mem": "256M",
+      "mem_prealloc_vfio_model": false,
+      "cold_start_ms": {
+        "runs": 5,
+        "min": 875.18,
+        "p50": 909.71,
+        "max": 935.45
+      },
+      "warm_hlt_wakeup_rtt_us": {
+        "samples": 100,
+        "inter_ping_sleep_ms": 15,
+        "min": 142.77,
+        "p50": 208.4,
+        "p95": 338.89,
+        "p99": 462.2,
+        "max": 690.76
+      },
+      "quiescent_3s_host_cpu_pct": 1.333,
+      "host_memory": {
+        "VmRSS_mib": 173.7,
+        "RssAnon_mib": 150.95
+      }
+    },
+    {
+      "profile": "uvm_256m_vfio_pinned",
+      "guest_mem": "256M",
+      "mem_prealloc_vfio_model": true,
+      "cold_start_ms": {
+        "runs": 5,
+        "min": 883.58,
+        "p50": 890.47,
+        "max": 902.51
+      },
+      "warm_hlt_wakeup_rtt_us": {
+        "samples": 100,
+        "inter_ping_sleep_ms": 15,
+        "min": 137.3,
+        "p50": 222.45,
+        "p95": 362.66,
+        "p99": 2079.6,
+        "max": 2683.0
+      },
+      "quiescent_3s_host_cpu_pct": 1.333,
+      "host_memory": {
+        "VmRSS_mib": 309.41,
+        "RssAnon_mib": 286.9
+      }
+    }
+  ]
+}

@@ -83,3 +83,8 @@
 
 ### R-10: Çevrimdışı Araç Zinciri ve Önyükleyici Tekrarlanabilirliği
 - **Durum:** `MITIGATED` (`tools/bootstrap_phase1.py` + `tools/phase1-toolchain-lock.json` ile SHA-256 kilitli `.toolchains/` kurulumu tamamlandı).
+
+### R-17: Hibrit Dizüstü (Optimus) GPU IOMMU Grup Paylaşımı, `RTD3` Pil Tüketimi ve VFIO Bellek Sabitleme Maliyeti (Yeni — 12 Kasım 2026)
+- **Durum:** `BOUNDED BY DESIGN` / `OPEN — P5 Bare-Metal` (`ADR-016`, `docs/COMPATIBILITY_ISLANDS_RESEARCH.md` Bölüm 8–9).
+- **Teknik Mekanizma:** (a) Uyuyan bir GPU MicroVM'in vCPU'ları `HLT` durumunda `%1.3` CPU tüketse bile VFIO/IOMMU DMA eşlemesinin misafir RAM'ini kalıcı sabitlemesi (`Exp-B2`: `256 MiB` misafir için `309.41 MiB` `VmRSS`); (b) TigerLake-H dizüstünde `01:00.0` RTX 3050 Ti Mobile cihazının muxless (`0302`) olması, IOMMU Grup 13'ü `00:01.0` PCIe Kök Portuyla paylaşması ve `D0` boşta bırakıldığında `~8–15 W` pil tüketmesi.
+- **Azaltma:** `Kademe 4` GPU MicroVM varsayılan açılışta kesinlikle çalıştırılmaz (*opt-in / on-demand*); birincil ekran taraması her zaman Intel `00:02.0` üzerinde yerel `dry-display` mülkiyetinde kalır; GPU kiralaması sona erdiğinde MicroVM kapatılıp cihaz `FLR` + ACPI `RTD3 D3cold` durumuna indirilir (`P5` fiziksel silikon kabul kapısı).
