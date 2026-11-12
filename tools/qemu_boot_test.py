@@ -22,6 +22,7 @@ from qemu_log_validators import (
 )
 from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_and_display_lines
 from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
+from qemu_p2_validators import run_p2_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -108,7 +109,7 @@ def build_userspace() -> list[pathlib.Path]:
     )
     print(
         "[QEMU-TEST] Building release ELF64 userspace binaries "
-        "(user-hello, user-peer, dry-init, dry-echo, dry-display, dry-input, dry-shell)..."
+        "(user-hello, user-peer, dry-init, dry-echo, dry-display, dry-input, dry-shell, dry-sysmon)..."
     )
     subprocess.check_call(
         [
@@ -136,6 +137,7 @@ def build_userspace() -> list[pathlib.Path]:
             "dry-display",
             "dry-input",
             "dry-shell",
+            "dry-sysmon",
         )
     ]
     for b in bins:
@@ -223,6 +225,7 @@ def write_mbr_esp_image(img_path: pathlib.Path, kernel_elf: pathlib.Path, cmdlin
         ("dry-display", "dry-display.elf"),
         ("dry-input", "dry-input.elf"),
         ("dry-shell", "dry-shell.elf"),
+        ("dry-sysmon", "dry-sysmon.elf"),
     ]
 
     conf_path = BUILD_DIR / "limine.conf"
@@ -918,10 +921,13 @@ def main() -> None:
     run_p1_suite(
         kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
     )
+    run_p2_suite(
+        kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
+    )
 
     print(
-        "\n[QEMU-TEST] ALL 65 DETERMINISTIC QEMU CHECKS "
-        "(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 / P1 FIRST INTERACTION) PASSED."
+        "\n[QEMU-TEST] ALL 79 DETERMINISTIC QEMU CHECKS "
+        "(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 DESKTOP PREVIEW) PASSED."
     )
 
 
