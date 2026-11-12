@@ -1,9 +1,9 @@
 # DRY Desktop, DRY Shell, Açılış Deneyimi ve Paket Mağazası Spesifikasyonu
 
-> **Belge Tarihi:** 11 Kasım 2026  
-> **Durum:** **`PLANNED` (`P2` – `P4` Tasarım Spesifikasyonu)**  
-> **Mevcut Uygulama Tabanı (`DONE`):** `Milestone 1C` (`1df3842`) itibarıyla yalnızca yetenek-kapılı Ring 3 UEFI GOP çerçeve tamponu eşlemesi (`SYS_FB_MAP`) ve statik doğrulama ekranı (`userspace/src/bin/dry_display.rs`, `1280x800x32`) tamamlanmıştır. Bu belgedeki pencere yöneticisi, compositor, `DRY Shell`, `Clean/Diagnostic Boot` ve `DRY Store` bileşenleri henüz kodlanmamıştır (`PLANNED`).  
-> **İlgili Kararlar:** `ADR-007`, `ADR-008`, `ADR-009`, `ADR-010`, `ADR-011`.
+> **Belge Tarihi:** 12 Kasım 2026 (`Milestone 2A-2` / `DRY Desktop Preview` Güncellemesi)  
+> **Durum:** **`IN PROGRESS` (İlk Çekirdek Masaüstü Dilimi `Milestone 2A-2` ile `DONE — 79/79 QEMU`; Tam `P2` – `P4` Katmanları `PLANNED`)**  
+> **Mevcut Uygulama Tabanı (`DONE`):** `Milestone 2A-2` itibarıyla birleşik Ring 3 PS/2 klavye + fare sürücüsü (`dry-input.elf`, `IRQ1`+`IRQ12`), `4 MiB` (`2 x Frame2M`) arka tampon üzerinde `12x16` kirli-dikdörtgen yazılımsal imleç, tamamen Ring 3 çok-pencereli yönetici (`Floating` + 2-sütun `SideBySideTiled`, başlık çubuğu sürükleme, tıklamayla odak/Z-sırası, `[x]` kapatma, `Alt+Tab`, `Alt+T`) ve iki eşzamanlı izole `Userspace` penceresi (`dry-shell.elf` `0x0102` + `dry-sysmon.elf` `0x0103`) tamamlanıp `79/79` QEMU testiyle doğrulanmıştır (`ADR-013`). `Stacking/Tabbed` grupları, `Global Menu`, ortak `Action API`, `Clean/Diagnostic Boot` ve `DRY Store` bileşenleri sıradaki `PLANNED` hedeflerdir.  
+> **İlgili Kararlar:** `ADR-007`, `ADR-008`, `ADR-009`, `ADR-010`, `ADR-011`, `ADR-012`, `ADR-013`.
 
 ---
 

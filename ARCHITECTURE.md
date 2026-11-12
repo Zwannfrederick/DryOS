@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 12 Kasım 2026 (`Milestone 2A-1` / `P1 First Interaction` Kapanışı)  
-> **Aşama:** Faz 1 (`1df3842`, `69522a3`) + Faz 2 `Milestone 2A-1` (`P1 First Interaction`) Tamamlandı (`65/65` QEMU/KVM Doğrulaması + Canlı PS/2 Klavye -> Ring 3 `dry-input` -> IPC -> `dry-shell` -> Dinamik GOP Compositor Yeşil; `ADR-001` .. `ADR-012` Yürürlükte)  
+> **Durum Tarihi:** 12 Kasım 2026 (`Milestone 2A-2` / `DRY Desktop Preview` Kapanışı)  
+> **Aşama:** Faz 1 (`1df3842`, `69522a3`) + Faz 2 `Milestone 2A-1` (`P1 First Interaction`) + **`Milestone 2A-2` (`DRY Desktop Preview`)** Tamamlandı (`79/79` QEMU/KVM Doğrulaması: Gerçek PS/2 Klavye [`IRQ1`] + PS/2 Fare [`IRQ12`] -> Birleşik Ring 3 `dry-input` -> Ring 3 Çok-Pencereli Compositor [`dry-display` + Yazılımsal İmleç + `Floating`/`SideBySideTiled` WM] -> Eşzamanlı İzole `dry-shell` & `dry-sysmon` Yeşil; `ADR-001` .. `ADR-013` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya otomatik testlerle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak deney/bare-metal ile yanlışlanmaya açık tasarım iddiası.  
@@ -126,6 +126,23 @@
   - **`dry-shell.elf` (`SecDomain::Userspace`, `0x0102`):** Sıfır donanım ve sıfır `Framebuffer` yetkisiyle çalışır (`ADR-007`). Girdi düzenleyici (`InputEditor`), ayrıştırıcı (`parse_command`), 64-satırlık kaydırma tamponu (`ShellEngine`) ve `SharedTerminalSurface` (`3.904 B <= Frame4K`) projeksiyonu ayrıştırılmıştır; `help`, `clear`, `system`, `uptime`, `echo`, `overflow-test`, `crash-input` ve `shutdown` komutlarını gerçek telemetriyle yürütür.
   - **`dry-display.elf` (`SecDomain::RootSystem`, `0x0004`):** `Order2MiB` (`Frame2M`) önbellekli (`WB`) RAM arka tamponu tutar, `dry-shell`'in `SharedTerminalSurface` sayfasını salt-okunur (`USER_RO`) eşler ve yalnızca `DirtyRegion` dikdörtgenlerini 64-bit yazımlarla GOP MMIO'ya aktarır (tek-satır tuş vuruşu `10.240 px = ~15.3k cyc` [`~5 µs`]; tam pencere `276.224 px = ~463k cyc` [`~149 µs`]; `Alt+Ok` ile gerçek taşınabilir floating pencere doğrulandı).
 
+### 2.6. `Milestone 2A-2` (`DRY Desktop Preview`): Birleşik PS/2 Fare (`IRQ12`), Yazılımsal İmleç, Ring 3 Pencere Yöneticisi ve Çok-Uygulamalı İzolasyon (`[DOĞRULANDI — 79/79 QEMU/KVM]`)
+
+- **Donanım ve Çekirdek Sınırı (`kernel/src/irq/mod.rs`, `cspace/objects.rs`, `syscall/cold.rs` — `0` Çekirdek UI Kodu):**
+  - `ACPI MADT` üzerinden keşfedilen `ISA IRQ 12` (`PS/2 AUX` fare -> `GSI 12` -> `vec = 0x3c`) `IOAPIC` tablosuna eklenmiştir (`[DRY-IOAPIC] PASS: ... irq12_gsi=12 irq12_vec=0x3c`).
+  - `cspace_vspace_unmap_2m` ve `VSPACE_MAP_OP_UNMAP_2M (5)` eklenerek `Order2MiB` arka tamponların çıkışta tam SMP TLB shootdown ile sökülmesi sağlanmıştır (`leaked_frames = 0`).
+  - `UserSysInfo` (`104 B`, sıfır çekirdek adresi) hat bazlı `irq1_delivered`, `irq12_delivered` ve 64 B önbellek hizalı CPU-başına `total_ipc_msgs` sayaçlarıyla genişletilmiştir; sıcak `rust_syscall_dispatch` çerçevesi `248 B`, soğuk `sys_cold_dispatch` çerçevesi `216 B` korunmuştur.
+- **Tek `i8042` Denetleyici Sahibi `dry-input` (`userspace/src/{ps2,input}.rs`, `bin/dry_input.rs`):**
+  - Klavye ve fare aynı `0x60`/`0x64` portlarını paylaştığından `IRQ1` ve `IRQ12` tek `dry-input` sürecinde birleştirilmiştir (`ADR-013`, `INV-WM-01`). `init_ps2_aux_mouse` yardımcı portu (`0xA8`), `CCB` `IRQ1|IRQ12` bitlerini ve `0xD4 -> 0xF6 / 0xF4` akış kipini `ACK (0xFA)` / `RESEND (0xFE)` doğrulaması ve başsız *fallback* ile kurar.
+  - Kesme uyanışında `status & 0x01 (OBF)` döngüsü `status & 0x20 (AUX_OBF)` bitine göre baytları klavye veya 3-baytlık fare çözücüsüne (`bit 3 == 1` senkron kilidi + taşma elemesi) ayırır; ardışık göreli hareketler `InputRingQueue::push_coalescing` ile kayıpsız birleştirilir (`46+43` eşzamanlı kesme selinde `desync = 0`).
+- **Arka Tampon Denetimi, Yazılımsal İmleç ve Ring 3 Pencere Yöneticisi (`userspace/src/{surface,wm,compositor}.rs`, `bin/dry_display.rs`):**
+  - **Arka Tampon Denetimi:** `1280x800x32` (`pitch = 5120`, `mapped_bytes = 4.096.000 B` = `1.000 x Frame4K`) doğrusal GOP alanı için `2 x Frame2M = 4.194.304 B` (`4 MiB WB RAM`) arka tampon ayrılır ve kanonik/hizalama sınırları doğrulanır (`INV-WM-05`).
+  - **Sıfır-İzli Yazılımsal İmleç:** `WB` arka tampon imleçsiz sahneyi saklar; `12x16` imleç yalnızca GOP MMIO tarama satırı aktarımında anlık bindirilir. Fare hareketi yalnızca eski ve yeni `12x16` dikdörtgenleri (`92` değişen piksel, `cur p50 = ~8.8k..10.8k cyc` [`~3 µs`]) günceller.
+  - **Sıfır-UB Atomik Yüzey ve Çok-Pencereli WM:** Paylaşımlı `Frame4K` üzerinde ham `&mut` referansı yasaktır; atomik tek/çift `seq` çitiyle `SurfaceSnapshot::capture_from_ro` okunur (`INV-WM-04`). Ring 3 `WindowManager` (`MAX_WINDOWS = 4`) Z-sırası, tıklamayla odak/öne getirme, başlık çubuğundan sürükleme, `[x]` kapatma, `Alt+Tab` ve 2-sütun `SideBySideTiled` (`Alt+T` / üst bar düğmesi) kiplerini rozet (`owner_badge`) doğrulamasıyla yönetir.
+- **Eşzamanlı İzole Ring 3 Uygulamaları (`dry-shell` `0x0102` + `dry-sysmon` `0x0103`):**
+  - **Pencere A (`dry-shell.elf`):** Odak kazandığında klavye olaylarını `WM_OP_POLL_KEY` üzerinden alır ve komutları yürütür.
+  - **Pencere B (`dry-sysmon.elf`):** Ayrı `SecDomain::Userspace` kompartmanı, ayrı `VSpace` ve ayrı `CSpace` içinde gerçek `SYS_SYSINFO` telemetrisini (CPU/APIC, PMM bellek çubuğu, `Syscalls`, `IPC`, `IRQ1`, `IRQ12`) canlı çizer; `#UD` çöküşü enjekte edildiğinde süpervizör ve WM yalnızca Pencere B'yi temizlerken Pencere A kesintisiz çalışmaya devam eder (`INV-WM-06`).
+
 ---
 
 ## 3. Zamanlayıcı Mimarisi (`H1` Özeti)
@@ -158,7 +175,7 @@
 
 ## 6. Ürün Katmanı, Kurulum Profilleri, Açılış Hattı ve Paketleme Mimarisi (`ADR-008` .. `ADR-011`, `[PLANNED]`)
 
-> **Kapsam Notu:** Aşağıdaki ürün ve kullanıcı alanı bileşenleri mimari olarak kesinleştirilmiş tasarım hedefleridir (`PLANNED`); `Milestone 2A-1` (`P1 First Interaction`) itibarıyla kök süpervizör (`dry-init.elf`), örnek IPC servisi (`dry-echo.elf`), Ring 3 PS/2 girdi sürücüsü (`dry-input.elf`), izole etkileşimli kabuk (`dry-shell.elf`) ve çift-tamponlu dinamik GOP masaüstü compositor temeli (`dry-display.elf`) uygulanıp `65/65` QEMU testiyle doğrulanmıştır (`[DOĞRULANDI]`). Ayrıntılı yol haritası `docs/PRODUCT_ROADMAP.md`, masaüstü/kabuk spesifikasyonu ise `docs/DRY_DESKTOP_SPEC.md` içindedir.
+> **Kapsam Notu:** Aşağıdaki ürün ve kullanıcı alanı bileşenleri mimari olarak kesinleştirilmiş tasarım hedefleridir (`PLANNED`); `Milestone 2A-2` (`DRY Desktop Preview`) itibarıyla kök süpervizör (`dry-init.elf`), örnek IPC servisi (`dry-echo.elf`), birleşik PS/2 klavye+fare girdi sürücüsü (`dry-input.elf`, `IRQ1`+`IRQ12`), çok-pencereli Ring 3 masaüstü compositor/WM (`dry-display.elf`: yazılımsal imleç, `Floating` + `SideBySideTiled`) ve iki eşzamanlı izole `Userspace` uygulaması (`dry-shell.elf` `0x0102`, `dry-sysmon.elf` `0x0103`) uygulanıp `79/79` QEMU testiyle doğrulanmıştır (`[DOĞRULANDI]`). Ayrıntılı yol haritası `docs/PRODUCT_ROADMAP.md`, masaüstü/kabuk spesifikasyonu ise `docs/DRY_DESKTOP_SPEC.md` içindedir.
 
 - **Tek Çekirdek, İki Kurulum Profili (`ADR-008` — *One Microkernel, Multiple Experiences*):**
   - Aynı `dry-kernel` ikilisi, aynı `Endpoint`/`Notification`/`IoRing` IPC katmanı, aynı `ADR-007` güvenlik alanları ve aynı `drypkg` altyapısı üzerinde iki ayrı profil kurulur:

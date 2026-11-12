@@ -164,7 +164,7 @@
 
 ## ADR-009: `DRY Desktop` / `DRY Shell` Pencere Yönetimi, Görsel Mimari ve Ortak `Action API`
 
-- **Durum:** Kabul Edildi — Tasarım Spesifikasyonu (`PLANNED — P2`, 11 Kasım 2026; detaylar: `docs/DRY_DESKTOP_SPEC.md`)
+- **Durum:** Kabul Edildi — İlk Dilim (`Floating` + 2-Sütun `Tiling` + Yazılımsal İmleç + 2 İzole Uygulama) `Milestone 2A-2` ile Uygulandı (`DONE — 79/79` QEMU/KVM); Tam `Stacking/Tabbed`, `Global Menu` ve `Action API` (`PLANNED — P2`; detaylar: `docs/DRY_DESKTOP_SPEC.md`)
 - **Bağlam:** Mevcut masaüstü ortamları genellikle klavye-odaklı hız (tiling WM'ler) ile keşfedilebilirlik/rahatlık (geleneksel masaüstleri) arasında kullanıcıyı ikili bir seçime zorlar; görsel efektler ise ya düşük donanımı ezer ya da çekirdek/sürücü katmanına sızar.
 - **Karar:**
   1. **Özgün Birleşik Tasarım Dili:** `DRY Shell`; Hyprland'in dinamik döşeme (*tiling*), çalışma alanı ve klavye hakimiyetini; KDE Plasma'nın zengin özelleştirme ve pencere kurallarını; macOS/GNOME çizgisinin tutarlı menü, global arama ve sadeliğini doğrudan kopyalamadan DRY OS'ye özgü tek bir tasarım dilinde birleştirir.
@@ -236,6 +236,33 @@
   3. **`INV-IRQ-03 (SingleOwnerOneShotIrq)`:** Her `GSI` aynı anda en fazla bir canlı `IrqCap` sahibine bağlanabilir; kesme anında maskelenir ve çift `SYS_IRQ_ACK` reddedilir.
   4. **`INV-IRQ-04 (RevokeMasksHardwareLine)`:** `IrqCap` iptal edildiğinde veya sahip süreç sonlandığında donanım hattı maskelenir ve eşzamanlı kesmeler panik/UAF üretmeden düşürülür.
   5. **`INV-IRQ-05 (NoFramebufferInShell)`:** `SecDomain::Userspace` içindeki kabuk/uygulama süreçleri doğrudan `CapObjectKind::Framebuffer` yetkisi alamaz (`Err(TransferEscalation)`).
+
+---
+
+## ADR-013: Birleşik `i8042` Denetleyici Sahipliği (`IRQ1` + `IRQ12`), Sıfır-UB Atomik Yüzey Anlık Görüntüsü ve Ring 3 Çok-Pencereli Compositor Mimarisi
+
+- **Durum:** Kabul Edildi ve `Milestone 2A-2` (`DRY Desktop Preview`) ile Uygulandı (`79/79` QEMU/KVM, 12 Kasım 2026)
+- **Bağlam:** PS/2 klavye (`IRQ1`) ve PS/2 fare (`IRQ12`) aynı `i8042` denetleyici portlarını (`0x60` veri, `0x64` durum/komut) paylaşır. İki ayrı Ring 3 sürücüsünün bu portlara eşzamanlı erişmesi `CCB` yazmalarını, `0xD4` yardımcı cihaz komut dizilerini ve 3-baytlık fare paket senkronizasyonunu bozar. Ayrıca birden fazla `SecDomain::Userspace` penceresinin (`dry-shell`, `dry-sysmon`) paylaşımlı bellek yüzeylerini `dry-display` ile paylaşırken ham `&mut SharedTerminalSurface` referansı oluşturması Rust'ta eşzamanlı veri yarışı / Tanımsız Davranış (*Undefined Behavior*) doğurur; `1280x800x32` (`4.096.000 B`) GOP çerçeve tamponunu tek `2 MiB` arka tamponla sürmek ise sınır dışı (*OOB*) risk yaratır.
+- **Karar:**
+  1. **Tek `i8042` Denetleyici Sahibi (`dry-input` İçinde Birleşik `IRQ1` + `IRQ12`):**
+     - `0x60`/`0x64` `IoPortCap` yetkileri ve hem `IRQ1` (`vec = 0x31`) hem `IRQ12` (`vec = 0x3c`) `IrqCap` yetkileri yalnızca tek `dry-input` (`RootSystem` `0x0003`) sürecine verilir; çekirdek ikinci bir `IRQ12` bağlamasını `CapError::BusyActiveObject` ile reddeder.
+     - `dry-input` tek bir `Notification` üzerinde `BADGE_IRQ1_KBD (1 << 0)` ve `BADGE_IRQ12_MOUSE (1 << 1)` bitlerini bekler; her uyanışta `status & 0x01 (OBF)` döngüsünde **`status & 0x20 (AUX_OBF)`** bitine göre baytı klavye (`Ps2Decoder`) veya fare (`Ps2MouseDecoder`, `bit 3 == 1` hizalama + `X/Y overflow` elemesi) çözücüsüne yönlendirir ve yalnızca tetiklenen hatlar için `SYS_IRQ_ACK(IRQ_ACK_UNMASK)` çağırır.
+     - Cihazdan bağımsız `InputEvent` şeması sürüm uyumlu genişletilmiştir (`MouseMove = 3`, `MouseButtonDown = 4`, `MouseButtonUp = 5`, `MouseScroll = 6`, `DEV_ID_PS2_MOUSE = 2`, 48-bit `timestamp_tsc` ve kuyrukta ardışık göreli hareket birleştirme `push_coalescing`).
+  2. **Açık `4 MiB` (`2 x Order2MiB`) Arka Tampon Denetimi ve Kirli-Dikdörtgen Yazılımsal İmleç:**
+     - `1280 x 800 x 4 B = 4.096.000 B` (`1.000 x Frame4K`) doğrusal GOP alanı için `dry-display` önyüklemede `required_2m = ceil(mapped_bytes / 2 MiB) = 2` adet bitişik `Frame2M` (`4.194.304 B >= 4.096.000 B`) ayırır, sınırları doğrular ve çıkışta `VSPACE_MAP_OP_UNMAP_2M (5)` ile sıfır sızıntıyla (`leaked_frames = 0`) çözer.
+     - `WB` RAM arka tamponu **imleçsiz temiz sahneyi** tutar; `12x16` yazılımsal imleç yalnızca GOP MMIO tarama satırı kopyası sırasında anlık bindirilir. Böylece fare hareketi yalnızca eski ve yeni `12x16` dikdörtgenleri (`DirtyRegion` içinde ~`92` değişen piksel, `p50 = ~8.8k..10.8k cyc` [`~3 µs`]) günceller; iz bırakmaz ve tam ekran yeniden çizimi yapmaz.
+  3. **Sıfır-UB Atomik `SharedWindowSurface` ve Özel `SurfaceSnapshot`:**
+     - Paylaşımlı `Frame4K` (`3.904 B`) üzerinde hiçbir süreç `&SharedWindowSurface` veya `&mut SharedWindowSurface` oluşturmaz; üretici (`USER_RW`) `AtomicU64`/`AtomicU32`/`AtomicU16` (`Release` tek/çift `seq` çiti) ile yazar, `dry-display` (`USER_RO`) ise `Acquire` yüklemelerle yerel `SurfaceSnapshot` kopyası çıkarır (en fazla 2 iyimser deneme, kilitlenme yok).
+  4. **Tamamen Ring 3 Çok-Pencereli Yöneticisi (`wm.rs`, `0` Çekirdek UI Satırı):**
+     - Pencere kimliği, sahip rozeti (`owner_badge`), Z-sırası, odak, başlık çubuğu sürükleme, `[x]` kapatma, `Alt+Tab` ve `Floating <-> SideBySideTiled` (`Alt+T` / üst çubuk düğmesi) tamamen `dry-display` içinde çalışır.
+     - `dry-shell` (`0x0102`) ve `dry-sysmon` (`0x0103`) ayrı `Userspace` `VSpace` + `CSpace` süreçleridir; `Endpoint` rozetleri çekirdek tarafından damgalandığından çapraz pencere `SURFACE_PRESENT`, girdi okuma, kapatma ve sahte olay enjeksiyonu `SysError::Perm` ile reddedilir.
+- **Test Edilebilir Güvenlik Invariant'ları (`INV-WM-01` .. `INV-WM-06`):**
+  1. **`INV-WM-01 (SingleI8042ControllerOwner)`:** `0x60`/`0x64` portları ve `IRQ1`/`IRQ12` hatları aynı anda yalnızca tek `RootSystem` girdi servisine bağlanabilir.
+  2. **`INV-WM-02 (ZeroKernelWindowPolicy)`:** `dry-kernel` içinde pencere, imleç, Z-sırası, başlık çubuğu veya yazıtipi kodu bulunmaz (`0` satır).
+  3. **`INV-WM-03 (BadgeGatedSurfaceAndFocusInput)`:** Pencere sahibi yalnızca kendi rozetine bağlı yüzeyi güncelleyebilir ve yalnızca odaktaki pencere klavye olayı alabilir.
+  4. **`INV-WM-04 (AtomicSharedSurfaceNoAliasing)`:** Paylaşımlı yüzey belleğine yalnızca atomik ilkellerle erişilir; çapraz süreç `USER_RO -> USER_RW` yükseltmesi `CapError::InsufficientRights` ile reddedilir.
+  5. **`INV-WM-05 (AuditedBackingBufferBounds)`:** Arka tampon kapasitesi her zaman doğrulanmış `mapped_bytes` değerini tam kapsar; kanonik taşma ve hizasız eşlemeler çekirdekte reddedilir.
+  6. **`INV-WM-06 (AppCrashContainment)`:** Bir uygulama penceresi (`dry-sysmon`) `#UD`/`#PF` ile çöktüğünde süpervizör ve WM kaynağı temizler; diğer pencere (`dry-shell`) ve masaüstü kesintisiz çalışmaya devam eder.
 
 
 

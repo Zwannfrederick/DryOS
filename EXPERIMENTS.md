@@ -850,3 +850,43 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
   2. **KVM Kesme Fırtınası Penceresi Kalibrasyonu:** `264` ardışık KVM PIO/IPI kesmesi `2.000.000` TSC döngüsünden uzun sürdüğü için fırtına penceresi `64.000.000` TSC (`~20 ms`) değerine kalibre edildi.
   3. **Görsel `screendump` Denetiminde Yakalanan 3 Telemetri Etiketi Hatası:** `docs/p1_interactive_shell.png` piksel incelemesinde `ApicMode` (`1=x2APIC-MSR`, `2=xAPIC-MMIO`) sıra tersliği, geri kazanılan `BOOTLOADER_RECLAIMABLE` RAM toplamı (`238/244 MiB`) ve pencere taşıma sırasında `IRQ` rozetinin sıfırlanması yakalanıp düzeltildi.
 
+---
+
+## Bölüm M — Faz 2 `Milestone 2A-2` (`DRY Desktop Preview`): Birleşik PS/2 Fare (`IRQ12`), Yazılımsal İmleç, Ring 3 Pencere Yöneticisi ve Arka Tampon Denetimi
+
+- **Tarih:** 12 Kasım 2026
+- **Kapsam:** ACPI MADT `IRQ12` (`GSI 12 -> vec 0x3c`), `VSPACE_MAP_OP_UNMAP_2M`, tek `i8042` sahibi `dry-input.elf` (`IRQ1` + `IRQ12`, `AUX_OBF` ayrımı, 3-bayt senkron kilidi, `push_coalescing`), sıfır-UB atomik `SharedWindowSurface` + `SurfaceSnapshot`, `4 MiB` (`2 x Frame2M`) arka tampon üzerinde `12x16` kirli-dikdörtgen yazılımsal imleç, Ring 3 `WindowManager` (`Floating` + `SideBySideTiled`) ve iki eşzamanlı izole `Userspace` penceresi (`dry-shell.elf` `0x0102` + `dry-sysmon.elf` `0x0103`).
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  # Yalnızca Milestone 2A-2 QMP fare + çoklu pencere + çökme izolasyonu + WM güvenlik testleri (14/14)
+  python3 tools/qemu_boot_test.py --p2-only
+
+  # Tam regresyon + P1 + P2 masaüstü paketi (56 Faz 0-1C + 9 P1 + 14 P2 = 79/79)
+  python3 tools/qemu_boot_test.py
+  ```
+
+### M.1. Doğrusal GOP ve `Order2MiB` RAM Arka Tampon Denetimi (`[DRY-DISPLAY]`)
+
+- **Donanım GOP Geometrisi:** `1280 x 800 x 32 bpp`, `pitch = 5.120 B`, `raw_bytes = 4.096.000 B` (`1.000 x Frame4K`, `0x8000_0000` `FrameState::ReservedOrMmio`).
+- **Eski Sınır Riski ve Uygulanan Denetim:** Tek bir `Order2MiB` (`2.097.152 B`) çerçeve `1280x800x32` tamponunun yalnızca ilk `409.6` satırını kapsar. `Milestone 2A-2` ile `dry-display`, `required_2m = ceil(4.096.000 / 2.097.152) = 2` adet bitişik `Frame2M` (`back_cap = 4.194.304 B >= 4.096.000 B`) ayırır (`0x0000_7b00_0000_0000..+4 MiB` `WB`), çalışma zamanında `gop_mapped <= back_cap` doğrular ve kapanışta `VSPACE_MAP_OP_UNMAP_2M` ile sıfır çerçeve sızıntısıyla (`leaked_frames = 0`) serbest bırakır. Kanonik sınır taşması ve hizasız `Frame2M`/`SYS_FB_MAP` eşlemeleri `fb_backing_oob_rejected` (`exit=35`) ile reddedilir.
+
+### M.2. Fare -> Compositor -> GOP Gecikme ve Çok-Pencereli Çizim Ölçümleri (`~3.111 MHz` TSC, `p50 / p95 / p99`)
+
+| Metrik (`p50 / p95 / p99` döngü) | `2 vCPU` (`p2_perf_bench_2cpu`) | `1 / 2 / 4 vCPU` (`p2_desktop_qmp_*`) | Süre (`2 vCPU p50`) & Mimari Açıklama |
+| :--- | :---: | :---: | :--- |
+| `irq12_drain` (PS/2 3-bayt paket + `OBF` + `SYS_IRQ_ACK`) | **`248.119 / 420.407 / 455.106`** | `249.775` / `240.477` / `253.123` (`p50`) | `~79.8 µs`: `3x inb(0x60)` + `4x inb(0x64)` KVM PIO VM-exit + `IOAPIC` unmask |
+| `in2comp` (`dry-input` TSC -> `dry-display` WM girişi) | **`67.862 / 92.741 / 169.404`** | `43.572` / `70.839` / `78.973` (`p50`) | `~21.8 µs`: 4-yazmaçlı IPC uyanışı + `WindowManager::handle_input_event` |
+| `cur` (Yazılımsal imleç `DirtyRegion` MMIO aktarımı, `92 px`) | **`10.872 / 16.101 / 18.326`** | `20.209` / `22.641` / `21.751` (selde **`5.528`**) | **`~3.5 µs` (`~1.8 µs` selde)**: yalnızca eski+yeni `12x16` kutu; `0` tam-ekran çizim |
+| `drag` (Başlık çubuğundan pencere sürükleme, `16` adım) | **`503.295 / 718.365 / 718.365`** | `443.132` / `536.979` / `546.323` (`p50`) | `~161.8 µs`: arka plan onarımı + Z-sıralı kırpılmış sahne + birleşik MMIO kopyası |
+| `pres1w` (Tek pencere aktifken `SURFACE_PRESENT`) | **`41.997 / 48.670 / 353.419`** | — (`p2_cursor_zorder`: `52.619` `p50`) | `~13.5 µs` tek-satır (`25.312 px`); `~113.6 µs` tam pencere (`213.472 px`) |
+| `pres2w` (İki pencere aktifken `SURFACE_PRESENT`) | **`71.525 / 344.631 / 365.707`** | `68.656` / `78.120` / `99.344` (`p50`) | `~23.0 µs` tek-satır; `~110.8 µs` tam pencere (`dry-shell` + canlı `dry-sysmon`) |
+| Çekirdek Yığın Çerçeveleri (`objdump -d`) | **`248 B` / `216 B` / `40 B`** | `rust_syscall_dispatch` (`0xf8`) / `cold` (`0xd8`) / `irq_ack` (`0x28`) | **`+0 B` büyüme** (`104 B` `UserSysInfo` ve `UNMAP_2M` eklendiği hâlde) |
+
+### M.3. Doğrulanan `14/14` Yeni `Milestone 2A-2` Senaryosu (`Toplam 79/79`) ve Yakalanan Bulgular
+
+- **QMP Gerçek Fare + Çoklu Pencere + Görsel `screendump` Senaryoları (`10/10`, `exit=33`, `leaked_frames=0`):** `p2_desktop_qmp_{1,2,4}cpu` (`cursor_px_diff = 92`, `drag_px_diff = ~150.2k`, `docs/p2_desktop_preview.png`), `p2_desktop_headless_2cpu` (`-vga none`), `p2_desktop_qmp_xapic_2cpu`, `p2_cursor_zorder_tiling_2cpu` (ekran sınırı kelepçesi `clamp_hits=2`, Z-sırası örtüşme kırpması, `Alt+Tab`, `Alt+T`/üst bar `SideBySideTiled` geçişi ve `[x]` kapatma), `p2_app_crash_isolation_2cpu` (`Window B` `#UD` çöküşü yalıtılırken `Window A`'da `window-a-survived`), `p2_irq_interleave_flood_2cpu` (`IRQ1=43` + `IRQ12=46` eşzamanlı selde `desync=0`), `p2_wm_security_rejection_2cpu` (`unauth_rej=6`, `inval_rej=1`) ve `p2_perf_bench_2cpu`.
+- **Çekirdek Negatif Güvenlik Senaryoları (`4/4`, `exit=35`):** `irq12_unauth_bind_rejected` (`DomainViolation`/`Perm`), `irq12_split_owner_rejected` (`BusyActiveObject`), `wm_surface_ro_escalation_rejected` (`InsufficientRights`), `fb_backing_oob_rejected` (`oob=Inval, align=Inval, back=PagingError`).
+- **Geliştirme Sırasında Yakalanıp Çözülen 2 Gerçek Bulgu:**
+  1. **QEMU `hw/input/ps2.c` 16-Bayt Konak Kuyruğu Sınırı:** Tek bir QMP `input-send-event` ile `> 127 px` (`750 px`) hareket gönderildiğinde QEMU konak PS/2 kuyruğu (`16 B` = en fazla `5` adet 3-baytlık paket) taşarak kalan paketleri düşürdü; QMP adımları `<= 100 px` parçalara bölündüğünde `1:1` piksel doğruluğu sağlandı ve `dry-input` tarafında `desync = 0` korundu.
+  2. **Seri Satır Tamponu Kırpılması (`128 B -> 192 B`):** `userspace/src/lib.rs` içindeki `LineBuilder` `128 B` sınırında `[DRY-WM-BENCH]` satırının son metriklerini kırptığı için `192 B` kapasiteye çıkarıldı.
+
