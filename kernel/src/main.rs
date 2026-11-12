@@ -268,11 +268,19 @@ extern "C" fn bsp_kmain() -> ! {
         if cmdline.contains("cspace_fault=") {
             cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
         }
-        if cmdline.contains("interactive=1") || cmdline.contains("desktop=1") {
+        if cmdline.contains("interactive=1")
+            || cmdline.contains("desktop=1")
+            || cmdline.contains("desktop3=1")
+        {
             syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
             irq::tests::maybe_run_p1_interactive_session(cmdline, smp.cpu_count);
             sched::shutdown_ap_scheduler_service();
-            if cmdline.contains("desktop=1") {
+            if cmdline.contains("desktop3=1") {
+                serial_println!(
+                    "[DRY-BOOT-OK] Milestone 2A-3 (Functional Desktop & Native Apps) {}-vCPU session verified cleanly.",
+                    smp.cpu_count
+                );
+            } else if cmdline.contains("desktop=1") {
                 serial_println!(
                     "[DRY-BOOT-OK] Milestone 2A-2 (DRY Desktop Preview) {}-vCPU multi-window desktop session verified cleanly.",
                     smp.cpu_count

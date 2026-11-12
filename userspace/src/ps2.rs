@@ -277,7 +277,13 @@ impl Ps2Decoder {
                 self.e1_skip = 2;
                 return None;
             }
-            0x00 | 0xAA | 0xEE | 0xFA | 0xFC | 0xFD | 0xFE | 0xFF => {
+            // Note: in i8042 Set-1 translation, `0xAA` is `0x2A | 0x80` (Left Shift break) whenever
+            // Left Shift is currently held; only treat `0xAA` as BAT self-test if Left Shift is up!
+            0xAA if (self.raw_mod_bits & MOD_BIT_LSHIFT) == 0 => {
+                self.e0_pending = false;
+                return None;
+            }
+            0x00 | 0xEE | 0xFA | 0xFC | 0xFD | 0xFE | 0xFF => {
                 self.e0_pending = false;
                 if byte == 0x00 || byte == 0xFF {
                     self.invalid_bytes = self.invalid_bytes.wrapping_add(1);

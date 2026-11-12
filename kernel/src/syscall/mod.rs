@@ -71,6 +71,8 @@ pub const SYS_IOPORT_RW: u64 = 22;
 pub const SYS_SYSINFO: u64 = 23;
 pub const SYS_FRAME_ALLOC: u64 = 24;
 pub const SYS_VSPACE_MAP: u64 = 25;
+pub const SYS_PROC_LIST: u64 = 26;
+pub const SYS_PROC_KILL: u64 = 27;
 
 pub const MAX_WRITE_DEBUG_LEN: usize = 512;
 

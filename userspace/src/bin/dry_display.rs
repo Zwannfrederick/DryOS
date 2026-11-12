@@ -14,27 +14,27 @@
 #![no_main]
 
 use core::cell::UnsafeCell;
-use core::ptr::write_volatile;
 
-use dry_userspace::compositor::{
-    flush_video_stores, pack_rgb, DesktopCompositor, Palette,
-};
-use dry_userspace::gfx::{glyph_8x16, Rect, BOX_HORIZ};
+use dry_userspace::action::LatencyRing;
+use dry_userspace::compositor::DesktopCompositor;
+use dry_userspace::display_banner::run_legacy_banner_mode;
+use dry_userspace::gfx::Rect;
 use dry_userspace::input::InputEvent;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::surface::{TERM_COLS, TERM_ROWS};
-use dry_userspace::wm::{WindowManager, WindowRole, WmInputAction, MAX_WINDOWS};
+use dry_userspace::wm::{WindowManager, WindowRole, WmInputAction, MAX_WINDOWS, SUP_BIT_WM_ACTION};
+use dry_userspace::wm_ipc::{emit_wm_exit_telemetry, handle_wm_admin_op, wm_log_line as log_line};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_query, sys_cap_revoke, sys_exit,
-    sys_fb_map, sys_frame_alloc, sys_ipc_call_inline, sys_ipc_recv_ext, sys_ipc_reply_inline,
+    sys_fb_map, sys_frame_alloc, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_send_inline,
     sys_notify_signal, sys_vspace_map, sys_write_debug, UserCapInfo, UserFbInfo, UserIpcRecvExt,
-    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_DISPLAY_DONE, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
-    IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SURFACE_ATTACH,
-    IPC_OP_SURFACE_FOCUS, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF,
-    IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY, IPC_OP_WIN_POLL_EVENT,
-    IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_QUERY_STATE,
-    IPC_OP_WM_TOGGLE_TILING, RIGHT_RECV, VSPACE_MAP_OP_2M_RW, VSPACE_MAP_OP_4K_RO,
-    VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
+    BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN,
+    IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_FOCUS,
+    IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE,
+    IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY, IPC_OP_WIN_POLL_EVENT, IPC_OP_WIN_WAIT_EVENT,
+    IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_POLL_ACTION, MSG_FLAG_NON_BLOCKING,
+    RIGHT_RECV, VSPACE_MAP_OP_2M_RW, VSPACE_MAP_OP_4K_RO, VSPACE_MAP_OP_UNMAP_2M,
+    VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const FB_MAP_VADDR: u64 = 0x1000_0000;
@@ -50,201 +50,6 @@ unsafe impl<T> Sync for SingleThreadCell<T> {}
 static WM_STATE: SingleThreadCell<WindowManager> = SingleThreadCell(UnsafeCell::new(WindowManager::new()));
 static COMP_STATE: SingleThreadCell<DesktopCompositor> =
     SingleThreadCell(UnsafeCell::new(DesktopCompositor::uninit()));
-
-struct LatencyRing {
-    samples: [u32; 64],
-    count: usize,
-}
-
-impl LatencyRing {
-    const fn new() -> Self {
-        Self {
-            samples: [0; 64],
-            count: 0,
-        }
-    }
-
-    #[inline]
-    fn record(&mut self, cyc: u64) {
-        let idx = self.count & 63;
-        self.samples[idx] = cyc.min(u32::MAX as u64) as u32;
-        self.count = self.count.wrapping_add(1);
-    }
-
-    fn percentiles(&self) -> (u64, u64, u64) {
-        let n = self.count.min(64);
-        if n == 0 {
-            return (0, 0, 0);
-        }
-        let mut tmp = [0u32; 64];
-        tmp[..n].copy_from_slice(&self.samples[..n]);
-        for i in 1..n {
-            let key = tmp[i];
-            let mut j = i;
-            while j > 0 && tmp[j - 1] > key {
-                tmp[j] = tmp[j - 1];
-                j -= 1;
-            }
-            tmp[j] = key;
-        }
-        (
-            tmp[(n - 1) * 50 / 100] as u64,
-            tmp[(n - 1) * 95 / 100] as u64,
-            tmp[(n - 1) * 99 / 100] as u64,
-        )
-    }
-}
-
-fn log_line(lb: &LineBuilder) {
-    let mut out = [0u8; 196];
-    let s = lb.as_bytes();
-    let n = s.len().min(out.len() - 1);
-    out[..n].copy_from_slice(&s[..n]);
-    out[n] = b'\n';
-    let _ = sys_write_debug(&out[..=n]);
-}
-
-#[inline]
-fn put_px_mmio(base: *mut u32, stride_px: usize, w: usize, h: usize, x: usize, y: usize, color: u32) {
-    if x < w && y < h {
-        // SAFETY: `(x, y)` lies strictly inside mapped GOP framebuffer.
-        unsafe {
-            write_volatile(base.add(y * stride_px + x), color);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fill_rect_mmio(
-    base: *mut u32,
-    stride_px: usize,
-    fb_w: usize,
-    fb_h: usize,
-    rx: usize,
-    ry: usize,
-    rw: usize,
-    rh: usize,
-    color: u32,
-) {
-    let y_end = (ry + rh).min(fb_h);
-    let x_end = (rx + rw).min(fb_w);
-    for y in ry..y_end {
-        let row_off = y * stride_px;
-        for x in rx..x_end {
-            // SAFETY: Bounds clamped to `(fb_w, fb_h)`.
-            unsafe {
-                write_volatile(base.add(row_off + x), color);
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_bytes_mmio(
-    base: *mut u32,
-    stride_px: usize,
-    fb_w: usize,
-    fb_h: usize,
-    start_x: usize,
-    start_y: usize,
-    scale: usize,
-    text: &[u8],
-    color: u32,
-) -> u64 {
-    let mut fg_count = 0u64;
-    let adv_x = 9 * scale;
-    for (idx, &ch) in text.iter().enumerate() {
-        let g = glyph_8x16(ch);
-        let gx = start_x + idx * adv_x;
-        for (row, &bits) in g.iter().enumerate() {
-            if bits == 0 {
-                continue;
-            }
-            for col in 0..8usize {
-                if (bits & (0x80 >> col)) != 0 {
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            put_px_mmio(
-                                base,
-                                stride_px,
-                                fb_w,
-                                fb_h,
-                                gx + col * scale + sx,
-                                start_y + row * scale + sy,
-                                color,
-                            );
-                            fg_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    fg_count
-}
-
-/// Legacy Milestone 1C one-shot visual proof (`Stage E.2`). Kept 100% intact for regression parity.
-fn run_legacy_banner_mode(disp_ep_cap: u64, info: &UserFbInfo) -> ! {
-    let w = info.width as usize;
-    let h = info.height as usize;
-    let stride_px = (info.pitch as usize) / 4;
-    let fb_ptr = FB_MAP_VADDR as *mut u32;
-    let pal = Palette::from_fb(info);
-    let bg_card = pack_rgb(info, 0x11, 0x18, 0x27);
-    let border_col = pack_rgb(info, 0x28, 0x37, 0x4D);
-
-    fill_rect_mmio(fb_ptr, stride_px, w, h, 0, 0, w, h, pal.bg_canvas);
-
-    let scale = if w >= 800 && h >= 520 { 2usize } else { 1usize };
-    let card_w = (320 * scale).min(w.saturating_sub(32));
-    let card_h = (220 * scale).min(h.saturating_sub(32));
-    let card_x = (w - card_w) / 2;
-    let card_y = (h - card_h) / 2;
-
-    fill_rect_mmio(fb_ptr, stride_px, w, h, card_x, card_y, card_w, card_h, border_col);
-    fill_rect_mmio(fb_ptr, stride_px, w, h, card_x + 2, card_y + 2, card_w - 4, card_h - 4, bg_card);
-    fill_rect_mmio(fb_ptr, stride_px, w, h, card_x + 2, card_y + 2, card_w - 4, 4 * scale, pal.fg_accent);
-
-    let tx = card_x + 24 * scale;
-    let mut ty = card_y + 22 * scale;
-    let line_step = 22 * scale;
-    let mut fg_pixels = 0u64;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"DRY OS", pal.fg_primary);
-    ty += line_step;
-
-    let divider = [BOX_HORIZ; 26];
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, &divider, pal.fg_accent);
-    ty += line_step;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"System: ", pal.fg_muted);
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx + 8 * 9 * scale, ty, scale, b"ONLINE", pal.fg_ok);
-    ty += line_step;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"Kernel: ", pal.fg_muted);
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx + 8 * 9 * scale, ty, scale, b"Microkernel", pal.fg_primary);
-    ty += line_step;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"Userspace: ", pal.fg_muted);
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx + 11 * 9 * scale, ty, scale, b"Ring 3", pal.fg_primary);
-    ty += line_step;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"IPC: ", pal.fg_muted);
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx + 5 * 9 * scale, ty, scale, b"ACTIVE", pal.fg_ok);
-    ty += line_step + 10 * scale;
-
-    fg_pixels += draw_bytes_mmio(fb_ptr, stride_px, w, h, tx, ty, scale, b"Hello from DRY OS!", pal.fg_accent);
-
-    flush_video_stores();
-    let _ = sys_write_debug(b"[DRY-DISPLAY] Rendered Ring 3 framebuffer banner\n");
-    let _ = sys_ipc_call_inline(
-        disp_ep_cap,
-        pack_msg_tag(IPC_OP_DISPLAY_DONE, 0, 3, 0),
-        [w as u64, h as u64, fg_pixels, 0],
-        0,
-    );
-    sys_exit(0);
-}
 
 #[inline]
 fn reply_err(disp_ep: u64, tok: u64, code: u32) {
@@ -347,7 +152,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
         sys_exit(113);
     }
     if (ep_info.rights_bits & (RIGHT_RECV as u32)) == 0 {
-        run_legacy_banner_mode(disp_ep_cap, &info);
+        run_legacy_banner_mode(FB_MAP_VADDR, disp_ep_cap, &info);
     }
 
     let back_bytes_needed = match w.checked_mul(h).and_then(|px| px.checked_mul(4)) {
@@ -774,11 +579,33 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
 
                 let action = wm.handle_input_event(ev, &mut comp.scene_dirty, &mut comp.mmio_dirty);
                 match action {
-                    WmInputAction::KeyRouted(wid) | WmInputAction::CloseRequested(wid) => {
+                    WmInputAction::KeyRouted(wid)
+                    | WmInputAction::WheelRouted(wid)
+                    | WmInputAction::CloseRequested(wid) => {
                         if let Some(s) = (0..MAX_WINDOWS)
                             .find(|&i| wm.windows[i].allocated && wm.windows[i].id == wid)
                         {
                             wake_window_client(disp_ep_cap, wm, s);
+                        }
+                    }
+                    WmInputAction::DesktopActionQueued(act) => {
+                        let words = act.to_words();
+                        let mut lb = LineBuilder::new();
+                        lb.push_bytes(b"[DRY-WM] ACTION_QUEUED kind=");
+                        lb.push_u64(words[0]);
+                        lb.push_bytes(b" arg=");
+                        lb.push_u64(words[1]);
+                        log_line(&lb);
+                        if wm.sup_notif_cap != 0 {
+                            let _ = sys_notify_signal(wm.sup_notif_cap, SUP_BIT_WM_ACTION);
+                        }
+                        if wm.sup_wake_cap != 0 {
+                            let _ = sys_ipc_send_inline(
+                                wm.sup_wake_cap,
+                                pack_msg_tag(IPC_OP_WM_POLL_ACTION, MSG_FLAG_NON_BLOCKING, 0, 0),
+                                [0; 4],
+                                0,
+                            );
                         }
                     }
                     _ => {}
@@ -846,109 +673,24 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     );
                 }
             }
-            IPC_OP_WM_TOGGLE_TILING => {
-                let allowed = ext.sender_badge == BADGE_SUPERVISOR
-                    || ext.sender_badge == BADGE_INPUT_SVC
-                    || wm.resolve_owned_slot(ext.sender_badge, 0).is_ok();
-                if !allowed {
-                    reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
-                    continue;
-                }
-                let m = wm.toggle_tiling(&mut comp.scene_dirty);
-                let (_, cyc) = comp.flush_all(wm);
-                let mut lb = LineBuilder::new();
-                lb.push_bytes(b"[DRY-WM] LAYOUT mode=");
-                lb.push_u64(m as u64);
-                log_line(&lb);
-                if reply_tok != 0 {
-                    let _ = sys_ipc_reply_inline(
-                        disp_ep_cap,
-                        reply_tok,
-                        pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
-                        [m as u64, cyc, 0, 0],
-                    );
-                }
-            }
-            IPC_OP_WM_QUERY_STATE => {
-                let fid = wm.focused_slot().map_or(0, |s| wm.windows[s].id);
-                let mr0 = (wm.cursor_x as u64)
-                    | ((wm.cursor_y as u64) << 16)
-                    | ((fid as u64) << 32)
-                    | ((wm.layout as u64) << 48);
-                let mr1 = (wm.unauthorized_rejects & 0xffff_ffff)
-                    | ((wm.invalid_req_rejects & 0xffff_ffff) << 32);
-                let mr2 = (wm.focus_switches & 0xffff)
-                    | ((wm.z_raises & 0xffff) << 16)
-                    | ((wm.drag_moves & 0xffff) << 32)
-                    | ((wm.cursor_clamp_hits & 0xffff) << 48);
-                let mr3 = wm.active_window_count() as u64;
-                if reply_tok != 0 {
-                    let _ = sys_ipc_reply_inline(
-                        disp_ep_cap,
-                        reply_tok,
-                        pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
-                        [mr0, mr1, mr2, mr3],
-                    );
-                }
-            }
             IPC_OP_EXIT_CLEAN => {
-                let mut slb = LineBuilder::new();
-                slb.push_bytes(b"[DRY-WM-STATS] wins=");
-                slb.push_u64(wm.active_window_count() as u64);
-                slb.push_bytes(b" focus_sw=");
-                slb.push_u64(wm.focus_switches);
-                slb.push_bytes(b" z_raises=");
-                slb.push_u64(wm.z_raises);
-                slb.push_bytes(b" drag_moves=");
-                slb.push_u64(wm.drag_moves);
-                slb.push_bytes(b" clamp_hits=");
-                slb.push_u64(wm.cursor_clamp_hits);
-                slb.push_bytes(b" unauth_rej=");
-                slb.push_u64(wm.unauthorized_rejects);
-                slb.push_bytes(b" inval_rej=");
-                slb.push_u64(wm.invalid_req_rejects);
-                log_line(&slb);
+                emit_wm_exit_telemetry(
+                    wm,
+                    &in2comp_lat,
+                    &cursor_lat,
+                    &drag_lat,
+                    &pres1w_lat,
+                    &pres2w_lat,
+                );
 
-                let (i50, i95, i99) = in2comp_lat.percentiles();
-                let (c50, c95, c99) = cursor_lat.percentiles();
-                let (d50, d95, d99) = drag_lat.percentiles();
-                let (p1_50, p1_95, p1_99) = pres1w_lat.percentiles();
-                let (p2_50, p2_95, p2_99) = pres2w_lat.percentiles();
-                if i50 > 0 || c50 > 0 || p2_50 > 0 {
-                    let mut blb = LineBuilder::new();
-                    blb.push_bytes(b"[DRY-WM-BENCH] in2comp=");
-                    blb.push_u64(i50);
-                    blb.push_byte(b'/');
-                    blb.push_u64(i95);
-                    blb.push_byte(b'/');
-                    blb.push_u64(i99);
-                    blb.push_bytes(b" cur=");
-                    blb.push_u64(c50);
-                    blb.push_byte(b'/');
-                    blb.push_u64(c95);
-                    blb.push_byte(b'/');
-                    blb.push_u64(c99);
-                    blb.push_bytes(b" drag=");
-                    blb.push_u64(d50);
-                    blb.push_byte(b'/');
-                    blb.push_u64(d95);
-                    blb.push_byte(b'/');
-                    blb.push_u64(d99);
-                    blb.push_bytes(b" pres1w=");
-                    blb.push_u64(p1_50);
-                    blb.push_byte(b'/');
-                    blb.push_u64(p1_95);
-                    blb.push_byte(b'/');
-                    blb.push_u64(p1_99);
-                    blb.push_bytes(b" pres2w=");
-                    blb.push_u64(p2_50);
-                    blb.push_byte(b'/');
-                    blb.push_u64(p2_95);
-                    blb.push_byte(b'/');
-                    blb.push_u64(p2_99);
-                    log_line(&blb);
+                if wm.sup_notif_cap != 0 {
+                    let _ = sys_cap_revoke(wm.sup_notif_cap, 1);
+                    wm.sup_notif_cap = 0;
                 }
-
+                if wm.sup_wake_cap != 0 {
+                    let _ = sys_cap_revoke(wm.sup_wake_cap, 1);
+                    wm.sup_wake_cap = 0;
+                }
                 for slot_idx in 0..MAX_WINDOWS {
                     if wm.windows[slot_idx].allocated {
                         teardown_window_slot(wm, comp, disp_ep_cap, slot_idx);
@@ -972,6 +714,9 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 sys_exit(0);
             }
             _ => {
+                if handle_wm_admin_op(op, disp_ep_cap, reply_tok, mrs, &ext, wm, comp) {
+                    continue;
+                }
                 if reply_tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         disp_ep_cap,

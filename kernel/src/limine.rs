@@ -426,7 +426,7 @@ pub fn latch_cmdline_to_static_bss() -> &'static str {
     }
 }
 
-pub const MAX_LATCHED_MODULES: usize = 12;
+pub const MAX_LATCHED_MODULES: usize = 16;
 
 #[derive(Clone, Copy)]
 struct LatchedModule {
@@ -522,6 +522,28 @@ pub fn get_boot_module_by_index(idx: usize) -> Option<&'static [u8]> {
             None
         } else {
             Some(core::slice::from_raw_parts(m.addr, m.size))
+        }
+    }
+}
+
+#[inline]
+pub fn latched_boot_module_count() -> usize {
+    // SAFETY: `STATIC_MODULES` is immutable after `latch_boot_modules_to_static_bss`.
+    unsafe { *STATIC_MODULES.1.get() }
+}
+
+pub fn latched_boot_module_meta(idx: usize) -> Option<(&'static [u8], usize)> {
+    // SAFETY: `STATIC_MODULES` is immutable after `latch_boot_modules_to_static_bss`.
+    unsafe {
+        let count = *STATIC_MODULES.1.get();
+        if idx >= count {
+            return None;
+        }
+        let m = &(*STATIC_MODULES.0.get())[idx];
+        if m.addr.is_null() || m.size == 0 {
+            None
+        } else {
+            Some((&m.path_buf[..m.path_len], m.size))
         }
     }
 }

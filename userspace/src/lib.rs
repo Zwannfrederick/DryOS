@@ -3,14 +3,19 @@
 
 #![no_std]
 
+pub mod action;
 pub mod compositor;
+pub mod display_banner;
 pub mod gfx;
+pub mod init_legacy;
 pub mod input;
 pub mod keymap;
 pub mod ps2;
 pub mod shell;
+pub mod supervisor;
 pub mod surface;
 pub mod wm;
+pub mod wm_ipc;
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -44,6 +49,9 @@ pub const SYS_IOPORT_RW: u64 = 22;
 pub const SYS_SYSINFO: u64 = 23;
 pub const SYS_FRAME_ALLOC: u64 = 24;
 pub const SYS_VSPACE_MAP: u64 = 25;
+pub const SYS_PROC_LIST: u64 = 26;
+pub const SYS_PROC_KILL: u64 = 27;
+pub const SYS_POWER_CTL: u64 = 28;
 
 pub const EPERM: isize = -1;
 pub const EBADCAP: isize = -9;
@@ -101,13 +109,23 @@ pub const RIGHT_REPLY: u16 = 1 << 12;
 pub const RIGHT_WAIT: u16 = 1 << 13;
 pub const RIGHT_SPAWN: u16 = 1 << 14;
 
-// Unforgeable capability badges minted by `dry-init` onto `disp_ep` (`Milestone 2A-2` WM policy)
+// Unforgeable capability badges minted by `dry-init` onto `disp_ep` & `sup_ep` (`Milestone 2A-2 / 2A-3`)
 pub const BADGE_SUPERVISOR: u64 = 0x0001_ffff;
 pub const BADGE_INPUT_SVC: u64 = 0x0003_ffff;
+pub const BADGE_POWER_SVC: u64 = 0x0005_ffff;
 pub const BADGE_WIN_LEGACY_P1: u64 = 0x54e2;
 pub const BADGE_WIN_SHELL: u64 = 0x0102_0001;
 pub const BADGE_WIN_SYSMON: u64 = 0x0103_0002;
+pub const BADGE_WIN_FILES: u64 = 0x0104_0003;
+pub const BADGE_WIN_SETTINGS: u64 = 0x0105_0004;
 pub const BADGE_WIN_ROGUE_PROBE: u64 = 0x0109_0099;
+
+pub const BADGE_SUP_SHELL: u64 = 0x5501;
+pub const BADGE_SUP_SYSMON: u64 = 0x5502;
+pub const BADGE_SUP_FILES: u64 = 0x5503;
+pub const BADGE_SUP_SETTINGS: u64 = 0x5504;
+pub const BADGE_SUP_DISPLAY: u64 = 0x5505;
+pub const BADGE_SUP_ROGUE: u64 = 0x5599;
 
 // IPC opcodes shared across `dry-init`, `dry-echo`, `dry-display`, `dry-input`, `dry-shell`, and `dry-sysmon`
 pub const IPC_OP_PING_TRACE: u32 = 1;
@@ -147,6 +165,20 @@ pub const IPC_OP_ERR_PERM: u32 = 37;
 pub const IPC_OP_ERR_INVAL: u32 = 38;
 pub const IPC_OP_WM_QUERY_STATE: u32 = 39;
 
+pub const IPC_OP_SUP_ACTION: u32 = 40;
+pub const IPC_OP_SUP_QUERY_APPS: u32 = 41;
+pub const IPC_OP_WM_BIND_SUP_NOTIF: u32 = 42;
+pub const IPC_OP_WM_POLL_ACTION: u32 = 43;
+pub const IPC_OP_WM_FOCUS_OWNER: u32 = 44;
+pub const IPC_OP_WM_SET_LAYOUT: u32 = 45;
+pub const IPC_OP_WM_SET_PREFS: u32 = 46;
+pub const IPC_OP_WM_SET_SESSION_STATE: u32 = 47;
+pub const IPC_OP_INPUT_SET_PREFS: u32 = 48;
+pub const IPC_OP_ERR_NOSYS: u32 = 49;
+pub const IPC_OP_SUP_MINT_ROGUE_TEST: u32 = 50;
+
+pub const BOOT_MANIFEST_OFFSET: u64 = 0x0100;
+
 /// Boot capability table mapped read-only into `dry-init` at `arg0` (`0x0070_0000`).
 /// Legacy Milestone 1C zeroes trailing fields (`session_mode == 0`).
 #[repr(C)]
@@ -163,7 +195,35 @@ pub struct RootInitBootInfo {
     pub session_mode: u64,
     pub irq12_cap: u64,
     pub sysmon_mod_cap: u64,
+    pub vfs_mod_cap: u64,
+    pub files_mod_cap: u64,
+    pub settings_mod_cap: u64,
+    pub power_mod_cap: u64,
+    pub power_ctrl_cap: u64,
+    pub boot_manifest_count: u64,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BootModManifestEntry {
+    pub name: [u8; 40],
+    pub size_bytes: u64,
+}
+
+/// Sanitized 24-byte per-process snapshot POD returned by `SYS_PROC_LIST` (`0` kernel pointers/PFNs).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserProcInfo {
+    pub pid: u32,
+    pub state: u8,
+    pub domain: u8,
+    pub compartment_id: u16,
+    pub mapped_pages_4k: u32,
+    pub pt_frames_4k: u32,
+    pub syscall_entries: u64,
+}
+
+const _: () = assert!(size_of::<UserProcInfo>() == 24);
 
 pub const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954; // "DRY_INIT"
 
@@ -741,6 +801,27 @@ pub fn sys_frame_alloc(order: u64) -> Result<u64, isize> {
 #[inline]
 pub fn sys_vspace_map(frame_cap: u64, vaddr: u64, op: u64) -> Result<(), isize> {
     let (r0, _) = raw_syscall6(SYS_VSPACE_MAP, frame_cap, vaddr, op, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+#[inline]
+pub fn sys_proc_list(out: &mut [UserProcInfo]) -> Result<(usize, usize), isize> {
+    let ptr = if out.is_empty() {
+        0
+    } else {
+        out.as_mut_ptr() as u64
+    };
+    let (r0, total) = raw_syscall6(SYS_PROC_LIST, ptr, out.len() as u64, 0, 0, 0, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok((r0 as usize, total as usize))
+    }
+}
+
+#[inline]
+pub fn sys_proc_kill(child_handle: u64) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(SYS_PROC_KILL, child_handle, 0, 0, 0, 0, 0);
     if r0 < 0 { Err(r0) } else { Ok(()) }
 }
 

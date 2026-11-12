@@ -24,6 +24,8 @@ pub const KEY_RIGHT: u16 = 23;
 pub const KEY_HOME: u16 = 24;
 pub const KEY_END: u16 = 25;
 pub const KEY_DELETE: u16 = 26;
+pub const KEY_PAGEUP: u16 = 27;
+pub const KEY_PAGEDOWN: u16 = 28;
 
 pub const KEY_CHAR_BASE: u16 = 0x0100;
 
@@ -66,10 +68,12 @@ const fn translate_us_qwerty(base_code: u8, extended: bool, modifiers: u8) -> (u
             0x38 => (KEY_RALT, 0),
             0x47 => (KEY_HOME, 0),
             0x48 => (KEY_UP, 0),
+            0x49 => (KEY_PAGEUP, 0),
             0x4B => (KEY_LEFT, 0),
             0x4D => (KEY_RIGHT, 0),
             0x4F => (KEY_END, 0),
             0x50 => (KEY_DOWN, 0),
+            0x51 => (KEY_PAGEDOWN, 0),
             0x53 => (KEY_DELETE, 0),
             _ => (KEY_NONE, 0),
         };

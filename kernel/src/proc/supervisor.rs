@@ -7,6 +7,7 @@
 //! purely from explicit `CapObjectKind::BootModule` capabilities, delegate initial capabilities into
 //! the child's `CSpace`, and reap exited/faulted children without Ring 0 service-manager bloat.
 
+use core::mem::size_of;
 use core::sync::atomic::Ordering;
 
 use crate::arch::rdtsc;
@@ -15,15 +16,33 @@ use crate::cspace::{cspace_transfer, insert_root_cap, with_pinned_cap};
 use crate::ipc::{check_blocking_ipc_allowed, map_cap_err_to_sys};
 use crate::limine::{find_boot_module_index, get_boot_module_by_index};
 use crate::proc::{
-    reclaim_process, slot_ref, spawn_elf_process_with, ProcError, ProcessHandle, ProcessOutcome,
-    ReclaimStatus, SpawnOptions,
+    kill_process, reclaim_process, slot_ref, spawn_elf_process_with, ProcError, ProcessHandle,
+    ProcessOutcome, ProcessState, ReclaimStatus, SpawnOptions, MAX_PROCESSES,
 };
 use crate::sched::{
     cancel_park_current, current_cpu_idx, current_slot_on_cpu, current_thread_id, ipc_park_current,
     prepare_park_current, tcb, ONLINE_SCHED_CPUS, PHASE_PENDING_THREADS,
 };
-use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
-use crate::uaccess::SysError;
+use crate::security::{
+    current_lease_epoch, unpack_seclabel_u64, CapRights, SecDomain, SecFlags, SecLabel,
+};
+use crate::uaccess::{copy_to_user, SysError};
+use crate::vspace::inspect_vspace_page_counts;
+
+/// Sanitized 24-byte per-process snapshot POD returned by `SYS_PROC_LIST` (zero kernel pointers/PFNs).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserProcInfo {
+    pub pid: u32,
+    pub state: u8,
+    pub domain: u8,
+    pub compartment_id: u16,
+    pub mapped_pages_4k: u32,
+    pub pt_frames_4k: u32,
+    pub syscall_entries: u64,
+}
+
+const _: () = assert!(size_of::<UserProcInfo>() == 24);
 
 #[inline]
 pub const fn pack_proc_handle(pid: u32, generation: u32) -> u64 {
@@ -268,5 +287,84 @@ pub fn sys_proc_wait(
             }
             Err(_) => return Err(SysError::Inval),
         }
+    }
+}
+
+/// `SYS_PROC_LIST`: Copy up to `max_entries` active `UserProcInfo` records to `user_out_ptr`,
+/// returning `(written_count, total_active_processes)`. Zero kernel addresses or PFNs are exposed.
+#[inline(never)]
+pub fn sys_proc_list(user_out_ptr: u64, max_entries_raw: u64) -> Result<(isize, u64), SysError> {
+    if max_entries_raw > 0 && (user_out_ptr == 0 || (user_out_ptr & 7) != 0) {
+        return Err(SysError::Fault);
+    }
+    let cap = (max_entries_raw as usize).min(MAX_PROCESSES);
+    let mut entries = [UserProcInfo::default(); MAX_PROCESSES];
+    let mut active_total = 0usize;
+    let mut written = 0usize;
+
+    for pid in 1..=(MAX_PROCESSES as u32) {
+        let Some(slot) = slot_ref(pid) else {
+            continue;
+        };
+        let st = ProcessState::from_u8(slot.state.load(Ordering::Acquire));
+        if matches!(st, ProcessState::Free | ProcessState::Reclaimed) {
+            continue;
+        }
+        active_total += 1;
+        if written < cap {
+            let lbl = unpack_seclabel_u64(slot.subj_label_raw.load(Ordering::Acquire));
+            let vs_id = slot.vspace_id.load(Ordering::Acquire);
+            let (mapped_4k, pt_4k) = inspect_vspace_page_counts(vs_id);
+            entries[written] = UserProcInfo {
+                pid,
+                state: st as u8,
+                domain: lbl.domain as u8,
+                compartment_id: lbl.compartment_id,
+                mapped_pages_4k: mapped_4k,
+                pt_frames_4k: pt_4k,
+                syscall_entries: slot.syscall_entries.load(Ordering::Relaxed),
+            };
+            written += 1;
+        }
+    }
+
+    if written > 0 {
+        let byte_len = written * size_of::<UserProcInfo>();
+        // SAFETY: `UserProcInfo` is a `24`-byte `#[repr(C)]` POD with zero padding.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(entries.as_ptr().cast::<u8>(), byte_len)
+        };
+        copy_to_user(user_out_ptr, bytes)?;
+    }
+    Ok((written as isize, active_total as u64))
+}
+
+/// `SYS_PROC_KILL`: Supervisor-only asynchronous termination of a direct child process (`Stage P3-A`).
+/// Unprivileged `SecDomain::Userspace` callers or non-parent handles are rejected with `SysError::Perm`/`NoChild`.
+pub fn sys_proc_kill(
+    caller_pid: u32,
+    caller_subj: SecLabel,
+    child_handle_raw: u64,
+    flags: u64,
+) -> Result<(), SysError> {
+    if flags != 0 {
+        return Err(SysError::Inval);
+    }
+    if caller_pid == 0
+        || caller_subj.domain != SecDomain::RootSystem
+        || caller_subj.flags.contains(SecFlags::DEV_WORKSPACE)
+    {
+        return Err(SysError::Perm);
+    }
+    let (pid, gen) = unpack_proc_handle(child_handle_raw);
+    let slot = slot_ref(pid).ok_or(SysError::NoChild)?;
+    if slot.generation.load(Ordering::Acquire) != gen
+        || slot.parent_pid.load(Ordering::Acquire) != caller_pid
+    {
+        return Err(SysError::NoChild);
+    }
+    match kill_process(ProcessHandle { pid, generation: gen }) {
+        Ok(()) | Err(ProcError::StaleTerminated) => Ok(()),
+        Err(_) => Err(SysError::NoChild),
     }
 }

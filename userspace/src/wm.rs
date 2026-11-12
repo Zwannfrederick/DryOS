@@ -8,13 +8,15 @@
 //! - Enforces unforgeable kernel capability badge ownership (`WindowSlot::owner_badge == sender_badge`)
 //!   on every surface/event operation and restricts `IPC_OP_WM_INPUT_EVENT` strictly to `BADGE_INPUT_SVC`.
 
+use crate::action::{ActionQueue, AppId, DesktopAction, APP_COUNT};
 use crate::gfx::{DirtyRegion, Rect, CURSOR_H, CURSOR_W};
 use crate::input::{InputEvent, InputEventKind, InputRingQueue, MOD_ALT, MOUSE_BTN_LEFT};
 use crate::keymap::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP};
 use crate::surface::{SurfaceSnapshot, TERM_COLS, TERM_ROWS};
 
-pub const MAX_WINDOWS: usize = 4;
+pub const MAX_WINDOWS: usize = 8;
 pub const WIN_EVENT_QUEUE_CAP: usize = 32;
+pub const SUP_BIT_WM_ACTION: u64 = 1 << 0;
 
 pub const TOPBAR_H: usize = 28;
 pub const WIN_PAD_X: usize = 12;
@@ -26,6 +28,8 @@ pub const SHADOW_OFF: usize = 6;
 pub const TITLE_KIND_TERMINAL: u8 = 0;
 pub const TITLE_KIND_SYSMON: u8 = 1;
 pub const TITLE_KIND_GENERIC: u8 = 2;
+pub const TITLE_KIND_FILES: u8 = 3;
+pub const TITLE_KIND_SETTINGS: u8 = 4;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +81,9 @@ pub enum WmInputAction {
     CloseRequested(u32),
     LayoutToggled(LayoutMode),
     KeyRouted(u32),
+    WheelRouted(u32),
     KeyMoved(u32, usize, usize),
+    DesktopActionQueued(DesktopAction),
 }
 
 pub struct WindowSlot {
@@ -175,6 +181,11 @@ pub struct WindowManager {
     pub screen_w: usize,
     pub screen_h: usize,
     pub desktop_mode: bool,
+    pub p3_mode: bool,
+    pub running_apps_mask: u8,
+    pub sup_notif_cap: u64,
+    pub sup_wake_cap: u64,
+    pub action_queue: ActionQueue<16>,
     pub layout: LayoutMode,
     pub cursor_x: usize,
     pub cursor_y: usize,
@@ -202,18 +213,18 @@ impl WindowManager {
             screen_w: 1280,
             screen_h: 800,
             desktop_mode: false,
+            p3_mode: false,
+            running_apps_mask: 0,
+            sup_notif_cap: 0,
+            sup_wake_cap: 0,
+            action_queue: ActionQueue::new(),
             layout: LayoutMode::Floating,
             cursor_x: 640,
             cursor_y: 400,
             cursor_visible: false,
             buttons_down: 0,
             next_win_id: 1,
-            windows: [
-                WindowSlot::empty(),
-                WindowSlot::empty(),
-                WindowSlot::empty(),
-                WindowSlot::empty(),
-            ],
+            windows: [const { WindowSlot::empty() }; MAX_WINDOWS],
             z_stack: [0; MAX_WINDOWS],
             z_len: 0,
             dragging_slot: None,
@@ -245,10 +256,36 @@ impl WindowManager {
     }
 
     #[inline]
+    pub const fn topbar_launcher_pill_rect(&self, idx: usize) -> Rect {
+        Rect::new(116 + idx * 78, 4, 72, 20)
+    }
+
+    #[inline]
     pub fn topbar_mode_pill_rect(&self) -> Rect {
         let pill_w = 112usize;
         let rx = (self.screen_w / 2).saturating_sub(pill_w / 2);
         Rect::new(rx, 4, pill_w, 20)
+    }
+
+    pub fn set_running_apps_mask(&mut self, mask: u8, dirty: &mut DirtyRegion) {
+        if self.running_apps_mask != mask {
+            self.running_apps_mask = mask;
+            dirty.mark(Rect::new(0, 0, self.screen_w, TOPBAR_H));
+        }
+    }
+
+    pub fn focus_owner_badge(&mut self, owner_badge: u64, dirty: &mut DirtyRegion) -> Option<u32> {
+        let mut z = self.z_len;
+        while z > 0 {
+            z -= 1;
+            let idx = self.z_stack[z];
+            let w = &self.windows[idx];
+            if w.allocated && w.visible && w.owner_badge == owner_badge {
+                let _ = self.focus_and_raise(idx, dirty);
+                return Some(self.windows[idx].id);
+            }
+        }
+        None
     }
 
     #[inline]
@@ -551,7 +588,7 @@ impl WindowManager {
     pub fn apply_tiling_geometries(&mut self, dirty: &mut DirtyRegion) {
         let mut normal_slots = [0usize; MAX_WINDOWS];
         let mut n = 0usize;
-        // Order deterministically by `WindowId` so left/right tiled assignment stays stable across focus!
+        // Order deterministically by `WindowId` so tiled assignment stays stable across focus!
         for slot_i in 0..MAX_WINDOWS {
             let w = &self.windows[slot_i];
             if w.allocated && w.visible && w.role == WindowRole::Normal {
@@ -569,12 +606,17 @@ impl WindowManager {
             let old_o = self.windows[idx].outer_rect();
             let rw = self.windows[idx].rect.w;
             let rh = self.windows[idx].rect.h;
-            let (nx, ny) = self.clamp_window_pos(((self.screen_w.saturating_sub(rw)) / 2) as isize, ty as isize, rw, rh);
+            let (nx, ny) = self.clamp_window_pos(
+                ((self.screen_w.saturating_sub(rw)) / 2) as isize,
+                ty as isize,
+                rw,
+                rh,
+            );
             self.windows[idx].rect.x = nx;
             self.windows[idx].rect.y = ny;
             dirty.mark(old_o);
             dirty.mark(self.windows[idx].outer_rect());
-        } else {
+        } else if n == 2 {
             let left_idx = normal_slots[0];
             let right_idx = normal_slots[1];
             let lw = self.windows[left_idx].rect.w;
@@ -597,6 +639,30 @@ impl WindowManager {
             self.windows[right_idx].rect.y = ry;
             dirty.mark(old_r);
             dirty.mark(self.windows[right_idx].outer_rect());
+        } else {
+            // 2x2 / 2-column grid for 3..8 open normal windows; DialogTransient windows stay floating.
+            let half_w = self.screen_w / 2;
+            let avail_h = self.screen_h.saturating_sub(TOPBAR_H + 16);
+            let rows_grid = n.div_ceil(2).max(1);
+            let row_step = avail_h / rows_grid;
+            for (k, &idx) in normal_slots.iter().take(n).enumerate() {
+                let col_k = k % 2;
+                let row_k = k / 2;
+                let old_o = self.windows[idx].outer_rect();
+                let ww = self.windows[idx].rect.w;
+                let wh = self.windows[idx].rect.h;
+                let tx = if col_k == 0 {
+                    12isize
+                } else {
+                    (half_w + 6) as isize
+                };
+                let target_y = (TOPBAR_H + 8 + row_k * row_step) as isize;
+                let (nx, ny) = self.clamp_window_pos(tx, target_y, ww, wh);
+                self.windows[idx].rect.x = nx;
+                self.windows[idx].rect.y = ny;
+                dirty.mark(old_o);
+                dirty.mark(self.windows[idx].outer_rect());
+            }
         }
     }
 
@@ -609,6 +675,15 @@ impl WindowManager {
         let next_slot = self.z_stack[0];
         let _ = self.focus_and_raise(next_slot, dirty);
         Some(self.windows[next_slot].id)
+    }
+
+    #[inline]
+    fn queue_desktop_action(&mut self, act: DesktopAction) -> WmInputAction {
+        if self.action_queue.push(act) {
+            WmInputAction::DesktopActionQueued(act)
+        } else {
+            WmInputAction::None
+        }
     }
 
     /// Process a normalized `InputEvent` from `dry-input` (`BADGE_INPUT_SVC`).
@@ -669,9 +744,22 @@ impl WindowManager {
                 if (ev.scancode as u8) != MOUSE_BTN_LEFT {
                     return WmInputAction::None;
                 }
-                if self.cursor_y < TOPBAR_H && self.topbar_mode_pill_rect().contains(self.cursor_x, self.cursor_y) {
-                    let m = self.toggle_tiling(scene_dirty);
-                    return WmInputAction::LayoutToggled(m);
+                if self.cursor_y < TOPBAR_H {
+                    if self.p3_mode {
+                        for idx in 0..APP_COUNT {
+                            if self
+                                .topbar_launcher_pill_rect(idx)
+                                .contains(self.cursor_x, self.cursor_y)
+                            {
+                                return self
+                                    .queue_desktop_action(DesktopAction::LaunchOrFocusApp(AppId::ALL[idx]));
+                            }
+                        }
+                    }
+                    if self.topbar_mode_pill_rect().contains(self.cursor_x, self.cursor_y) {
+                        let m = self.toggle_tiling(scene_dirty);
+                        return WmInputAction::LayoutToggled(m);
+                    }
                 }
                 if let Some((slot_idx, part)) = self.hit_test_topmost(self.cursor_x, self.cursor_y) {
                     let focus_changed = self.focus_and_raise(slot_idx, scene_dirty);
@@ -718,8 +806,35 @@ impl WindowManager {
                 }
                 WmInputAction::None
             }
+            InputEventKind::MouseScroll => {
+                let target_slot = self
+                    .hit_test_topmost(self.cursor_x, self.cursor_y)
+                    .map(|(s, _)| s)
+                    .or_else(|| self.focused_slot());
+                if let Some(s) = target_slot {
+                    let _ = self.windows[s].ev_queue.push(ev);
+                    return WmInputAction::WheelRouted(self.windows[s].id);
+                }
+                WmInputAction::None
+            }
             InputEventKind::KeyPress => {
                 if (ev.modifiers & MOD_ALT) != 0 {
+                    if self.p3_mode {
+                        let scan7 = (ev.scancode & 0x7f) as u8;
+                        let maybe_app = match (ev.ascii, scan7) {
+                            (b'1', _) | (_, 0x02) => Some(AppId::Terminal),
+                            (b'2', _) | (_, 0x03) => Some(AppId::LifeStation),
+                            (b'3', _) | (_, 0x04) => Some(AppId::Files),
+                            (b'4', _) | (_, 0x05) => Some(AppId::Settings),
+                            _ => None,
+                        };
+                        if let Some(app) = maybe_app {
+                            return self.queue_desktop_action(DesktopAction::LaunchOrFocusApp(app));
+                        }
+                        if ev.ascii == b'l' || ev.ascii == b'L' || scan7 == 0x26 {
+                            return self.queue_desktop_action(DesktopAction::LockSession);
+                        }
+                    }
                     if ev.keycode == KEY_TAB {
                         if let Some(wid) = self.cycle_focus_next(scene_dirty) {
                             return WmInputAction::FocusChanged(wid);

@@ -27,7 +27,7 @@ use crate::irq::{
     sys_irq_bind, IRQF_ONESHOT, IRQ_ACK_MASK, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, IRQ_KEYBOARD_PS2,
     IRQ_MOUSE_PS2, IRQ_TEST_SW_LINE, STORM_BURST_LIMIT,
 };
-use crate::limine::get_boot_module;
+use crate::limine::{get_boot_module, latched_boot_module_count, latched_boot_module_meta};
 use crate::percpu::get_percpu_by_idx;
 use crate::pmm::{flush_all_magazines_quiescent, measure_fragmentation, PageOrder};
 use crate::proc::supervisor::mint_boot_module_cap;
@@ -46,6 +46,7 @@ use crate::vspace::pte::VmProt;
 use crate::vspace::{map_4k, KERNEL_VSPACE_ID};
 
 const BOOT_INFO_VADDR: u64 = 0x0070_0000;
+const BOOT_MANIFEST_OFFSET: usize = 0x0100;
 const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954;
 
 #[repr(C)]
@@ -62,6 +63,19 @@ struct P1InitBootInfo {
     session_mode: u64,
     irq12_cap: u64,
     sysmon_mod_cap: u64,
+    vfs_mod_cap: u64,
+    files_mod_cap: u64,
+    settings_mod_cap: u64,
+    power_mod_cap: u64,
+    power_ctrl_cap: u64,
+    boot_manifest_count: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BootModManifestEntry {
+    name: [u8; 40],
+    size_bytes: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -502,13 +516,17 @@ pub fn verify_irq_and_ioport_security(cmdline: &str, online_cpus: usize) {
         Err(SysError::Already)
     );
 
-    // Burst > `STORM_BURST_LIMIT` inside `STORM_WINDOW_TSC` must trigger deterministic storm clamp.
-    for _ in 0..=(STORM_BURST_LIMIT + 8) {
+    // Burst > `STORM_BURST_LIMIT` inside `STORM_WINDOW_TSC` must trigger deterministic storm clamp
+    // (run up to `3 * STORM_BURST_LIMIT` with early exit so a single host KVM vCPU preemption cannot split the window).
+    for _ in 0..=(STORM_BURST_LIMIT * 3) {
         sti();
         send_fixed_ipi(bsp_lapic, vec);
         cli();
         let _ = notif_wait(rcs, root_lbl, ntf_cap, true, 0);
         let _ = sys_irq_ack(rcs, root_lbl, irq_root, IRQ_ACK_UNMASK);
+        if irq_telemetry().3 > storm_before {
+            break;
+        }
     }
     let (_, _, _, storm_after) = irq_telemetry();
     assert!(
@@ -605,7 +623,8 @@ pub fn verify_irq_and_ioport_security(cmdline: &str, online_cpus: usize) {
 /// multi-window desktop (`desktop=1`, `session_mode=2..4`) session.
 #[inline(never)]
 pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
-    let is_desktop = cmdline.contains("desktop=1");
+    let is_desktop3 = cmdline.contains("desktop3=1");
+    let is_desktop = cmdline.contains("desktop=1") || is_desktop3;
     if !cmdline.contains("interactive=1") && !is_desktop {
         return;
     }
@@ -617,7 +636,19 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
         let _ = get_boot_module("dry-sysmon.elf").expect("missing dry-sysmon.elf");
     }
 
-    let session_mode = if is_desktop {
+    let session_mode = if is_desktop3 {
+        if cmdline.contains("p3_sec=1") {
+            11u64
+        } else if cmdline.contains("p3_bench=1") {
+            12u64
+        } else if cmdline.contains("p3_shutdown=1") {
+            13u64
+        } else if cmdline.contains("p3_reboot=1") {
+            14u64
+        } else {
+            10u64
+        }
+    } else if is_desktop {
         if cmdline.contains("desktop_sec=1") {
             3u64
         } else if cmdline.contains("desktop_bench=1") {
@@ -655,6 +686,11 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             let input_cap = mint_boot_module_cap(cs, lbl, "dry-input.elf")?;
             let shell_cap = mint_boot_module_cap(cs, lbl, "dry-shell.elf")?;
             let sysmon_cap = mint_boot_module_cap(cs, lbl, "dry-sysmon.elf").unwrap_or(CapPtr::NULL);
+            let vfs_cap = mint_boot_module_cap(cs, lbl, "dry-vfs.elf").unwrap_or(CapPtr::NULL);
+            let files_cap = mint_boot_module_cap(cs, lbl, "dry-files.elf").unwrap_or(CapPtr::NULL);
+            let settings_cap =
+                mint_boot_module_cap(cs, lbl, "dry-settings.elf").unwrap_or(CapPtr::NULL);
+            let power_cap = mint_boot_module_cap(cs, lbl, "dry-power.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -671,6 +707,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
 
             let (info_fr_cap, info_fh) =
                 cspace_alloc_frame(cs, lbl, lbl, PageOrder::Order4KiB, false, 0)?;
+            let mod_count = latched_boot_module_count().min(16);
             let boot_info = P1InitBootInfo {
                 magic: ROOT_INIT_BOOT_MAGIC,
                 echo_mod_cap: echo_cap.0,
@@ -683,14 +720,45 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 session_mode,
                 irq12_cap: irq12_cap.0,
                 sysmon_mod_cap: sysmon_cap.0,
+                vfs_mod_cap: vfs_cap.0,
+                files_mod_cap: files_cap.0,
+                settings_mod_cap: settings_cap.0,
+                power_mod_cap: power_cap.0,
+                power_ctrl_cap: 0,
+                boot_manifest_count: mod_count as u64,
             };
-            // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame.
+            // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
             unsafe {
                 copy_nonoverlapping(
                     (&raw const boot_info).cast::<u8>(),
                     info_fh.hhdm_ptr(),
                     core::mem::size_of::<P1InitBootInfo>(),
                 );
+                let mut m_idx = 0usize;
+                for i in 0..mod_count {
+                    if let Some((raw_path, sz)) = latched_boot_module_meta(i) {
+                        let base = raw_path
+                            .iter()
+                            .rposition(|&b| b == b'/')
+                            .map_or(raw_path, |pos| &raw_path[pos + 1..]);
+                        let mut name = [0u8; 40];
+                        let nlen = base.len().min(39);
+                        name[..nlen].copy_from_slice(&base[..nlen]);
+                        let entry = BootModManifestEntry {
+                            name,
+                            size_bytes: sz as u64,
+                        };
+                        let dst = info_fh
+                            .hhdm_ptr()
+                            .add(BOOT_MANIFEST_OFFSET + m_idx * core::mem::size_of::<BootModManifestEntry>());
+                        copy_nonoverlapping(
+                            (&raw const entry).cast::<u8>(),
+                            dst,
+                            core::mem::size_of::<BootModManifestEntry>(),
+                        );
+                        m_idx += 1;
+                    }
+                }
             }
             map_4k(vs_h, BOOT_INFO_VADDR, info_fh, VmProt::USER_RO)
                 .map_err(|_| CapError::PagingError)?;

@@ -14,6 +14,7 @@
 use core::arch::asm;
 use core::ptr::write_volatile;
 
+use crate::action::{AppId, APP_COUNT};
 use crate::gfx::{
     glyph_8x16, DirtyRegion, Rect, BOX_HORIZ, CURSOR_H, CURSOR_SPRITE_12X16, CURSOR_W,
     MAX_DIRTY_RECTS,
@@ -23,8 +24,8 @@ use crate::surface::{
     TERM_CELLS,
 };
 use crate::wm::{
-    LayoutMode, WindowManager, WindowSlot, SHADOW_OFF, TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL,
-    TOPBAR_H, WIN_BORDER, WIN_TITLE_H,
+    LayoutMode, WindowManager, WindowSlot, SHADOW_OFF, TITLE_KIND_FILES, TITLE_KIND_SETTINGS,
+    TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL, TOPBAR_H, WIN_BORDER, WIN_TITLE_H,
 };
 use crate::{rdtsc_user, UserFbInfo};
 
@@ -278,16 +279,55 @@ impl DesktopCompositor {
             self.fill_back_clipped(Rect::new(0, 0, self.w, TOPBAR_H - 1), tb_clip, self.pal.bg_topbar);
             self.fill_back_clipped(Rect::new(0, TOPBAR_H - 1, self.w, 1), tb_clip, self.pal.border_idle);
 
-            let brand: &[u8] = if wm.desktop_mode {
-                b"DRY OS // DESKTOP PREVIEW 2A-2"
+            if wm.p3_mode {
+                self.draw_str_clipped(
+                    12,
+                    6,
+                    b"DRY OS 2A-3",
+                    self.pal.fg_primary,
+                    self.pal.bg_topbar,
+                    tb_clip,
+                );
+                let focused_badge = wm.focused_slot().map_or(0, |s| wm.windows[s].owner_badge);
+                for idx in 0..APP_COUNT {
+                    let app = AppId::ALL[idx];
+                    let pr = wm.topbar_launcher_pill_rect(idx);
+                    let is_focused = focused_badge == app.win_badge();
+                    let is_running = (wm.running_apps_mask & (1u8 << idx)) != 0
+                        || (0..wm.windows.len()).any(|s| {
+                            wm.windows[s].allocated && wm.windows[s].owner_badge == app.win_badge()
+                        });
+                    let (pbg, pfg) = if is_focused {
+                        (self.pal.bg_title_focus, self.pal.fg_primary)
+                    } else if is_running {
+                        (self.pal.bg_pill, self.pal.fg_ok)
+                    } else {
+                        (self.pal.bg_title_idle, self.pal.fg_muted)
+                    };
+                    self.fill_back_clipped(pr, tb_clip, pbg);
+                    if is_focused {
+                        self.fill_back_clipped(
+                            Rect::new(pr.x, pr.y + pr.h - 2, pr.w, 2),
+                            tb_clip,
+                            self.pal.border_focus,
+                        );
+                    }
+                    let lbl = app.pill_label();
+                    let tx = pr.x + pr.w.saturating_sub(lbl.len() * 8) / 2;
+                    self.draw_str_clipped(tx, 6, lbl, pfg, pbg, tb_clip);
+                }
             } else {
-                b"DRY OS // P1 INTERACTIVE DESKTOP"
-            };
-            self.draw_str_clipped(14, 6, brand, self.pal.fg_primary, self.pal.bg_topbar, tb_clip);
+                let brand: &[u8] = if wm.desktop_mode {
+                    b"DRY OS // DESKTOP PREVIEW 2A-2"
+                } else {
+                    b"DRY OS // P1 INTERACTIVE DESKTOP"
+                };
+                self.draw_str_clipped(14, 6, brand, self.pal.fg_primary, self.pal.bg_topbar, tb_clip);
+            }
 
             // Center layout pill (`[MODE: FLOAT]` / `[MODE: TILED]`) + active window indicator.
             let pill = wm.topbar_mode_pill_rect();
-            if wm.desktop_mode && self.w >= 960 {
+            if (wm.desktop_mode || wm.p3_mode) && self.w >= 960 {
                 self.fill_back_clipped(pill, tb_clip, self.pal.bg_pill);
                 let mode_lbl: &[u8] = match wm.layout {
                     LayoutMode::Floating => b"MODE: FLOAT",
@@ -307,8 +347,11 @@ impl DesktopCompositor {
                 let mut status = [b' '; 44];
                 let mut sp = 0usize;
                 let active_lbl: &[u8] = match wm.focused_slot().map(|s| wm.windows[s].title_kind) {
+                    Some(TITLE_KIND_SYSMON) if wm.p3_mode => b"FOCUS:LIFESTN WINS:",
                     Some(TITLE_KIND_SYSMON) => b"FOCUS:SYSMON  WINS:",
                     Some(TITLE_KIND_TERMINAL) => b"FOCUS:TERMINAL WINS:",
+                    Some(TITLE_KIND_FILES) => b"FOCUS:FILES   WINS:",
+                    Some(TITLE_KIND_SETTINGS) => b"FOCUS:SETTINGS WINS:",
                     Some(_) => b"FOCUS:APP     WINS:",
                     None => b"FOCUS:NONE    WINS:",
                 };
@@ -317,7 +360,9 @@ impl DesktopCompositor {
                     sp += 1;
                 }
                 sp += write_u32_ascii(&mut status[sp..], wm.active_window_count() as u32);
-                let suffix: &[u8] = if wm.desktop_mode {
+                let suffix: &[u8] = if wm.p3_mode {
+                    b" | ALT+1..4 / ALT+T"
+                } else if wm.desktop_mode {
                     b" | ALT+TAB / ALT+T"
                 } else {
                     b" | ALT+ARROWS: MOVE"
@@ -334,7 +379,7 @@ impl DesktopCompositor {
         }
     }
 
-    fn paint_window_clipped(&mut self, win: &WindowSlot, clip: Rect) {
+    fn paint_window_clipped(&mut self, win: &WindowSlot, p3_mode: bool, clip: Rect) {
         if !win.allocated || !win.visible {
             return;
         }
@@ -387,8 +432,11 @@ impl DesktopCompositor {
                 self.pal.fg_muted
             };
             let title_str: &[u8] = match win.title_kind {
+                TITLE_KIND_SYSMON if p3_mode => b"LIFE STATION // dry-sysmon [0x0103]",
                 TITLE_KIND_SYSMON => b"SYSTEM MONITOR // dry-sysmon [0x0103]",
                 TITLE_KIND_TERMINAL => b"DRY TERMINAL // dry-shell [0x0102]",
+                TITLE_KIND_FILES => b"FILES // dry-files [0x0104]",
+                TITLE_KIND_SETTINGS => b"SETTINGS // dry-settings [0x0105]",
                 _ => b"DRY APP // [CPL=3]",
             };
             self.draw_str_clipped(
@@ -531,7 +579,7 @@ impl DesktopCompositor {
         self.paint_background_and_topbar(wm, c);
         for z in 0..wm.z_len {
             let slot_idx = wm.z_stack[z];
-            self.paint_window_clipped(&wm.windows[slot_idx], c);
+            self.paint_window_clipped(&wm.windows[slot_idx], wm.p3_mode, c);
         }
         self.mmio_dirty.mark(c);
     }

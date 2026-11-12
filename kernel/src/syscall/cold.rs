@@ -28,7 +28,7 @@ use crate::irq::{
 use crate::percpu::get_percpu_by_idx;
 use crate::pmm::{free_global_frames_snapshot, inventory, PageOrder};
 use crate::proc::process_vspace_cap;
-use crate::proc::supervisor::{sys_proc_spawn, sys_proc_wait};
+use crate::proc::supervisor::{sys_proc_kill, sys_proc_list, sys_proc_spawn, sys_proc_wait};
 use crate::sched::{tcb, total_ctx_switches, GLOBAL_TIMER_IRQS, ONLINE_SCHED_CPUS};
 use crate::security::{
     current_lease_epoch, unpack_seclabel_u64, CapRights, SecDomain, SecFlags, SecLabel,
@@ -36,7 +36,8 @@ use crate::security::{
 use crate::syscall::{
     UserCapInfo, DRY_SYSCALL_ABI_VERSION, SYS_CAP_DERIVE, SYS_CAP_QUERY, SYS_CAP_REVOKE,
     SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC, SYS_IOPORT_RW, SYS_IRQ_ACK, SYS_IRQ_BIND,
-    SYS_NOTIFY_CREATE, SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO, SYS_VSPACE_MAP,
+    SYS_NOTIFY_CREATE, SYS_PROC_KILL, SYS_PROC_LIST, SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO,
+    SYS_VSPACE_MAP,
 };
 use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::VmProt;
@@ -362,6 +363,17 @@ pub(crate) fn sys_cold_dispatch(
             let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
             match sys_vspace_map_impl(pid, cs_id, subj, a0, a1, a2) {
+                Ok(()) => (0, 0),
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_PROC_LIST => match sys_proc_list(a0, a1) {
+            Ok(pair) => pair,
+            Err(e) => (e.as_raw(), 0),
+        },
+        SYS_PROC_KILL => {
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            match sys_proc_kill(pid, subj, a0, a1) {
                 Ok(()) => (0, 0),
                 Err(e) => (e.as_raw(), 0),
             }

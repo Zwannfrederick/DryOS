@@ -731,6 +731,20 @@ pub fn inspect_vspace_live(vspace_id: VSpaceId) -> Option<(u32, u64, SecLabel)> 
     Some((gen, active, lbl))
 }
 
+#[inline]
+pub fn inspect_vspace_page_counts(vspace_id: VSpaceId) -> (u32, u32) {
+    if vspace_id == KERNEL_VSPACE_ID || (vspace_id as usize) >= MAX_VSPACES {
+        return (0, 0);
+    }
+    let slot = &VSPACE_TABLE[vspace_id as usize];
+    if !slot.allocated.load(Ordering::Acquire) {
+        return (0, 0);
+    }
+    let mapped = slot.mapped_4k_equiv_pages.load(Ordering::Relaxed).min(u32::MAX as u64) as u32;
+    let pts = slot.pt_frames_owned.load(Ordering::Relaxed).min(u32::MAX as u64) as u32;
+    (mapped, pts)
+}
+
 /// Walk `vspace_id` (`0` = `KERNEL_VSPACE`) for any canonical `vaddr` and return effective permissions.
 pub fn walk_vspace_address(vspace_id: VSpaceId, vaddr: u64) -> Option<ResolvedLeafPte> {
     if !is_canonical_48(vaddr) || (vspace_id as usize) >= MAX_VSPACES {

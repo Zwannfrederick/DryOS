@@ -176,16 +176,20 @@ fn yield_worker(seed: u64) {
     let slot = current_slot_on_cpu(cpu0);
     let my_tid = current_thread_id();
     assert_eq!(my_tid.slot(), slot);
-    // Once first-hop CPU affinity (`prio = 0`) is proven on `cpu0`, switch to migratable `prio 1..3`.
-    tcb(slot)
-        .prio
-        .store(1 + ((seed as usize) % 3), Ordering::Release);
     // Callee-saved local state verified across 32 hardware `dry_switch_to` calls + CPU migrations.
     let mut rolling_guard: u64 = 0x9e37_79b9_7f4a_7c15u64 ^ (seed.wrapping_mul(0x517c_c1b7_2722_0a95));
 
     for step in 0..YIELD_ITERS {
         let expected_next = rolling_guard.rotate_left(7) ^ step ^ (slot as u64);
         yield_now();
+        if step == 0 {
+            // Keep `prio = 0` across the first `yield_now()` hop (`cpu0 -> (cpu0 + 1) % online`) so
+            // peer vCPUs cannot lose all cross-CPU migrations to work-stealing under KVM host preemption,
+            // then switch to migratable `prio 1..3` for the remaining 31 steps.
+            tcb(slot)
+                .prio
+                .store(1 + ((seed as usize) % 3), Ordering::Release);
+        }
 
         let cpu_now = current_cpu_idx();
         assert_eq!(current_thread_id(), my_tid, "ThreadId mutated across yield/migration");

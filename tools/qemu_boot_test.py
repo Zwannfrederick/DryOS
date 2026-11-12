@@ -23,6 +23,7 @@ from qemu_log_validators import (
 from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_and_display_lines
 from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
 from qemu_p2_validators import run_p2_suite
+from qemu_p3_validators import run_p3_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -468,6 +469,7 @@ def main() -> None:
     parser.add_argument("--smp-only", type=int, default=0, help="Run only a single positive N-vCPU boot test")
     parser.add_argument("--irq-only", action="store_true", help="Sub-Stage A: verify only APIC timer IRQ + EOI + TrapFrame")
     parser.add_argument("--p1-only", action="store_true", help="Run only Milestone 2A-1 (P1) interactive & negative security suite")
+    parser.add_argument("--p3-only", action="store_true", help="Run only Milestone 2A-3 native desktop & lifecycle suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -481,6 +483,11 @@ def main() -> None:
             kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
         )
         print("\n[QEMU-TEST] ALL 9 MILESTONE 2A-1 (P1) INTERACTIVE HARDWARE E2E & SECURITY CHECKS PASSED.")
+        return
+
+    if args.p3_only:
+        n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p3} MILESTONE 2A-3 NATIVE DESKTOP & SECURITY CHECKS PASSED.")
         return
 
     if args.smp_only > 0:
@@ -924,10 +931,11 @@ def main() -> None:
     run_p2_suite(
         kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
     )
+    n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        "\n[QEMU-TEST] ALL 79 DETERMINISTIC QEMU CHECKS "
-        "(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 DESKTOP PREVIEW) PASSED."
+        f"\n[QEMU-TEST] ALL {79 + n_p3} DETERMINISTIC QEMU CHECKS "
+        f"(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + {n_p3} MILESTONE 2A-3) PASSED."
     )
 
 
