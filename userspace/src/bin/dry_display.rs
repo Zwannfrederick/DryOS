@@ -183,6 +183,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
     let wm = unsafe { &mut *WM_STATE.0.get() };
     let comp = unsafe { &mut *COMP_STATE.0.get() };
     wm.init_screen(w, h);
+    wm.back_caps = back_caps;
     comp.init(FB_MAP_VADDR as *mut u32, BACKBUF_VADDR as *mut u32, &info);
 
     comp.scene_dirty.mark(Rect::new(0, 0, w, h));
@@ -721,6 +722,10 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 if wm.sup_wake_cap != 0 {
                     let _ = sys_cap_revoke(wm.sup_wake_cap, 1);
                     wm.sup_wake_cap = 0;
+                }
+                if wm.gpu_ep_cap != 0 {
+                    let _ = sys_cap_revoke(wm.gpu_ep_cap, 1);
+                    wm.gpu_ep_cap = 0;
                 }
                 for slot_idx in 0..MAX_WINDOWS {
                     if wm.windows[slot_idx].allocated {

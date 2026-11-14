@@ -59,6 +59,10 @@ pub struct WindowManager {
     pub lock_pin_buf: [u8; 32],
     pub lock_pin_len: u8,
     pub vault_auth_failures: u32,
+    pub gpu_ep_cap: u64,
+    pub gpu_presents: u64,
+    pub gpu_fallbacks: u64,
+    pub back_caps: [u64; 8],
 }
 
 impl WindowManager {
@@ -102,6 +106,10 @@ impl WindowManager {
             lock_pin_buf: [0; 32],
             lock_pin_len: 0,
             vault_auth_failures: 0,
+            gpu_ep_cap: 0,
+            gpu_presents: 0,
+            gpu_fallbacks: 0,
+            back_caps: [0; 8],
         }
     }
 

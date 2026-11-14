@@ -8,6 +8,7 @@
 use crate::action::{AppId, DesktopAction};
 use crate::init_legacy::{domain_spec, log_line, spawn_and_init_desktop_input};
 use crate::island_audit::{run_island_poc_benchmarks, run_island_poc_lifecycle_audit};
+use crate::gpu_audit::{run_gpu_scanout_audit, teardown_live_gpu, LiveGpuSession};
 use crate::lx_island_audit::run_lx_island_audit;
 use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
@@ -139,7 +140,8 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     }
 
     let mut sec_audit_done =
-        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27);
+        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28);
+    let mut gpu_live: Option<LiveGpuSession> = None;
     let mut restarts = 0u64;
 
     loop {
@@ -221,6 +223,17 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         elb.push_u64(code as u64);
                         log_line(&elb);
                         sys_exit(code);
+                    }
+                } else if boot.session_mode == 28 {
+                    match run_gpu_scanout_audit(boot, disp_sup_cap, vfs_sup_cap, vault_sup_cap) {
+                        Ok(live) => gpu_live = Some(live),
+                        Err(code) => {
+                            let mut elb = LineBuilder::new();
+                            elb.push_bytes(b"[DRY-GPU-FAIL] code=");
+                            elb.push_u64(code as u64);
+                            log_line(&elb);
+                            sys_exit(code);
+                        }
                     }
                 }
                 sec_audit_done = true;
@@ -642,6 +655,10 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     blb.push_bytes(b" inval_rej=");
     blb.push_u64(ctx.inval_rejects);
     log_line(&blb);
+
+    if let Some(live) = gpu_live.take() {
+        teardown_live_gpu(live, disp_sup_cap);
+    }
 
     if let Err(code) = teardown_p3_core_services(
         ctx.input_sup_cap,

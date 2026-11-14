@@ -29,6 +29,7 @@ from qemu_p3c_validators import run_p3_hardware_matrix
 from qemu_p4_validators import run_p4_suite
 from qemu_p5_island_validators import run_p5_island_suite
 from qemu_p6_lx_island_validators import run_p6_lx_island_suite
+from qemu_p7_gpu_validators import run_p7_gpu_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -67,6 +68,7 @@ USERSPACE_MODS = (
     ("dry-lx-rng", "dry-lx-rng.elf"),
     ("dry-fpu-test", "dry-fpu-test.elf"),
     ("dry-fault-test", "dry-fault-test.elf"),
+    ("dry-gpu", "dry-gpu.elf"),
 )
 
 
@@ -589,6 +591,7 @@ def main() -> None:
     parser.add_argument("--p4-only", action="store_true", help="Run only Milestone 2B persistent storage & DRY Vault suite")
     parser.add_argument("--island-only", action="store_true", help="Run only Milestone 2C-0 Adaptive Driver Islands PoC suite")
     parser.add_argument("--lx-island-only", action="store_true", help="Run only Milestone 2C-1 Genuine Linux virtio-rng Driver Island suite")
+    parser.add_argument("--gpu-only", action="store_true", help="Run only Priority C VirtIO-GPU 2D scanout & GOP fallback suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -622,6 +625,11 @@ def main() -> None:
     if args.lx_island_only:
         n_p6 = run_p6_lx_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p6} MILESTONE 2C-1 GENUINE LINUX DRIVER ISLAND CHECKS PASSED.")
+        return
+
+    if args.gpu_only:
+        n_p7 = run_p7_gpu_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p7} PRIORITY C VIRTIO-GPU SCANOUT & GOP FALLBACK CHECKS PASSED.")
         return
 
     if args.p3_matrix:

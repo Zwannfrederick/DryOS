@@ -76,6 +76,10 @@ path = "src/bin/dry_fpu_test.rs"
 name = "dry-fault-test"
 path = "src/bin/dry_fault_test.rs"
 
+[[bin]]
+name = "dry-gpu"
+path = "src/bin/dry_gpu.rs"
+
 [profile.dev]
 panic = "abort"
 

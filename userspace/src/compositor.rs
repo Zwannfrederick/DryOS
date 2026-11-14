@@ -800,8 +800,8 @@ impl DesktopCompositor {
     }
 
     /// Drain all pending `scene_dirty` + `mmio_dirty` rectangles and stream modified scanlines
-    /// (compositing the 12x16 software cursor on-the-fly) into the GOP framebuffer.
-    pub fn flush_all(&mut self, wm: &WindowManager) -> (u64, u64) {
+    /// (compositing the 12x16 software cursor on-the-fly) into the GOP framebuffer or bound `dry-gpu`.
+    pub fn flush_all(&mut self, wm: &mut WindowManager) -> (u64, u64) {
         let mut s_rects = [Rect::EMPTY; MAX_DIRTY_RECTS];
         let sn = self.scene_dirty.drain_into(self.w, self.h, &mut s_rects);
         for r in s_rects.iter().take(sn) {
@@ -809,9 +809,20 @@ impl DesktopCompositor {
         }
 
         let mut m_rects = [Rect::EMPTY; MAX_DIRTY_RECTS];
-        let mn = self.mmio_dirty.drain_into(self.w, self.h, &mut m_rects);
+        let mut mn = self.mmio_dirty.drain_into(self.w, self.h, &mut m_rects);
         if mn == 0 {
             return (0, 0);
+        }
+        if wm.gpu_ep_cap != 0 {
+            let mut bbox = m_rects[0];
+            for r in m_rects.iter().take(mn).skip(1) {
+                bbox = bbox.union(*r);
+            }
+            if let Some(res) = crate::wm_ipc::try_gpu_present_or_fallback(wm, bbox) {
+                return res;
+            }
+            m_rects[0] = Rect::new(0, 0, self.w, self.h);
+            mn = 1;
         }
 
         let cur_r = if wm.session_state == SessionVisualState::DisplayBlanked {

@@ -1,0 +1,282 @@
+{
+  "milestone": "Priority-C Host GPU Compatibility Audit",
+  "kernel_module_tree": "/usr/lib/modules/6.18.62-1-lts",
+  "pci_devices": {
+    "intel_iris_xe": {
+      "bdf": "0000:00:02.0",
+      "present": true,
+      "vendor": "0x8086",
+      "device": "0x9a49",
+      "class": "0x030000",
+      "irq": "153",
+      "linux_driver": "i915",
+      "bars": [
+        {
+          "bar": 0,
+          "size_bytes": 16777216,
+          "kind": "mmio",
+          "prefetchable": false
+        },
+        {
+          "bar": 2,
+          "size_bytes": 268435456,
+          "kind": "mmio",
+          "prefetchable": true
+        },
+        {
+          "bar": 4,
+          "size_bytes": 64,
+          "kind": "ioport",
+          "prefetchable": false
+        }
+      ]
+    },
+    "nvidia_rtx3050ti": {
+      "bdf": "0000:01:00.0",
+      "present": true,
+      "vendor": "0x10de",
+      "device": "0x25a0",
+      "class": "0x030200",
+      "irq": "130",
+      "linux_driver": "nvidia",
+      "bars": [
+        {
+          "bar": 0,
+          "size_bytes": 16777216,
+          "kind": "mmio",
+          "prefetchable": false
+        },
+        {
+          "bar": 1,
+          "size_bytes": 4294967296,
+          "kind": "mmio",
+          "prefetchable": true
+        },
+        {
+          "bar": 3,
+          "size_bytes": 33554432,
+          "kind": "mmio",
+          "prefetchable": true
+        },
+        {
+          "bar": 5,
+          "size_bytes": 128,
+          "kind": "ioport",
+          "prefetchable": false
+        }
+      ]
+    }
+  },
+  "iommu": {
+    "iommu_sysfs_units": [],
+    "iommu_groups_count": 0,
+    "vtd_active_in_host_linux": false,
+    "dmar_acpi_table": "present_root_only",
+    "cmdline_iommu_flags": []
+  },
+  "kernel_modules_und_audit": {
+    "xe": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/kernel/drivers/gpu/drm/xe/xe.ko.zst",
+      "present": true,
+      "zst_bytes": 1508899,
+      "ko_bytes": 8560926,
+      "undefined_symbol_count": 1213,
+      "buckets": {
+        "pci_dma_iommu_acpi": 77,
+        "other": 451,
+        "mm_pages_vmalloc_pin": 8,
+        "sync_wq_rcu_irq": 50,
+        "drm_kms_gem_ttm": 592,
+        "dma_buf_resv_fence": 33,
+        "firmware": 2
+      },
+      "sample_symbols": [
+        "acpi_check_dsm",
+        "acpi_dev_free_resource_list",
+        "acpi_dev_get_resources",
+        "acpi_evaluate_dsm",
+        "acpi_find_child_device",
+        "acpi_get_handle",
+        "acpi_get_name",
+        "acpi_target_system_state",
+        "__acpi_video_get_backlight_type",
+        "acpi_video_register"
+      ]
+    },
+    "i915": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/kernel/drivers/gpu/drm/i915/i915.ko.zst",
+      "present": true,
+      "zst_bytes": 1840171,
+      "ko_bytes": 10633775,
+      "undefined_symbol_count": 1244,
+      "buckets": {
+        "pci_dma_iommu_acpi": 65,
+        "other": 550,
+        "mm_pages_vmalloc_pin": 17,
+        "sync_wq_rcu_irq": 61,
+        "drm_kms_gem_ttm": 509,
+        "dma_buf_resv_fence": 40,
+        "firmware": 2
+      },
+      "sample_symbols": [
+        "acpi_check_dsm",
+        "acpi_dev_free_resource_list",
+        "acpi_dev_get_resources",
+        "acpi_evaluate_dsm",
+        "acpi_find_child_device",
+        "acpi_get_handle",
+        "acpi_get_name",
+        "acpi_target_system_state",
+        "__acpi_video_get_backlight_type",
+        "acpi_video_register"
+      ]
+    },
+    "nvidia": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/updates/dkms/nvidia.ko.zst",
+      "present": true,
+      "zst_bytes": 12245950,
+      "ko_bytes": 28746381,
+      "undefined_symbol_count": 470,
+      "buckets": {
+        "pci_dma_iommu_acpi": 71,
+        "other": 350,
+        "mm_pages_vmalloc_pin": 12,
+        "sync_wq_rcu_irq": 26,
+        "dma_buf_resv_fence": 8,
+        "drm_kms_gem_ttm": 1,
+        "firmware": 2
+      },
+      "sample_symbols": [
+        "acpi_evaluate_integer",
+        "acpi_evaluate_object",
+        "acpi_gbl_FADT",
+        "acpi_get_handle",
+        "acpi_get_next_object",
+        "acpi_install_notify_handler",
+        "acpi_remove_notify_handler",
+        "acpi_walk_namespace",
+        "add_memory_driver_managed",
+        "address_space_init_once"
+      ]
+    },
+    "nvidia_modeset": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/updates/dkms/nvidia-modeset.ko.zst",
+      "present": true,
+      "zst_bytes": 979052,
+      "ko_bytes": 3822949,
+      "undefined_symbol_count": 105,
+      "buckets": {
+        "pci_dma_iommu_acpi": 2,
+        "other": 92,
+        "mm_pages_vmalloc_pin": 4,
+        "sync_wq_rcu_irq": 7
+      },
+      "sample_symbols": [
+        "__acpi_video_get_backlight_type",
+        "acpi_video_register_backlight",
+        "backlight_device_register",
+        "backlight_device_unregister",
+        "cdev_add",
+        "cdev_del",
+        "cdev_init",
+        "__check_object_size",
+        "complete",
+        "const_current_task"
+      ]
+    },
+    "nvidia_drm": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/updates/dkms/nvidia-drm.ko.zst",
+      "present": true,
+      "zst_bytes": 103849,
+      "ko_bytes": 388437,
+      "undefined_symbol_count": 273,
+      "buckets": {
+        "other": 91,
+        "pci_dma_iommu_acpi": 3,
+        "dma_buf_resv_fence": 8,
+        "drm_kms_gem_ttm": 151,
+        "mm_pages_vmalloc_pin": 3,
+        "sync_wq_rcu_irq": 17
+      },
+      "sample_symbols": [
+        "aperture_remove_conflicting_devices",
+        "aperture_remove_conflicting_pci_devices",
+        "boot_cpu_data",
+        "cachemode2protval",
+        "cancel_delayed_work_sync",
+        "complete",
+        "const_current_task",
+        "_copy_from_user",
+        "_copy_to_user",
+        "__default_kernel_pte_mask"
+      ]
+    },
+    "nvidia_uvm": {
+      "path": "/usr/lib/modules/6.18.62-1-lts/updates/dkms/nvidia-uvm.ko.zst",
+      "present": true,
+      "zst_bytes": 977212,
+      "ko_bytes": 4944149,
+      "undefined_symbol_count": 341,
+      "buckets": {
+        "other": 279,
+        "mm_pages_vmalloc_pin": 13,
+        "pci_dma_iommu_acpi": 21,
+        "dma_buf_resv_fence": 9,
+        "sync_wq_rcu_irq": 19
+      },
+      "sample_symbols": [
+        "address_space_init_once",
+        "alloc_chrdev_region",
+        "__alloc_pages_noprof",
+        "alloc_pages_noprof",
+        "__bitmap_and",
+        "__bitmap_andnot",
+        "__bitmap_clear",
+        "__bitmap_complement",
+        "__bitmap_equal",
+        "__bitmap_intersects"
+      ]
+    }
+  },
+  "nvidia_kernel_open_os_shim": {
+    "present": true,
+    "source_root": "/usr/src/nvidia-615.78.08/kernel-open",
+    "os_interface_h_os_api_count": 162,
+    "os_interface_c_lines": 3147,
+    "sample_os_apis": [
+      "os_acquire_mutex",
+      "os_acquire_rwlock_read",
+      "os_acquire_rwlock_write",
+      "os_acquire_semaphore",
+      "os_acquire_spinlock",
+      "os_alloc_mem",
+      "os_alloc_mutex",
+      "os_alloc_pages_node",
+      "os_alloc_rwlock",
+      "os_alloc_semaphore",
+      "os_alloc_spinlock",
+      "os_alloc_wait_queue",
+      "os_allocate_temporary_file",
+      "os_bug_check",
+      "os_call_vgpu_vfio",
+      "os_cgroup_for_pid"
+    ]
+  },
+  "firmware": {
+    "intel_tgl_guc_70_1_1_zst": 102651,
+    "intel_tgl_firmware_files": 15,
+    "nvidia_615_gsp_ga10x_bytes": 27043992,
+    "nvidia_615_ucodes_ga10x_bytes": 58215936
+  },
+  "prime_zero_copy_fence_probe": {
+    "frame_bytes": 4096000,
+    "iterations": 48,
+    "full_copy_p50_ns": 221056,
+    "full_copy_p95_ns": 391004,
+    "zero_copy_fence_p50_ns": 18,
+    "zero_copy_fence_p95_ns": 18,
+    "speedup_x": 12280.9,
+    "stale_gen_rejected": true,
+    "checksum_ok": true
+  }
+}

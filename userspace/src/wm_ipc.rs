@@ -8,17 +8,19 @@
 use crate::action::LatencyRing;
 use crate::compositor::DesktopCompositor;
 use crate::gfx::Rect;
+use crate::gpu_proto::{GPU_OP_ATTACH_BACKBUF, GPU_OP_PRESENT_RECT};
 use crate::shell::LineBuilder;
 use crate::vault_crypto::scrub_bytes;
 use crate::vault_proto::{pack_passphrase_mrs, pack_vault_label};
 use crate::wm::{LayoutMode, SessionVisualState, WindowManager, TOPBAR_H};
 use crate::{
-    pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_reply_inline, sys_write_debug,
-    UserIpcRecvExt, BADGE_INPUT_SVC, BADGE_SUPERVISOR, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
+    msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_call_inline,
+    sys_ipc_call_with_grant, sys_ipc_reply_inline, sys_write_debug, UserIpcRecvExt,
+    BADGE_INPUT_SVC, BADGE_SUPERVISOR, EBADCAP, EREVOKED, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
     IPC_OP_PONG, IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER,
     IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_SET_LAYOUT,
     IPC_OP_WM_SET_PREFS, IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TAKE_LOCK_PIN,
-    IPC_OP_WM_TOGGLE_TILING,
+    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ,
 };
 
 pub fn wm_log_line(lb: &LineBuilder) {
@@ -35,6 +37,49 @@ fn reply_err(disp_ep: u64, tok: u64, code: u32) {
     if tok != 0 {
         let _ = sys_ipc_reply_inline(disp_ep, tok, pack_msg_tag(code, 0, 1, 0), [0; 4]);
     }
+}
+
+/// Present dirty compositor bounding box via bound `dry-gpu` endpoint, falling back
+/// transparently to direct UEFI GOP blitting if the GPU server faulted or revoked its endpoint.
+pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option<(u64, u64)> {
+    let gpu_ep = wm.gpu_ep_cap;
+    if gpu_ep == 0 {
+        return None;
+    }
+    let cur = (wm.cursor_x as u64 & 0xffff)
+        | (((wm.cursor_y as u64) & 0xffff) << 16)
+        | (u64::from(wm.cursor_visible) << 32)
+        | (u64::from(wm.cursor_large) << 33);
+    let flags = u64::from(wm.session_state == SessionVisualState::DisplayBlanked)
+        | (u64::from(wm.high_contrast) << 1);
+    let mrs = [
+        (bbox.x as u64) | ((bbox.y as u64) << 32),
+        (bbox.w as u64) | ((bbox.h as u64) << 32),
+        cur,
+        flags,
+    ];
+    let reason: &[u8] = match sys_ipc_call_inline(
+        gpu_ep,
+        pack_msg_tag(GPU_OP_PRESENT_RECT, 0, 4, 0),
+        mrs,
+        0,
+    ) {
+        Ok((tag, _, out)) if msg_tag_label(tag) == IPC_OP_PONG => {
+            wm.gpu_presents = wm.gpu_presents.wrapping_add(1);
+            return Some((out[0], out[1]));
+        }
+        Ok(_) => b"proto_err",
+        Err(err) if err == EREVOKED || err == EBADCAP => b"ep_revoked",
+        Err(_) => b"ipc_err",
+    };
+    let _ = sys_cap_revoke(gpu_ep, 1);
+    wm.gpu_ep_cap = 0;
+    wm.gpu_fallbacks = wm.gpu_fallbacks.wrapping_add(1);
+    let mut flb = LineBuilder::new();
+    flb.push_bytes(b"[DRY-WM] GPU_FALLBACK_TO_GOP reason=");
+    flb.push_bytes(reason);
+    wm_log_line(&flb);
+    None
 }
 
 /// Handle `WM_TOGGLE_TILING`, `WM_BIND_SUP_NOTIF`, `WM_POLL_ACTION`, `WM_FOCUS_OWNER`, and `WM_QUERY_STATE`.
@@ -87,6 +132,43 @@ pub fn handle_wm_admin_op(
                     let _ = sys_cap_revoke(wm.sup_wake_cap, 1);
                 }
                 wm.sup_wake_cap = ext.transferred_cap;
+            } else if mrs[2] == 2 {
+                if wm.gpu_ep_cap != 0 {
+                    let _ = sys_cap_revoke(wm.gpu_ep_cap, 1);
+                }
+                wm.gpu_ep_cap = ext.transferred_cap;
+                if wm.gpu_ep_cap != 0 {
+                    let need = (comp.w * comp.h * 4).div_ceil(2 * 1024 * 1024).min(2);
+                    let mut attach_ok = true;
+                    for i in 0..need {
+                        let cap = wm.back_caps[i];
+                        let ok = cap != 0
+                            && sys_ipc_call_with_grant(
+                                wm.gpu_ep_cap,
+                                GPU_OP_ATTACH_BACKBUF,
+                                [i as u64, 0, 0, 0],
+                                cap,
+                                RIGHT_READ | RIGHT_MAP,
+                                0,
+                                0,
+                            )
+                            .is_ok_and(|(t, _, _)| msg_tag_label(t) == IPC_OP_PONG);
+                        if !ok {
+                            attach_ok = false;
+                            break;
+                        }
+                    }
+                    if attach_ok {
+                        let mut glb = LineBuilder::new();
+                        glb.push_bytes(b"[DRY-WM] GPU_SCANOUT_BOUND back_2m=");
+                        glb.push_u64(need as u64);
+                        wm_log_line(&glb);
+                        comp.scene_dirty.mark(Rect::new(0, 0, comp.w, comp.h));
+                    } else {
+                        let _ = sys_cap_revoke(wm.gpu_ep_cap, 1);
+                        wm.gpu_ep_cap = 0;
+                    }
+                }
             } else {
                 if wm.sup_notif_cap != 0 {
                     let _ = sys_cap_revoke(wm.sup_notif_cap, 1);

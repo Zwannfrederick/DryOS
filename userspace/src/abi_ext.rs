@@ -243,6 +243,16 @@ pub fn sys_dma_alloc(pci_cap: u64, user_vaddr: u64) -> Result<(u64, u64), isize>
     }
 }
 
+/// Allocate a pinned 2 MiB `DEVICE_DMA | NO_DELEGATE` huge frame mapped `USER_RW` at `user_vaddr`.
+/// Returns `(frame_cap, dma_phys_addr)`.
+#[inline]
+pub fn sys_dma_alloc_2m(pci_cap: u64, user_vaddr: u64) -> Result<(u64, u64), isize> {
+    if (user_vaddr & 0x1f_ffff) != 0 {
+        return Err(crate::EINVAL);
+    }
+    sys_dma_alloc(pci_cap, user_vaddr | DMA_ALLOC_FLAG_2M)
+}
+
 #[inline]
 pub fn sys_vault_ctl(
     vault_cap: u64,
