@@ -1,30 +1,31 @@
 # DRY OS — Sıfır-Bağlam Mühendislik Devir Teslim Kılavuzu (`HANDOVER.md`)
 
-> **Son Güncelleme:** 14 Kasım 2026 (`Project Ascension 3.0`: `Milestone 2C-2` Donanım Temelleri `8d230df` & `Track B: DRY Glass` Masaüstü)  
+> **Son Güncelleme:** 14 Kasım 2026 (`DRY Glass 2.0` [`G2-1..G2-5`]: Saf `#![no_std]` TrueType AA + `ui/` Ortak Bileşen Kiti + `6` Yeniden Tasarlanmış Uygulama + `101/101` QEMU & `5/5` Matris)  
 > **İlke:** *Minimum Overhead. Maximum Useful Work. Correctness first. Security always. Performance measured.*
 
 ---
 
 ## SONRAKİ OTURUM — YARINKİ AJANLAR (GPT / CLAUDE / KODLAMA AJANI) BURADAN BAŞLA
 
-1. **Projenin Mevcut Durumu ve Kesinleşmiş Mimari Karar (`ADR-016` .. `ADR-020`):**
-   - DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + `23` adet statik `CPL=3` ELF64 kullanıcı alanı ikilisi; `MAX_LATCHED_MODULES = 32`).
-   - Faz 0 (`H1` + `H2`), Faz 1 (`1A..1C` + `Opt Pass v1`), Faz 2 alt aşamaları (**`Milestone 2A-1..2B`**, **`2C-0`**, **`2A-4a`**, **`2C-1`** Linux `v6.18` `virtio-rng.c`, **`Priority C`** `VirtIO-GPU` 2D + `GOP Fallback`), **`Milestone 2C-2` (`8d230df` — `VT-d` `DMAR` `SLPT`, `MSI/MSI-X`, `>4 GiB` `BAR` + `PAT4` `WC`, `TCB`-bağlı `Notification` & `AUD-K6/K7/K8`, `AUD-U3/U4/U8`)** ve **`Track B` (`DRY Glass` Masaüstü, `SharedPixelSurfaceHeader`, `6` yerel uygulama, `1024x768..1920x1080` `VirtIO-GPU` & canlı `GOP` kurtarma)** **TAMAMLANMIŞTIR (`DONE`)**.
-   - **Kesin Mimari Kural (`ADR-016..020`):** `Device Broker` (`0x0008`) yalnızca kontrol düzlemidir; veri trafiği doğrudan kiralanmış `Endpoint` veya `IoRingSharedPage` üzerindedir. **`dry-kernel` (`Ring 0`) içinde `0` satır Linux ABI/GPL kodu vardır**; `Syscall ABI v0.1` (`0..=31`) korunmuştur. Bare-metal `Iris Xe`/`NVIDIA` sürücüleri henüz fiziksel donanımda çalıştırılmamıştır (`QEMU/KVM != bare-metal`; DRM/GEM/TTM shim eksiktir -> **`BLOCKED`**).
+1. **Projenin Mevcut Durumu ve Kesinleşmiş Mimari Karar (`ADR-016` .. `ADR-021`):**
+   - DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + `23` adet statik `CPL=3` ELF64 kullanıcı alanı ikilisi; `MAX_LATCHED_MODULES = 32`, tüm userspace ikilileri `< 170` 4 KiB sayfa).
+   - Faz 0 (`H1` + `H2`), Faz 1 (`1A..1C` + `Opt Pass v1`), Faz 2 alt aşamaları (**`Milestone 2A-1..2B`**, **`2C-0`**, **`2A-4a`**, **`2C-1`** Linux `v6.18` `virtio-rng.c`, **`Priority C`** `VirtIO-GPU` 2D + `GOP Fallback`), **`Milestone 2C-2` (`8d230df` — `VT-d` `DMAR` `SLPT`, `MSI/MSI-X`, `>4 GiB` `BAR` + `PAT4` `WC`, `TCB`-bağlı `Notification` & `AUD-K6/K7/K8`, `AUD-U3/U4/U8`)**, **`Track B` (`6078bff` — `DRY Glass` v1)** ve **`DRY Glass 2.0` (`a0bab8c..HEAD` — saf `#![no_std]` TrueType AA, SIL OFL 1.1 `DrySans`/`DryMono`, SDF vektör tuval & ortak `ui/` kiti, `100%/125%/150%` DPI, `Obsidian`/`Daylight`/`HC` buzlu compositor, `6` yenilenmiş yerel uygulama & `--p10-only` çok-çözünürlüklü E2E)** **TAMAMLANMIŞTIR (`DONE`)**.
+   - **Kesin Mimari Kural (`ADR-016..021`):** `Device Broker` (`0x0008`) yalnızca kontrol düzlemidir; veri trafiği doğrudan kiralanmış `Endpoint` veya `IoRingSharedPage` üzerindedir. **`dry-kernel` (`Ring 0`) içinde `0` satır Linux ABI/GPL veya UI kodu vardır**; `Syscall ABI v0.1` (`0..=31`) korunmuştur. Bare-metal `Iris Xe`/`NVIDIA` sürücüleri henüz fiziksel donanımda çalıştırılmamıştır (`QEMU/KVM != bare-metal`; DRM/GEM/TTM shim eksiktir -> **`BLOCKED`**).
 2. **Son Doğrulanmış Commit Zinciri (`main`):**
    - **`8572da3..ac340da`** (`Milestone 2A-4a`: `MAX_LATCHED_MODULES=32`, `XSAVEOPT64`/`FXSAVE64`, `FaultEndpoint`, `AUD-K15`)
    - **`1345bcd`** (`Milestone 2C-1`: gerçek Linux `v6.18` `virtio-rng.c` Driver Island + 3-yuvalı PCI DMA)
    - **`1879128` .. `479674b`** (`Priority C` & `docs(ascension-2.0)`: `94/94` QEMU + `5/5` Matris)
    - **`8d230df`** (`Track A — Milestone 2C-2`: `VT-d` `DMAR`/`SLPT`, `MSI/MSI-X`, `>4 GiB BAR` & `PAT4 WC`, `TCB`-bağlı `Notification`, `AUD-K6/K7/K8` & `AUD-U3/U4/U8` -> **`95/95` QEMU + `5/5` Matris**)
-   - **`HEAD`** (`Track B — DRY Glass`: `userspace/src/glass/*`, `SharedPixelSurfaceHeader`, `dry-editor` + `dry-calc`, `1024x768`/`1280x800`/`1920x1080` `VirtIO-GPU` + `GOP Fallback`, `--p9-only` & `10` QMP PNG).
+   - **`6078bff`** (`Track B — DRY Glass v1`: `userspace/src/glass/*`, `SharedPixelSurfaceHeader`, `dry-editor` + `dry-calc`, `1024x768..1920x1080` `VirtIO-GPU` + `GOP Fallback`, `--p9-only` -> **`98/98` QEMU**)
+   - **`a0bab8c..HEAD`** (`DRY Glass 2.0` [`G2-1..G2-5`]: `userspace/src/ttf/*` & `assets/fonts/` OFL-1.1, `userspace/src/ui/*`, `df7b141` AA buzlu compositor, `c69439c` `6` yenilenmiş uygulama, `b27bc32` `dry_settings` `WindowConfig` eşitlemesi, `--p10-only` & `docs/DRY_GLASS_2_0_REPORT.md`)
 3. **Son Doğrulanmış Test Kanıtları (`14 Kasım 2026`):**
-   - `python3 tools/qemu_boot_test.py` (**`98/98 PASS`**, `leaked_frames=0`): `58` legacy/2A-4a + `9` P1 + `14` P2 + `6` P3 + `3` P4 (`2B`) + `2` P5 (`2C-0`) + `1` P6 (`2C-1`) + `1` Priority-C (`GPU`) + `1` `2C-2` (`HW`) + `3` `DRY Glass` (`P9`).
-   - `python3 tools/qemu_boot_test.py --p3-matrix` -> **`5/5 PASS`** (`1..20 vCPU`, `256M..2G`, `20 vCPU / 2G free_4k=516090`, `leaked_frames=0`).
-   - `python3 tools/qemu_boot_test.py --p8-only` (`Milestone 2C-2` — `p8_hw_foundations_latest.json`): `dmar_unit=5`, `vtd_rogue_faults=1`, `msi_vec=0x40`, `bar64_above4g=true`, `wc_64k_cyc=25,629`, `uc_64k_cyc=11,297`, `msi_bound_p50_cyc=76,037` (`24.42 us`), `leaked_frames=0`.
-   - `python3 tools/qemu_boot_test.py --p9-only` (**`3/3 PASS`**, `leaked_frames=0` — `results_p9_glass.json`): `1280x800` (`Alt+Space`, `dry-calc` `6*7=42`, `dry-editor` `/persist/notes.txt` `118 B`, `Frosted Daylight`, `Quick Settings`, `Notification Center`, `8.33s`), `1920x1080` (`Tiled` + `gpufault` `GPU_FALLBACK_TO_GOP` -> `gen=2` `LIVE_RECOVERY_OK`, `5.01s`), `1024x768` (`4.64s`) + `10` canlı PNG (`docs/screenshots/glass_*.png`).
-   - `make -C experiments/h3-gpu-compat test` -> `xe=1213`, `i915=1244`, `nvidia=1189` UND, `prime_copy_p50=262582ns`, `prime_fence_p50=18ns` (`14587.9x`), `vtd_active=False`.
-   - `python3 tools/h2-audit/fetch_virtio_rng_sources.py --verify` -> **`PASS` (`0` değiştirilmiş upstream kaynak)**.
-   - `objdump` yığın çerçevesi: **`rust_syscall_dispatch = 248 B` (`0xf8`)**.
+   - `python3 tools/qemu_boot_test.py` (**`101/101 PASS`**, `leaked_frames=0`): `58` legacy/2A-4a + `9` P1 + `14` P2 + `6` P3 + `3` P4 (`2B`) + `2` P5 (`2C-0`) + `1` P6 (`2C-1`) + `1` Priority-C (`GPU`) + `1` `2C-2` (`HW`) + `3` `DRY Glass` (`P9`) + `3` `DRY Glass 2.0` (`P10`).
+   - `python3 tools/qemu_boot_test.py --p3-matrix` -> **`5/5 PASS`** (`1..20 vCPU`, `256M..2G`, `20 vCPU / 2G free_4k=512317`, `leaked_frames=0`).
+   - `python3 tools/qemu_boot_test.py --p8-only` (`Milestone 2C-2`): `VT-d DMAR`, `MSI vec=0x40`, `BAR64 > 4 GiB WC`, `TCB`-bağlı `Notification`, `leaked_frames=0`.
+   - `python3 tools/qemu_boot_test.py --p9-only` (**`3/3 PASS`**, `leaked_frames=0` — `results_p9_glass.json`): `1280x800`, `1920x1080` (`gpufault -> gen=2`), `1024x768` + `10` PNG (`docs/screenshots/glass_*.png`).
+   - `python3 tools/qemu_boot_test.py --p10-only` (**`3/3 PASS`**, `leaked_frames=0` — `results_dry_glass_2_0.json`): `1280x800` (`Launcher`, `dry-calc` `6*7=42`, `dry-editor` `/persist/notes.txt` `120 B`, `QS`, `100->125->150->100%` DPI, `HC`, `Notif`, `Vault` Lock Shield, `11.751s`), `1920x1080` (`Tiled` + `#UD` `gen=2 vec=6`, `5.169s`), `1024x768` (`6` eşzamanlı `Stacked` + `8*9=72`, `3.869s`) + **`12` PNG (`docs/screenshots/glass2_*.png`)**.
+   - `python3 tools/h2-audit/fetch_virtio_rng_sources.py --verify` -> **`PASS` (`0` değiştirilmiş upstream kaynak, `sha256=720433a8...`)**.
+   - `objdump` yığın çerçevesi: **`rust_syscall_dispatch = 248 B` (`0xf8`)**; en büyük userspace ELF `dry-display = 543,720 B` (`132.7` `< 170` 4 KiB sayfa).
 4. **Kesinleştirilmiş Sonraki Milestone Sırası:**
    1. **`Milestone 2C-3` / `Faz 3A–3B` (Sırada #1):** `H2` `igc`/`e1000e` NIC adasını `VT-d` + `MSI/MSI-X` + `TCB`-bağlı `Notification` üzerine taşımak; `FaultEndpoint` + `ET_DYN` PIE üzerinde ilk Ring 3 `dry-linux-abi` (`musl` ELF64) kişilik sunucusu.
    2. **`Faz 4 / P5`:** Fiziksel donanım (`Bare-Metal` USB boot, gerçek `VT-d` / `xHCI` / `NVMe`), dar `Xe/GuC` KMS ve isteğe bağlı ayrık GPU MicroVM (`Venus` / `RTD3`).
@@ -43,13 +44,14 @@
    python3 tools/qemu_boot_test.py --build-only
    python3 tools/qemu_boot_test.py --p8-only
    python3 tools/qemu_boot_test.py --p9-only
+   python3 tools/qemu_boot_test.py --p10-only
    ```
    *(Kritik Kural: `experiments/h1-sched/src/runqueue.rs` ve `experiments/h1-sched/src/sync.rs` içindeki önceden mevcut kullanıcı değişikliklerine **kesinlikle dokunma**, `git add` veya `git checkout` uygulama.)*
 
 ### Yarınki Ajanlar İçin Başlangıç Talimatları
 
 - **Geliştirme Ajanı İçin:**
-  > DRY OS geliştirmesine devam etmeden önce `HANDOVER.md`, `DECISIONS.md` (`ADR-017..020`), `docs/EXPERIMENTS_ASCENSION_3_0.md` ve `docs/GPU_COMPATIBILITY_REPORT.md` dosyalarını oku. `git status -s` (`experiments/h1-sched/` korunacak) ve `--build-only` / `--p8-only` / `--p9-only` ile `Ascension 3.0` tabanını doğrula. Sıradaki adım **`Milestone 2C-3` / `Faz 3A–3B`**: `H2` `igc`/`e1000e` NIC sürücü adasını `VT-d` + `MSI/MSI-X` + `TCB`-bağlı `Notification` üzerine bağlamak ve `FaultEndpoint` üzerinde ilk Ring 3 `dry-linux-abi` (`musl` ELF64) sunucusunu kurmaktır.
+  > DRY OS geliştirmesine devam etmeden önce `HANDOVER.md`, `DECISIONS.md` (`ADR-017..021`), `docs/EXPERIMENTS_ASCENSION_3_0.md`, `docs/DRY_GLASS_2_0_REPORT.md` ve `docs/GPU_COMPATIBILITY_REPORT.md` dosyalarını oku. `git status -s` (`experiments/h1-sched/` korunacak) ve `--build-only` / `--p8-only` / `--p9-only` / `--p10-only` ile `DRY Glass 2.0` tabanını doğrula. Sıradaki adım **`Milestone 2C-3` / `Faz 3A–3B`**: `H2` `igc`/`e1000e` NIC sürücü adasını `VT-d` + `MSI/MSI-X` + `TCB`-bağlı `Notification` üzerine bağlamak ve `FaultEndpoint` üzerinde ilk Ring 3 `dry-linux-abi` (`musl` ELF64) sunucusunu kurmaktır.
 - **Bağımsız Kod İnceleme Ajanı İçin:**
   > Salt-okunur denetim yap. `HANDOVER.md` §4.10'daki kritik dosyaları (`iommu/{dmar,slpt,vtd}.rs`, `irq/msi.rs`, `pci_{bar,window}.rs`, `ipc/bound_notif.rs`, `userspace/src/glass/*`, `userspace/src/{virtio_gpu,wm,wm_ipc}.rs`) bellek sıralaması, CDT `revoke`, `VT-d` `SLPT`/`BME=0` quiesce ve `SharedPixelSurfaceHeader` sınırları açısından satır satır incele.
 
@@ -125,9 +127,10 @@ Depodaki tüm kaynak dosyalar `< 1.000` satır pragmatik tavanı altındadır:
     - `VT-d` & `DMAR`: `kernel/src/iommu/{mod,dmar,slpt,vtd,tests}.rs`
     - `MSI/MSI-X`, `>4 GiB` `BAR` & `PAT4` `WC`: `kernel/src/irq/msi.rs`, `kernel/src/pci_bar.rs`, `kernel/src/pci_window.rs`, `kernel/src/vspace/pte.rs`
     - `TCB`-bağlı `Notification` & donanım E2E: `kernel/src/ipc/bound_notif.rs`, `userspace/src/bin/dry_hw_test.rs`, `tools/qemu_p8_hw_validators.py`, `tools/compat_bench/p8_hw_foundations_latest.json`
-14. **`Track B`: `DRY Glass` Masaüstü, `SharedPixelSurface` & 6 Uygulama (`--p9-only`):**
-    - Cam tasarım & bulanıklık katmanı: `userspace/src/glass/{mod,theme,typography,icons,blur,chrome,overlays,app_kit}.rs` (`Obsidian Night` / `Frosted Daylight`, `low_overhead_glass`)
-    - Çoklu çözünürlük scanout & yeni uygulamalar (`23/32` modül): `userspace/src/surface.rs` (`SharedPixelSurfaceHeader`), `userspace/src/bin/{dry_editor,dry_calc}.rs`, `tools/qemu_p9_glass_validators.py`, `tools/compat_bench/results_p9_glass.json`, `docs/screenshots/glass_*.png` (`10` PNG)
+14. **`Track B` (`DRY Glass` v1) & `DRY Glass 2.0` (`--p9-only`, `--p10-only`):**
+    - Saf `#![no_std]` TrueType AA & OFL-1.1 yazıtipleri: `userspace/src/ttf/{mod,sfnt,raster,atlas,layout}.rs`, `assets/fonts/{DrySans-*,DryMono-*,OFL.txt,ATTRIBUTION.md}`, `tools/build_font_subsets.py`
+    - Ortak `ui/` bileşen kiti & `DRY Glass` compositor: `userspace/src/ui/{mod,canvas,icons,theme,layout,widgets,text_edit,containers}.rs`, `userspace/src/glass/{mod,theme,typography,icons,blur,chrome,overlays,dock_bar,app_kit}.rs`, `userspace/src/apps/*`
+    - Çoklu çözünürlük/DPI E2E doğrulama: `tools/qemu_p9_glass_validators.py`, `tools/qemu_p10_glass2_validators.py`, `tools/compat_bench/{results_p9_glass,results_dry_glass_2_0}.json`, `docs/screenshots/glass_*.png` (`10` PNG) + `docs/screenshots/glass2_*.png` (`12` PNG), `docs/DRY_GLASS_2_0_REPORT.md`
 
 ---
 
@@ -147,7 +150,8 @@ Depodaki tüm kaynak dosyalar `< 1.000` satır pragmatik tavanı altındadır:
 | **`Milestone 2C-1` (`Genuine Linux v6.18 virtio-rng.c Island`)** | **`1345bcd`** | Değiştirilmemiş upstream Linux `v6.18` `virtio-rng.c` (`sha256=720433a8...`, `GPL-2.0-only`) izole `dry-lx-rng.elf` adasında clang freestanding + minimal C shim ile QEMU `1AF4:1044` üzerinde `35` `vq_irqs`, `1,792 B` (`ones=49%`), `dir_p50=15,345 cyc` (`5.115 us`), `batch16=56,865.8 cyc/op`, `#UD` -> `1.565 ms` kurtarma (`quiesce=3`, `dma_denied=7`, `RSS=26` sayfa) | **`93/93` QEMU (`--lx-island-only`)** | `completed` yoklama (`used->idx` + `PAUSE`) kullanır (donanım MSI-X kesmesi yok); `0` çekirdek satırı Linux ABI/GPL kodu. |
 | **`Priority C` (`Ring-3 VirtIO-GPU 2D, GOP Fallback & H3 Audit`)** | **`1879128`..`479674b`** | İzole Ring-3 `dry-gpu.elf` (`1AF4:1050`) `1280x800` `B8G8R8X8_UNORM` (`present_p50=1.097 ms`), `#UD` (`vec=6`) çöküşünde canlı `[DRY-WM] GPU_FALLBACK_TO_GOP`, `gen=2` (`8.727 ms` kurtarma, `docs/p7_virtio_gpu_scanout.png`, `leaked_frames=0`), `H3` konak GPU/UND/firmware/PRIME fence denetimi | **`94/94` QEMU + `5/5` Matris + `H3`** | `VirtIO-GPU` 2D kapsamındadır (`Virgl` 3D yok); bare-metal GPU `BLOCKED`. |
 | **`Milestone 2C-2` (`Track A: VT-d, MSI/MSI-X, >4 GiB BAR & TCB Notif`)** | **`8d230df`** | ACPI `DMAR` (`dmar_unit=5`) + `VT-d` 4-seviye `SLPT` (`vtd_rogue_faults=1`), PCI `MSI/MSI-X` (`0x40..=0x5F`), 64-bit `>4 GiB` `BAR` + `PAT4` `WC`, `TCB`-bağlı `Notification` (`msi_bound_p50_cyc=76,037` / `24.42 us`) ve `AUD-K6/K7/K8`, `AUD-U3/U4/U8` kapanışı | **`95/95` QEMU + `5/5` Matris (`--p8-only`)** | QEMU `-device intel-iommu` üzerinde doğrulandı; fiziksel bare-metal henüz test edilmedi. |
-| **`Track B` (`DRY Glass Masaüstü & 6 Yerel Uygulama`)** | **`HEAD`** | `userspace/src/glass/*` (`Obsidian`/`Frosted Daylight` + `low_overhead_glass`), buzlu blur, `Launcher`/`Dock`/`Quick Settings`/`Notifications`, `SharedPixelSurfaceHeader` + `dry_editor.rs` (`/persist/notes.txt`) + `dry_calc.rs` (`23/32` modül), `1024x768`/`1280x800`/`1920x1080` `VirtIO-GPU` & canlı `GOP` kurtarma | **`98/98` QEMU + `5/5` Matris + `10` PNG (`leaked_frames=0`)** | `Clean/Diagnostic Boot` tek olay akışı ile `VirtIO-GPU` 3D/Virgl `PLANNED` kapsamındadır. |
+| **`Track B` (`DRY Glass` v1)** | **`6078bff`** | `userspace/src/glass/*`, `SharedPixelSurfaceHeader`, `dry_editor.rs` + `dry_calc.rs` (`23/32` modül), `1024x768..1920x1080` `VirtIO-GPU` & canlı `GOP` kurtarma | **`98/98` QEMU + `5/5` Matris + `10` PNG** | bitmap 8x16 UI ve uygulama-özel çizim içeriyordu (`DRY Glass 2.0`'da değiştirildi). |
+| **`DRY Glass 2.0` (`G2-1..G2-5`)** | **`a0bab8c..HEAD`** | Saf `#![no_std]` TrueType AA (`DrySans`/`DryMono`, SIL OFL 1.1), SDF vektör tuval + `ui/` ortak bileşen kiti (`100%/125%/150%` DPI), `Obsidian`/`Daylight`/`HC` buzlu compositor, `6` yenilenmiş yerel uygulama (`b27bc32` `Settings` `WindowConfig` eşitlemesi) & `--p10-only` | **`101/101` QEMU + `5/5` Matris + `12` PNG (`leaked_frames=0`)** | `Clean/Diagnostic Boot` tek olay akışı ile `VirtIO-GPU` 3D/Virgl `PLANNED` kapsamındadır. |
 
 *(Tamamlanmamış **`Milestone 2C-3` / `Faz 3A–3B` (`H2` `igc`/`e1000e` NIC Adası & `dry-linux-abi` ELF64)** ve **`Faz 4..5` (`Bare-Metal` USB / `Win32`)** aşamaları `PLANNED`/`BLOCKED` durumundadır.)*
 
@@ -212,17 +216,18 @@ python3 tools/h2-audit/fetch_virtio_rng_sources.py --verify
 python3 tools/qemu_boot_test.py --p8-only
 # -> SONUÇ: PASS (dmar_unit=5, vtd_rogue_faults=1, msi_vec=0x40, msi_bound_p50=24.42us, leaked=0)
 
-# 4. Track B: DRY Glass Masaüstü (1280x800, 1920x1080 & 1024x768) + 10 Canlı QMP PNG
+# 4. Track B (`DRY Glass` v1) & DRY Glass 2.0 Çoklu Çözünürlük / Multi-DPI
 python3 tools/qemu_boot_test.py --p9-only
-# -> SONUÇ: 3/3 PASS (obs/frosted daylight, dry-calc, dry-editor, gpufault -> gen=2, leaked=0)
+python3 tools/qemu_boot_test.py --p10-only
+# -> SONUÇ: P9 3/3 + P10 3/3 PASS (TrueType AA, 100/125/150% DPI, 6 apps, gpufault -> gen=2, leaked=0)
 
 # 5. SMP (1/2/4/8/20 vCPU) & RAM (256M/256M/512M/1G/2G) Masaüstü Matrisi
 python3 tools/qemu_boot_test.py --p3-matrix
-# -> SONUÇ: 5/5 PASS (20 vCPU / 2G free_4k=516090, leaked_frames=0)
+# -> SONUÇ: 5/5 PASS (20 vCPU / 2G free_4k=512317, leaked_frames=0)
 
-# 6. Tam Deterministik QEMU/KVM Regresyon Paketi (P1..P9 dahil)
+# 6. Tam Deterministik QEMU/KVM Regresyon Paketi (P1..P10 dahil)
 python3 tools/qemu_boot_test.py
-# -> SONUÇ: 98/98 PASS (0 FAIL, leaked_frames=0)
+# -> SONUÇ: 101/101 PASS (0 FAIL, leaked_frames=0)
 
 # 7. Çekirdek sıcak/soğuk syscall yığın çerçevesi denetimi
 objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel | \
@@ -310,7 +315,8 @@ objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel | \
   1. `fc557ba` .. `9f9c575` — `Milestone 2A-1..2C-0` (`90/90` QEMU + `5/5` Matris)
   2. `8572da3` .. `479674b` — `Ascension 2.0`: `2A-4a`, `2C-1` (`v6.18 virtio-rng.c`) & `Priority C` (`94/94` QEMU + `5/5` Matris)
   3. **`8d230df`** — `Ascension 3.0 Track A (Milestone 2C-2)`: `VT-d DMAR/SLPT`, `MSI/MSI-X`, `>4 GiB BAR`, `TCB`-bağlı `Notification`, `AUD-K6/K7/K8`, `AUD-U3/U4/U8` (`95/95` QEMU + `5/5` Matris)
-  4. **`HEAD`** — `Ascension 3.0 Track B (DRY Glass)`: `userspace/src/glass/*`, `SharedPixelSurfaceHeader`, `dry_editor` + `dry_calc`, `1024x768..1920x1080` `VirtIO-GPU` + `GOP Fallback`, `--p9-only` & `10` PNG (`docs/EXPERIMENTS_ASCENSION_3_0.md`, `ADR-020`)
+  4. **`6078bff`** — `Ascension 3.0 Track B (DRY Glass v1)`: `userspace/src/glass/*`, `SharedPixelSurfaceHeader`, `dry_editor` + `dry_calc`, `1024x768..1920x1080` `VirtIO-GPU` + `GOP Fallback`, `--p9-only` & `10` PNG (`docs/EXPERIMENTS_ASCENSION_3_0.md`, `ADR-020`)
+  5. **`a0bab8c..HEAD`** — `DRY Glass 2.0` (`G2-1..G2-5`): `userspace/src/{ttf,ui}/*` + `assets/fonts/` (SIL OFL 1.1), `df7b141` AA buzlu compositor, `c69439c` 6 yenilenmiş uygulama, `b27bc32` `dry_settings` `WindowConfig` eşitlemesi, `--p10-only` & `12` PNG (`docs/DRY_GLASS_2_0_REPORT.md`, `ADR-021`)
 - **Beklenen `git status -s` Çıktısı ve Bilerek Korunan Dosyalar:**
   ```text
    M experiments/h1-sched/src/runqueue.rs
@@ -323,7 +329,7 @@ objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel | \
 ## 4.9 Kesinleştirilmiş Sonraki Milestone Sırası (`2C-3` -> `Faz 4`)
 
 1. **Aşama 1 (`DONE` — `8572da3..479674b`):** `Milestone 2A-4a`, `2C-1` (`v6.18 virtio-rng.c`) ve `Priority C` (`VirtIO-GPU` 2D).
-2. **Aşama 2 (`DONE` — `8d230df` + `Track B`):** `Milestone 2C-2` (`VT-d` `DMAR`/`SLPT`, `MSI/MSI-X`, `>4 GiB BAR`, `TCB` `Notification`, `2A-4a` P1 kapanışı) ve `DRY Glass` masaüstü (`6` uygulama, `--p9-only`, `10` PNG).
+2. **Aşama 2 (`DONE` — `8d230df`, `6078bff`, `a0bab8c..HEAD`):** `Milestone 2C-2` (`VT-d`/`MSI-X`/`>4 GiB BAR`/`TCB Notif`/`2A-4a` P1 kapanışı) + `DRY Glass` v1 (`--p9-only`) + **`DRY Glass 2.0`** (`ttf/` AA + `ui/` kiti + `6` yenilenmiş uygulama + `--p10-only` + `12` PNG).
 3. **Aşama 3 (`PLANNED` — `Milestone 2C-3` / `Faz 3A–3B`, Sırada #1):**
    - `H2` `igc`/`e1000e` NIC adası, `VirtIO-GPU` `VIRGL`/`Venus` ve `FaultEndpoint` + `ET_DYN` PIE üzerinde Ring 3 `dry-linux-abi` (`musl` ELF64).
 4. **Aşama 4 (`PLANNED` — `Faz 4 / P5` Bare-Metal & GPU):**
@@ -342,4 +348,4 @@ objdump -d -M intel kernel/target/x86_64-unknown-none/release/dry-kernel | \
 | **5. `VT-d` (`DMAR`/`SLPT`), `MSI/MSI-X` & `>4 GiB` `BAR`** | `kernel/src/iommu/{mod,dmar,slpt,vtd,tests}.rs`, `kernel/src/irq/msi.rs`, `kernel/src/pci_{bar,window}.rs`, `kernel/src/pci.rs` | 4-seviye `SLPT` (`IOVA -> HPA`), `quiesce_slot_for_cspace` (`MSI` maske + `BME=0` + `SLPT/IOTLB` scrub), `>4 GiB BAR` penceresi & `dry_hw_test.rs`. |
 | **6. Depolama (`IoRing`, `DRYFS_v1`), `Vault` & `Broker`** | `userspace/src/{ioring,persist_fs,vault_crypto,island_proto}.rs`, `userspace/src/bin/{dry_blk,dry_vault,dry_broker}.rs`, `userspace/src/supervisor.rs` | `AUD-U1..U9` kapanmaları, SPSC `Acquire/Release`, `Device Broker` kontrol/veri ayrımı ve `RIGHT_REVOKE` alt-ağaç iptali. |
 | **7. Linux `v6.18` `virtio-rng` Driver Island (`2C-1`)** | `drivers/lx-virtio-rng-island/{Cargo.toml,src/main.rs}`, `drivers/lx-virtio-rng-island/cshim/lx_virtio_shim.c`, `vendor/linux-drivers/v6.18/virtio_rng/virtio-rng.c` | `GPL-2.0-only` izolasyonu (`0` çekirdek Linux satırı), `kzalloc` `DEVICE_DMA`, `sg_init_one` sınırları ve `#UD` -> `gen=2` kurtarma. |
-| **8. `DRY Glass`, `VirtIO-GPU` 2D & 6 Uygulama (`Track B`)** | `userspace/src/glass/{mod,theme,typography,icons,blur,chrome,overlays,app_kit}.rs`, `userspace/src/{surface,wm,wm_ipc,compositor,virtio_gpu,gpu_audit}.rs`, `userspace/src/bin/{dry_gpu,dry_display,dry_editor,dry_calc}.rs` | `SharedPixelSurfaceHeader`, `MAX_BACKBUF_2M = 8`, `MAX_GPU_SCANOUT_2M = 5`, `GPU_FALLBACK_TO_GOP` -> `gen=2` kurtarması, `light_mode` / `low_overhead_glass` ve `qemu_p9_glass_validators.py`. |
+| **8. `DRY Glass 2.0`, `VirtIO-GPU` 2D & 6 Uygulama (`G2-1..G2-5`)** | `userspace/src/ttf/{mod,sfnt,raster,atlas,layout}.rs`, `userspace/src/ui/{mod,canvas,icons,theme,layout,widgets,text_edit,containers}.rs`, `userspace/src/glass/*`, `userspace/src/apps/*`, `userspace/src/{surface,wm,wm_ipc,compositor,virtio_gpu}.rs`, `userspace/src/bin/{dry_gpu,dry_display,dry_shell,dry_sysmon,dry_files,dry_settings,dry_editor,dry_calc}.rs` | `DrySans`/`DryMono` (`OFL-1.1`), `RasterScratch`/`96 KiB` atlas, SDF `rrect_cov`, `100%/125%/150%` `scale_px`, `WindowConfig` canlı tercih eşitlemesi (`b27bc32`), `GPU_FALLBACK_TO_GOP` -> `gen=2` kurtarması ve `qemu_p10_glass2_validators.py`. |

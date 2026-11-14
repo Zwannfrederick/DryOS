@@ -966,3 +966,14 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 - **Ayrıntılı Kanıt Dosyası:** [docs/EXPERIMENTS_ASCENSION_3_0.md](docs/EXPERIMENTS_ASCENSION_3_0.md)
 - **Track A (`8d230df`, `tools/compat_bench/p8_hw_foundations_latest.json`):** `VT-d` (`DMAR`), `MSI/MSI-X`, `>4 GiB` `WC/UC` `64-bit` PCI `BAR`, `TCB`-bağlı `Notification` (`sys_notify_bind_tcb`, `msi_bound_p50_cyc = 76,037` [`24.42 us`]) ve `6` `P1` denetim bulgusu (`AUD-K6..K8`, `AUD-U3/U4/U8`) kapatıldı (`95/95` QEMU tabanı).
 - **Track B (`DRY Glass` Çoklu Çözünürlük `VirtIO-GPU`, `tools/compat_bench/results_p9_glass.json`):** `tools/qemu_p9_glass_validators.py` (`--p9-only`) ile `p9a` (`1280x800`, `Alt+Space` başlatıcı, `dry-calc` `6*7=42`, `dry-editor` `/persist/notes.txt` `118 B`, `Frosted Daylight`, `8.33 s`), `p9b` (`1920x1080` `Tiled` + `gpufault` `GPU_FALLBACK_TO_GOP` -> `gen=2` `LIVE_RECOVERY_OK` + `back_2m=4`, `5.01 s`) ve `p9c` (`1024x768`, `4.64 s`) `3/3 PASS` ve `10` PNG (`docs/screenshots/glass_*.png`) doğrulandı. Tam paket **`98/98 PASS` + `5/5` SMP/RAM matrisi (`leaked_frames=0`)** verdi.
+
+---
+
+## Bölüm S (`EXP-G20`) — DRY Glass 2.0: TrueType AA, Ortak UI Kiti & Çok-DPI Doğrulama
+
+- **Tarih & Kanıt:** 14 Kasım 2026 (`ADR-021`) | **Tam Rapor:** [`docs/DRY_GLASS_2_0_REPORT.md`](docs/DRY_GLASS_2_0_REPORT.md) | **Ham JSON:** [`tools/compat_bench/results_dry_glass_2_0.json`](tools/compat_bench/results_dry_glass_2_0.json)
+- **Tekrarlanabilir Komutlar:** `python3 tools/qemu_boot_test.py --p10-only` (`3/3 PASS`) | `python3 tools/qemu_boot_test.py` (`101/101 PASS`) | `python3 tools/qemu_boot_test.py --p3-matrix` (`5/5 PASS`)
+- **Özet Bulgular (`leaked_frames = 0`, `rust_syscall_dispatch = 248 B`, max `userspace` ELF = `dry-display` `543,720 B` [`132.7` `< 170` 4K sayfa], `virtio-rng.c` `0` fark):**
+  1. **`p10a` (`1280x800`, `11.751 s`):** `Launcher`, `dry-calc` (`6*7=42`), `dry-editor` (`/persist/notes.txt` `120 B`), `Quick Settings` (`light=1`), `Settings` `100->125->150->100%` DPI (`b27bc32`), `High Contrast`, `Notifications`, `DRY Vault` kilidi (`irq12=30`).
+  2. **`p10b` (`1920x1080`, `5.169 s`):** 4-uygulamalı `Tiled` + canlı `#UD` `gpufault` -> `GOP` fallback -> `VirtIO-GPU` `gen=2` kurtarma (`back_2m=4`, `pci_quiesce=3`).
+  3. **`p10c` (`1024x768`, `3.869 s`):** Kompakt üst çubukta `6/6` eşzamanlı uygulama (`Stacked`, `8*9=72`) ve toplam `12/12` denetlenmiş PNG (`docs/screenshots/glass2_*.png`).

@@ -1,0 +1,89 @@
+{
+  "milestone": "DRY-Glass-2.0",
+  "apps_total": 6,
+  "screenshots_total": 12,
+  "p10a": {
+    "resolution": "1280x800",
+    "back_2m": 2,
+    "dpi_levels_tested": [
+      100,
+      125,
+      150,
+      100
+    ],
+    "calc_eval": "6*7=42",
+    "leaked_frames": 0,
+    "irq12": 30,
+    "screenshots": {
+      "glass2_1280x800_dark_desktop.png": {
+        "non_bg_px": 1023687,
+        "colors": 32
+      },
+      "glass2_1280x800_launcher.png": {
+        "non_bg_px": 1023687,
+        "colors": 32
+      },
+      "glass2_1280x800_calc_editor.png": {
+        "non_bg_px": 1023690,
+        "colors": 32
+      },
+      "glass2_1280x800_files_settings.png": {
+        "non_bg_px": 1023689,
+        "colors": 32
+      },
+      "glass2_1280x800_quick_settings.png": {
+        "non_bg_px": 1023689,
+        "colors": 32
+      },
+      "glass2_1280x800_daylight_125dpi.png": {
+        "non_bg_px": 1023296,
+        "colors": 32
+      },
+      "glass2_1280x800_high_contrast.png": {
+        "non_bg_px": 1023339,
+        "colors": 32
+      },
+      "glass2_1280x800_notifications.png": {
+        "non_bg_px": 1023689,
+        "colors": 32
+      },
+      "glass2_1280x800_lock_shield.png": {
+        "non_bg_px": 1022468,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 11.751
+  },
+  "p10b": {
+    "resolution": "1920x1080",
+    "back_2m": 4,
+    "gpu_generations": 2,
+    "pci_quiesce": 3,
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass2_1920x1080_tiled_workspace.png": {
+        "non_bg_px": 2073136,
+        "colors": 32
+      },
+      "glass2_1920x1080_gpu_recovered_gen2.png": {
+        "non_bg_px": 2073136,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 5.169
+  },
+  "p10c": {
+    "resolution": "1024x768",
+    "back_2m": 2,
+    "running_apps": 6,
+    "calc_eval": "8*9=72",
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass2_1024x768_all_apps.png": {
+        "non_bg_px": 786188,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 3.869
+  }
+}
