@@ -29,6 +29,8 @@ pub mod sup_ctx;
 pub mod sup_services;
 pub mod supervisor;
 pub mod surface;
+pub mod ttf;
+pub mod ui;
 pub mod vault_crypto;
 pub mod vault_proto;
 pub mod vfs_mem;
