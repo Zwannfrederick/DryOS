@@ -70,6 +70,10 @@ struct P1InitBootInfo {
     vault_ctrl_cap: u64,
     broker_mod_cap: u64,
     mock_drv_mod_cap: u64,
+    lx_rng_mod_cap: u64,
+    pci_rng_cap: u64,
+    gpu_mod_cap: u64,
+    pci_gpu_cap: u64,
 }
 
 const _: () = assert!(size_of::<P1InitBootInfo>() <= BOOT_MANIFEST_OFFSET);
@@ -114,6 +118,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             25u64
         } else if cmdline.contains("island_bench=1") {
             26u64
+        } else if cmdline.contains("lx_island=1") {
+            27u64
+        } else if cmdline.contains("gpu_test=1") {
+            28u64
         } else {
             20u64
         }
@@ -181,6 +189,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-broker.elf").unwrap_or(CapPtr::NULL);
             let mock_drv_cap =
                 mint_boot_module_cap(cs, lbl, "dry-mock-drv.elf").unwrap_or(CapPtr::NULL);
+            let lx_rng_cap =
+                mint_boot_module_cap(cs, lbl, "dry-lx-rng.elf").unwrap_or(CapPtr::NULL);
+            let gpu_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-gpu.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -201,6 +213,20 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             };
             let pci_blk_cap = if session_mode >= 20 && crate::pci::is_pci_blk_present() {
                 crate::pci::mint_root_pci_blk_cap(cs, lbl)?
+            } else {
+                CapPtr::NULL
+            };
+            let pci_rng_cap = if session_mode >= 20
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_VIRTIO_RNG)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_VIRTIO_RNG)?
+            } else {
+                CapPtr::NULL
+            };
+            let pci_gpu_cap = if session_mode >= 20
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_VIRTIO_GPU)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_VIRTIO_GPU)?
             } else {
                 CapPtr::NULL
             };
@@ -237,6 +263,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 vault_ctrl_cap: vault_ctrl_cap.0,
                 broker_mod_cap: broker_cap.0,
                 mock_drv_mod_cap: mock_drv_cap.0,
+                lx_rng_mod_cap: lx_rng_cap.0,
+                pci_rng_cap: pci_rng_cap.0,
+                gpu_mod_cap: gpu_mod_cap.0,
+                pci_gpu_cap: pci_gpu_cap.0,
             };
             // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
             unsafe {

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! Capability-Gated PCI VirtIO Discovery, MMIO BAR Mapping & Pinned `DEVICE_DMA` Allocation
-//! (`Milestone 2B` — `ADR-004`, `ADR-007` Rule 10, `INV-CAP-08`, `R-03`).
+//! (`Milestone 2B` & `Milestone 2C-1` — `ADR-004`, `ADR-007` Rule 10, `INV-CAP-08`, `R-03`).
 //!
-//! Keeps Ring 0 completely free of block/filesystem drivers:
+//! Keeps Ring 0 completely free of block/filesystem/RNG/GPU/Linux drivers:
 //! 1. Scans PCI Configuration Space (`0xCF8`/`0xCFC`) on the BSP for VirtIO 1.0 Modern Block
-//!    controllers (`1AF4:1042` or transitional `1AF4:1001`) and validates all four modern MMIO
-//!    structures (`COMMON=1`, `NOTIFY=2`, `ISR=3`, `DEVICE=4`) against `FrameState::ReservedOrMmio`.
+//!    (`1AF4:1042`/`1001`), Entropy (`1AF4:1044`/`1005`), and GPU (`1AF4:1050`) controllers and
+//!    validates MMIO structures (`COMMON`, `NOTIFY`, `ISR`, optional `DEVICE`) against
+//!    `FrameState::ReservedOrMmio`.
 //! 2. Exposes `SYS_DEV_MAP` (`CapObjectKind::PciDev`, `VmProt::USER_MMIO_UC`) and `SYS_DMA_ALLOC`
-//!    (`SecDomain::RootSystem` non-`DEV_WORKSPACE` `DEVICE_DMA | NO_DELEGATE` pinned 4K frames).
+//!    (`SecDomain::RootSystem` non-`DEV_WORKSPACE` `DEVICE_DMA | NO_DELEGATE` pinned `4K`/`2M` frames).
 //! 3. Enforces `R-03` & `INV-CAP-08`: active DMA frames carry `iommu_pin_count == 1` (rejecting
 //!    premature `cspace_destroy_object` with `-EBUSY`), and driver crash/exit/revoke clears PCI
 //!    `Command.BME = 0` in hardware *before* unpinning DMA frames and reclaiming memory.
@@ -16,14 +17,17 @@ use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::{inl, irq_restore, irq_save_cli, outl, outw};
+use crate::arch::{irq_restore, irq_save_cli};
 use crate::cspace::cap::{CSpaceId, CapError, CapObjectKind, CapPtr};
-use crate::cspace::objects::{cspace_alloc_frame, cspace_vspace_map_4k};
-use crate::cspace::revoke::attach_cap_mapping_range_record;
+use crate::cspace::objects::{
+    cspace_alloc_frame, cspace_vspace_map_2m, cspace_vspace_map_4k, cspace_vspace_unmap_2m,
+    cspace_vspace_unmap_4k,
+};
+use crate::cspace::revoke::{attach_cap_mapping_range_record, cspace_destroy_object};
 use crate::cspace::{insert_root_cap, split_global_slot, with_pinned_cap};
 use crate::ipc::map_cap_err_to_sys;
 use crate::pmm::{
-    adjust_frame_iommu_pin, query_frame_state, FrameHandle, FrameState, PageOrder, PAGE_SIZE,
+    adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
 };
 use crate::proc::process_vspace_cap;
 use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
@@ -32,56 +36,21 @@ use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::{VmProt, USER_VADDR_LIMIT};
 use crate::vspace::{inspect_vspace_live, map_mmio_4k, unmap_4k, VSpaceHandle, VSpaceId};
 
-const PCI_CONFIG_ADDR: u16 = 0x0cf8;
-const PCI_CONFIG_DATA: u16 = 0x0cfc;
+#[path = "pci_cfg.rs"]
+mod pci_cfg;
 
-const VIRTIO_VENDOR_ID: u16 = 0x1af4;
-const VIRTIO_DEV_BLK_LEGACY_OR_TRANS: u16 = 0x1001;
-const VIRTIO_DEV_BLK_MODERN: u16 = 0x1042;
+pub use pci_cfg::{PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG, UserVirtioPciInfo};
+use pci_cfg::{
+    pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16, probe_virtio_function,
+    ValidatedVirtioPci, PCI_DEV_COUNT,
+};
 
-const PCI_CAP_ID_VNDR: u8 = 0x09;
-const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
-const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
-const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
-const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
-
-const MAX_MMIO_BAR_PAGES: usize = 16;
 const MAX_DMA_PINS_PER_DEV: usize = 16;
-const PCI_BLK_OBJ_ID: u32 = 0;
+const DMA_ALLOC_FLAG_2M: u64 = 1;
 
-/// Sanitized 32-byte VirtIO 1.0 Modern PCI structure offsets copied to CPL=3 by `SYS_DEV_MAP` (`0` phys addrs).
-#[repr(C, align(8))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UserVirtioPciInfo {
-    pub common_off: u32,
-    pub notify_off: u32,
-    pub notify_mult: u32,
-    pub isr_off: u32,
-    pub device_off: u32,
-    pub mapped_pages: u16,
-    pub bus_dev_fn: u16,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub _pad: u32,
-}
-
-const _: () = assert!(size_of::<UserVirtioPciInfo>() == 32);
-
-#[derive(Clone, Copy)]
-struct ValidatedVirtioPci {
-    bus: u8,
-    dev: u8,
-    func: u8,
-    bar_idx: u8,
-    phys_base: u64,
-    num_pages: u16,
-    info: UserVirtioPciInfo,
-}
-
-struct PciBlkGlobal {
+struct PciVirtioSlot {
     present: AtomicBool,
     generation: AtomicU32,
-    cfg_lock: AtomicBool,
     dma_lock: AtomicBool,
     owner_cspace: AtomicU16,
     dma_denied_ops: AtomicU64,
@@ -90,62 +59,34 @@ struct PciBlkGlobal {
     pinned_frames: UnsafeCell<[Option<FrameHandle>; MAX_DMA_PINS_PER_DEV]>,
 }
 
-// SAFETY: `dev_inner` is written once on BSP before `present = true`; `pinned_frames` is mutated under `dma_lock` + `CLI`.
-unsafe impl Sync for PciBlkGlobal {}
-
-static PCI_BLK: PciBlkGlobal = PciBlkGlobal {
-    present: AtomicBool::new(false),
-    generation: AtomicU32::new(1),
-    cfg_lock: AtomicBool::new(false),
-    dma_lock: AtomicBool::new(false),
-    owner_cspace: AtomicU16::new(0),
-    dma_denied_ops: AtomicU64::new(0),
-    quiesce_count: AtomicU64::new(0),
-    dev_inner: UnsafeCell::new(ValidatedVirtioPci {
-        bus: 0,
-        dev: 0,
-        func: 0,
-        bar_idx: 0,
-        phys_base: 0,
-        num_pages: 0,
-        info: UserVirtioPciInfo {
-            common_off: 0,
-            notify_off: 0,
-            notify_mult: 0,
-            isr_off: 0,
-            device_off: 0,
-            mapped_pages: 0,
-            bus_dev_fn: 0,
-            vendor_id: 0,
-            device_id: 0,
-            _pad: 0,
-        },
-    }),
-    pinned_frames: UnsafeCell::new([None; MAX_DMA_PINS_PER_DEV]),
-};
-
-#[inline]
-fn with_pci_cfg_lock<R>(f: impl FnOnce() -> R) -> R {
-    let saved_if = irq_save_cli();
-    while PCI_BLK
-        .cfg_lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+impl PciVirtioSlot {
+    const fn new() -> Self {
+        Self {
+            present: AtomicBool::new(false),
+            generation: AtomicU32::new(1),
+            dma_lock: AtomicBool::new(false),
+            owner_cspace: AtomicU16::new(0),
+            dma_denied_ops: AtomicU64::new(0),
+            quiesce_count: AtomicU64::new(0),
+            dev_inner: UnsafeCell::new(ValidatedVirtioPci::EMPTY),
+            pinned_frames: UnsafeCell::new([None; MAX_DMA_PINS_PER_DEV]),
+        }
     }
-    let out = f();
-    PCI_BLK.cfg_lock.store(false, Ordering::Release);
-    irq_restore(saved_if);
-    out
 }
+
+// SAFETY: `dev_inner` is written once on BSP before `present = true`; `pinned_frames` is mutated under `dma_lock` + `CLI`.
+unsafe impl Sync for PciVirtioSlot {}
+
+static PCI_DEVS: [PciVirtioSlot; PCI_DEV_COUNT] = [const { PciVirtioSlot::new() }; PCI_DEV_COUNT];
 
 #[inline]
 fn with_dma_lock<R>(
-    f: impl FnOnce(&mut [Option<FrameHandle>; MAX_DMA_PINS_PER_DEV]) -> R,
+    dev_idx: usize,
+    f: impl FnOnce(&PciVirtioSlot, &mut [Option<FrameHandle>; MAX_DMA_PINS_PER_DEV]) -> R,
 ) -> R {
+    let slot = &PCI_DEVS[dev_idx];
     let saved_if = irq_save_cli();
-    while PCI_BLK
+    while slot
         .dma_lock
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -153,207 +94,44 @@ fn with_dma_lock<R>(
         core::hint::spin_loop();
     }
     // SAFETY: Exclusive `dma_lock` + `CLI` held.
-    let out = f(unsafe { &mut *PCI_BLK.pinned_frames.get() });
-    PCI_BLK.dma_lock.store(false, Ordering::Release);
+    let out = f(slot, unsafe { &mut *slot.pinned_frames.get() });
+    slot.dma_lock.store(false, Ordering::Release);
     irq_restore(saved_if);
     out
 }
 
 #[inline]
-fn pci_cfg_addr(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    0x8000_0000u32
-        | ((bus as u32) << 16)
-        | (((dev & 0x1f) as u32) << 11)
-        | (((func & 0x07) as u32) << 8)
-        | ((offset & 0xfc) as u32)
-}
-
-fn pci_read_u32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    let addr = pci_cfg_addr(bus, dev, func, offset);
-    with_pci_cfg_lock(|| {
-        // SAFETY: Standard PCI Mechanism #1 Configuration Space ports `0xCF8`/`0xCFC`.
-        unsafe {
-            outl(PCI_CONFIG_ADDR, addr);
-            inl(PCI_CONFIG_DATA)
-        }
-    })
-}
-
-#[inline]
-fn pci_read_u16(bus: u8, dev: u8, func: u8, offset: u8) -> u16 {
-    let shift = ((offset & 2) * 8) as u32;
-    ((pci_read_u32(bus, dev, func, offset) >> shift) & 0xffff) as u16
-}
-
-#[inline]
-fn pci_read_u8(bus: u8, dev: u8, func: u8, offset: u8) -> u8 {
-    let shift = ((offset & 3) * 8) as u32;
-    ((pci_read_u32(bus, dev, func, offset) >> shift) & 0xff) as u8
-}
-
-fn pci_write_u16(bus: u8, dev: u8, func: u8, offset: u8, val: u16) {
-    let addr = pci_cfg_addr(bus, dev, func, offset);
-    let data_port = PCI_CONFIG_DATA + ((offset & 2) as u16);
-    with_pci_cfg_lock(|| {
-        // SAFETY: Aligned 16-bit write within `0xCFC..=0xCFE` under `PCI_CFG_LOCK`.
-        unsafe {
-            outl(PCI_CONFIG_ADDR, addr);
-            outw(data_port, val);
-        }
-    });
+pub fn is_pci_dev_present(dev_idx: usize) -> bool {
+    dev_idx < PCI_DEV_COUNT && PCI_DEVS[dev_idx].present.load(Ordering::Acquire)
 }
 
 #[inline]
 pub fn is_pci_blk_present() -> bool {
-    PCI_BLK.present.load(Ordering::Acquire)
+    is_pci_dev_present(PCI_OBJ_VIRTIO_BLK)
 }
 
 #[inline]
 pub fn is_pci_cap_live(obj_id: u32, expected_gen: u32) -> bool {
-    obj_id == PCI_BLK_OBJ_ID
-        && PCI_BLK.present.load(Ordering::Acquire)
-        && PCI_BLK.generation.load(Ordering::Acquire) == expected_gen
+    let idx = obj_id as usize;
+    idx < PCI_DEV_COUNT
+        && PCI_DEVS[idx].present.load(Ordering::Acquire)
+        && PCI_DEVS[idx].generation.load(Ordering::Acquire) == expected_gen
 }
 
 #[inline]
 pub fn pci_dma_telemetry() -> (u64, u64) {
-    (
-        PCI_BLK.dma_denied_ops.load(Ordering::Acquire),
-        PCI_BLK.quiesce_count.load(Ordering::Acquire),
-    )
+    let mut denied = 0u64;
+    let mut quiesces = 0u64;
+    for slot in PCI_DEVS.iter() {
+        denied = denied.saturating_add(slot.dma_denied_ops.load(Ordering::Acquire));
+        quiesces = quiesces.saturating_add(slot.quiesce_count.load(Ordering::Acquire));
+    }
+    (denied, quiesces)
 }
 
-fn read_pci_mmio_bar_base(bus: u8, dev: u8, func: u8, bar_idx: u8) -> Option<u64> {
-    if bar_idx >= 6 {
-        return None;
-    }
-    let reg = 0x10u8 + bar_idx * 4;
-    let lo = pci_read_u32(bus, dev, func, reg);
-    if (lo & 1) != 0 {
-        return None; // Reject I/O port BARs; require Memory BAR (`bit 0 == 0`).
-    }
-    let mem_type = (lo >> 1) & 0x3;
-    let phys = if mem_type == 2 {
-        if bar_idx >= 5 {
-            return None;
-        }
-        let hi = pci_read_u32(bus, dev, func, reg + 4);
-        ((hi as u64) << 32) | ((lo & !0xfu32) as u64)
-    } else {
-        (lo & !0xfu32) as u64
-    };
-    (phys != 0).then_some(phys)
-}
-
-fn probe_virtio_blk_function(bus: u8, dev: u8, func: u8) -> Option<ValidatedVirtioPci> {
-    let id = pci_read_u32(bus, dev, func, 0x00);
-    let vendor_id = (id & 0xffff) as u16;
-    let device_id = (id >> 16) as u16;
-    if vendor_id != VIRTIO_VENDOR_ID
-        || (device_id != VIRTIO_DEV_BLK_MODERN && device_id != VIRTIO_DEV_BLK_LEGACY_OR_TRANS)
-    {
-        return None;
-    }
-    let status = pci_read_u16(bus, dev, func, 0x06);
-    if (status & 0x0010) == 0 {
-        return None;
-    }
-
-    let mut common: Option<(u8, u32, u32)> = None;
-    let mut notify: Option<(u8, u32, u32, u32)> = None;
-    let mut isr: Option<(u8, u32, u32)> = None;
-    let mut device: Option<(u8, u32, u32)> = None;
-
-    let mut cap_ptr = pci_read_u8(bus, dev, func, 0x34) & 0xfc;
-    let mut hops = 0usize;
-    while cap_ptr >= 0x40 && hops < 48 {
-        hops += 1;
-        let cap_id = pci_read_u8(bus, dev, func, cap_ptr);
-        let next_ptr = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(1)) & 0xfc;
-        if cap_id == PCI_CAP_ID_VNDR {
-            let cap_len = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(2));
-            let cfg_type = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(3));
-            let bar_idx = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(4));
-            if cap_len >= 16 && read_pci_mmio_bar_base(bus, dev, func, bar_idx).is_some() {
-                let off = pci_read_u32(bus, dev, func, cap_ptr.wrapping_add(8));
-                let len = pci_read_u32(bus, dev, func, cap_ptr.wrapping_add(12));
-                match cfg_type {
-                    VIRTIO_PCI_CAP_COMMON_CFG if common.is_none() => {
-                        common = Some((bar_idx, off, len));
-                    }
-                    VIRTIO_PCI_CAP_NOTIFY_CFG if notify.is_none() && cap_len >= 20 => {
-                        let mult = pci_read_u32(bus, dev, func, cap_ptr.wrapping_add(16));
-                        notify = Some((bar_idx, off, len, mult));
-                    }
-                    VIRTIO_PCI_CAP_ISR_CFG if isr.is_none() => {
-                        isr = Some((bar_idx, off, len));
-                    }
-                    VIRTIO_PCI_CAP_DEVICE_CFG if device.is_none() => {
-                        device = Some((bar_idx, off, len));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        cap_ptr = next_ptr;
-    }
-
-    let (c_bar, c_off, c_len) = common?;
-    let (n_bar, n_off, n_len, n_mult) = notify?;
-    let (i_bar, i_off, i_len) = isr?;
-    let (d_bar, d_off, d_len) = device?;
-    if c_bar != n_bar || c_bar != i_bar || c_bar != d_bar {
-        return None;
-    }
-    let phys_base = read_pci_mmio_bar_base(bus, dev, func, c_bar)?;
-    if (phys_base & ((PAGE_SIZE as u64) - 1)) != 0 {
-        return None;
-    }
-
-    let max_end = (c_off as u64 + c_len as u64)
-        .max(n_off as u64 + n_len as u64)
-        .max(i_off as u64 + i_len as u64)
-        .max(d_off as u64 + d_len as u64);
-    let pages = max_end.div_ceil(PAGE_SIZE as u64) as usize;
-    if pages == 0 || pages > MAX_MMIO_BAR_PAGES {
-        return None;
-    }
-    for p in 0..pages {
-        let pa = phys_base + (p as u64) * (PAGE_SIZE as u64);
-        if query_frame_state(pa) != FrameState::ReservedOrMmio {
-            return None;
-        }
-    }
-
-    // Keep Bus Master disabled until an authorized Ring 3 driver calls `SYS_DEV_MAP`.
-    let cmd = pci_read_u16(bus, dev, func, 0x04);
-    pci_write_u16(bus, dev, func, 0x04, (cmd & !0x0004) | 0x0402);
-
-    let bdf = ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
-    Some(ValidatedVirtioPci {
-        bus,
-        dev,
-        func,
-        bar_idx: c_bar,
-        phys_base,
-        num_pages: pages as u16,
-        info: UserVirtioPciInfo {
-            common_off: c_off,
-            notify_off: n_off,
-            notify_mult: n_mult,
-            isr_off: i_off,
-            device_off: d_off,
-            mapped_pages: pages as u16,
-            bus_dev_fn: bdf,
-            vendor_id,
-            device_id,
-            _pad: 0,
-        },
-    })
-}
-
-/// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover any attached VirtIO-Blk device.
+/// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover attached VirtIO-Blk/RNG/GPU controllers.
 pub fn init_pci_devices() -> bool {
+    let mut found = 0usize;
     for bus in 0..=4u8 {
         for dev in 0..32u8 {
             let id0 = pci_read_u32(bus, dev, 0, 0x00);
@@ -363,54 +141,68 @@ pub fn init_pci_devices() -> bool {
             let hdr = pci_read_u8(bus, dev, 0, 0x0e);
             let max_fn = if (hdr & 0x80) != 0 { 8u8 } else { 1u8 };
             for func in 0..max_fn {
-                if let Some(vdev) = probe_virtio_blk_function(bus, dev, func) {
-                    // SAFETY: Single-threaded BSP init before `present = true`.
-                    unsafe {
-                        *PCI_BLK.dev_inner.get() = vdev;
-                    }
-                    PCI_BLK.present.store(true, Ordering::Release);
-                    serial_println!(
-                        "[DRY-PCI] PASS: virtio-blk {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x}",
-                        vdev.bus,
-                        vdev.dev,
-                        vdev.func,
-                        vdev.info.vendor_id,
-                        vdev.info.device_id,
-                        vdev.bar_idx,
-                        vdev.phys_base,
-                        vdev.num_pages,
-                        vdev.info.common_off,
-                        vdev.info.notify_off,
-                        vdev.info.notify_mult,
-                        vdev.info.device_off,
-                    );
-                    return true;
+                let Some((slot_idx, vdev)) = probe_virtio_function(bus, dev, func) else {
+                    continue;
+                };
+                if PCI_DEVS[slot_idx].present.load(Ordering::Relaxed) {
+                    continue;
                 }
+                // SAFETY: Single-threaded BSP init before `present = true`.
+                unsafe {
+                    *PCI_DEVS[slot_idx].dev_inner.get() = vdev;
+                }
+                PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
+                found += 1;
+                let label = match slot_idx {
+                    PCI_OBJ_VIRTIO_BLK => "virtio-blk",
+                    PCI_OBJ_VIRTIO_RNG => "virtio-rng",
+                    PCI_OBJ_VIRTIO_GPU => "virtio-gpu",
+                    _ => "virtio",
+                };
+                serial_println!(
+                    "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x}",
+                    label,
+                    vdev.bus,
+                    vdev.dev,
+                    vdev.func,
+                    vdev.info.vendor_id,
+                    vdev.info.device_id,
+                    vdev.bar_idx,
+                    vdev.phys_base,
+                    vdev.num_pages,
+                    vdev.info.common_off,
+                    vdev.info.notify_off,
+                    vdev.info.notify_mult,
+                    vdev.info.device_off,
+                );
             }
         }
     }
-    serial_println!("[DRY-PCI] No VirtIO-Blk PCI controller attached; persistent /persist disabled");
-    false
+    if found == 0 {
+        serial_println!("[DRY-PCI] No VirtIO PCI controllers attached");
+    }
+    found > 0
 }
 
-/// Mint the root `CapObjectKind::PciDev` capability exclusively into `dry-init`'s `RootSystem` `CSpace`.
-pub fn mint_root_pci_blk_cap(
+/// Mint a root `CapObjectKind::PciDev` capability (`dev_idx`: Blk/RNG/GPU) exclusively into `RootSystem`.
+pub fn mint_root_pci_dev_cap(
     cspace_id: CSpaceId,
     root_subj: SecLabel,
+    dev_idx: usize,
 ) -> Result<CapPtr, CapError> {
     if root_subj.domain != SecDomain::RootSystem
         || root_subj.flags.contains(SecFlags::DEV_WORKSPACE)
     {
         return Err(CapError::DomainViolation);
     }
-    if !is_pci_blk_present() {
+    if !is_pci_dev_present(dev_idx) {
         return Err(CapError::InvalidHandle);
     }
-    let gen = PCI_BLK.generation.load(Ordering::Acquire);
+    let gen = PCI_DEVS[dev_idx].generation.load(Ordering::Acquire);
     insert_root_cap(
         cspace_id,
         CapObjectKind::PciDev,
-        PCI_BLK_OBJ_ID,
+        dev_idx as u32,
         gen,
         CapRights::PCI_ROOT,
         root_subj,
@@ -419,48 +211,87 @@ pub fn mint_root_pci_blk_cap(
     )
 }
 
-fn validated_pci_blk() -> Option<ValidatedVirtioPci> {
-    if !is_pci_blk_present() {
+/// Mint the root VirtIO-Blk `CapObjectKind::PciDev` capability into `dry-init`'s `RootSystem` `CSpace`.
+pub fn mint_root_pci_blk_cap(
+    cspace_id: CSpaceId,
+    root_subj: SecLabel,
+) -> Result<CapPtr, CapError> {
+    mint_root_pci_dev_cap(cspace_id, root_subj, PCI_OBJ_VIRTIO_BLK)
+}
+
+fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
+    if dev_idx >= PCI_DEV_COUNT || !PCI_DEVS[dev_idx].present.load(Ordering::Acquire) {
         return None;
     }
-    // SAFETY: Immutable after `PCI_BLK.present` is `true`.
-    Some(unsafe { *PCI_BLK.dev_inner.get() })
+    // SAFETY: Immutable after `PCI_DEVS[dev_idx].present` is published with `Release`.
+    Some(unsafe { *PCI_DEVS[dev_idx].dev_inner.get() })
+}
+
+fn quiesce_slot_for_cspace(dev_idx: usize, cspace_id: CSpaceId) {
+    let slot = &PCI_DEVS[dev_idx];
+    if cspace_id == 0 || slot.owner_cspace.load(Ordering::Acquire) != cspace_id {
+        return;
+    }
+    if let Some(vdev) = validated_pci_slot(dev_idx) {
+        let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
+        // Clear Bus Master Enable (`bit 2 = 0`) and keep legacy INTx masked (`bit 10 = 1`).
+        pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, (cmd & !0x0004) | 0x0402);
+    }
+    with_dma_lock(dev_idx, |slot, pins| {
+        if slot.owner_cspace.load(Ordering::Acquire) == cspace_id {
+            for pin in pins.iter_mut() {
+                if let Some(fh) = pin.take() {
+                    let _ = adjust_frame_iommu_pin(fh, -1);
+                }
+            }
+            slot.owner_cspace.store(0, Ordering::Release);
+            slot.quiesce_count.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 }
 
 /// Hardware-safe PCI DMA teardown (`R-03` & `INV-CAP-08`): clears `PCI Command.BME = 0` + masks legacy
 /// INTx *before* releasing `iommu_pin_count` on every `DEVICE_DMA` frame owned by `cspace_id`.
 pub fn quiesce_pci_for_cspace(cspace_id: CSpaceId) {
-    if cspace_id == 0 || PCI_BLK.owner_cspace.load(Ordering::Acquire) != cspace_id {
+    if cspace_id == 0 {
         return;
     }
-    if let Some(vdev) = validated_pci_blk() {
-        let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
-        // Clear Bus Master Enable (`bit 2 = 0`) and keep legacy INTx masked (`bit 10 = 1`).
-        pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, (cmd & !0x0004) | 0x0402);
+    for dev_idx in 0..PCI_DEV_COUNT {
+        quiesce_slot_for_cspace(dev_idx, cspace_id);
     }
-    with_dma_lock(|pins| {
-        if PCI_BLK.owner_cspace.load(Ordering::Acquire) == cspace_id {
-            for slot in pins.iter_mut() {
-                if let Some(fh) = slot.take() {
-                    let _ = adjust_frame_iommu_pin(fh, -1);
-                }
-            }
-            PCI_BLK.owner_cspace.store(0, Ordering::Release);
-            PCI_BLK.quiesce_count.fetch_add(1, Ordering::Relaxed);
-        }
-    });
 }
 
 /// Invoked from `ipc::on_cap_slot_revoked` when a `CapObjectKind::PciDev` slot is revoked.
 pub fn on_pci_cap_revoked(obj_id: u32, expected_gen: u32, global_slot: u32) {
     if is_pci_cap_live(obj_id, expected_gen) {
         let (cs_id, _) = split_global_slot(global_slot);
-        quiesce_pci_for_cspace(cs_id);
+        quiesce_slot_for_cspace(obj_id as usize, cs_id);
     }
 }
 
-/// `SYS_DEV_MAP` (`29`): Map the VirtIO-Blk MMIO BAR (`VmProt::USER_MMIO_UC`), enable PCI Bus Master,
-/// and copy sanitized `UserVirtioPciInfo` offsets to `user_info_out_ptr`.
+fn record_pci_denied_first_or(dev_idx: Option<usize>) {
+    let idx = dev_idx.filter(|&i| i < PCI_DEV_COUNT).unwrap_or(0);
+    PCI_DEVS[idx].dma_denied_ops.fetch_add(1, Ordering::Relaxed);
+}
+
+fn unmap_and_destroy_dma_frame(
+    cspace_id: CSpaceId,
+    subj_label: SecLabel,
+    vs_cap: CapPtr,
+    frame_cap: CapPtr,
+    user_vaddr: u64,
+    is_2m: bool,
+) {
+    if is_2m {
+        let _ = cspace_vspace_unmap_2m(cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0);
+    } else {
+        let _ = cspace_vspace_unmap_4k(cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0);
+    }
+    let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
+}
+
+/// `SYS_DEV_MAP` (`29`): Map the authorized VirtIO MMIO BAR (`VmProt::USER_MMIO_UC`), enable PCI Bus
+/// Master, and copy sanitized `UserVirtioPciInfo` offsets to `user_info_out_ptr`.
 pub fn sys_dev_map(
     cspace_id: CSpaceId,
     subj_label: SecLabel,
@@ -472,7 +303,7 @@ pub fn sys_dev_map(
     if subj_label.domain != SecDomain::RootSystem
         || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
     {
-        PCI_BLK.dma_denied_ops.fetch_add(1, Ordering::Relaxed);
+        record_pci_denied_first_or(None);
         return Err(SysError::Perm);
     }
     if (user_vaddr & ((PAGE_SIZE as u64) - 1)) != 0
@@ -480,16 +311,6 @@ pub fn sys_dev_map(
         || user_info_out_ptr == 0
         || (user_info_out_ptr & 3) != 0
     {
-        return Err(SysError::Inval);
-    }
-    let Some(vdev) = validated_pci_blk() else {
-        return Err(SysError::NoSys);
-    };
-    let mapped_bytes = (vdev.num_pages as u64) * (PAGE_SIZE as u64);
-    let Some(end_vaddr) = user_vaddr.checked_add(mapped_bytes) else {
-        return Err(SysError::Inval);
-    };
-    if end_vaddr > USER_VADDR_LIMIT {
         return Err(SysError::Inval);
     }
     let Some((vs_gen, _, _)) = inspect_vspace_live(vspace_id) else {
@@ -503,12 +324,29 @@ pub fn sys_dev_map(
     let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
     let now_epoch = current_lease_epoch();
     let ptr = CapPtr(pci_cap_raw);
+    let mut mapped_info: Option<(usize, ValidatedVirtioPci)> = None;
+    let mut inval_range = false;
 
-    with_pinned_cap(cspace_id, subj_label, ptr, req, now_epoch, |res| {
+    let map_res = with_pinned_cap(cspace_id, subj_label, ptr, req, now_epoch, |res| {
         if res.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(res.obj_id, res.expected_obj_gen) {
             return Err(CapError::WrongObjectKind);
         }
-        let claimed_new = match PCI_BLK.owner_cspace.compare_exchange(
+        let dev_idx = res.obj_id as usize;
+        let Some(vdev) = validated_pci_slot(dev_idx) else {
+            return Err(CapError::InvalidHandle);
+        };
+        let mapped_bytes = (vdev.num_pages as u64) * (PAGE_SIZE as u64);
+        let Some(end_vaddr) = user_vaddr.checked_add(mapped_bytes) else {
+            inval_range = true;
+            return Err(CapError::PagingError);
+        };
+        if end_vaddr > USER_VADDR_LIMIT {
+            inval_range = true;
+            return Err(CapError::PagingError);
+        }
+
+        let slot = &PCI_DEVS[dev_idx];
+        let claimed_new = match slot.owner_cspace.compare_exchange(
             0,
             cspace_id,
             Ordering::AcqRel,
@@ -528,7 +366,7 @@ pub fn sys_dev_map(
                     let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
                 }
                 if claimed_new {
-                    PCI_BLK.owner_cspace.store(0, Ordering::Release);
+                    slot.owner_cspace.store(0, Ordering::Release);
                 }
                 return Err(CapError::PagingError);
             }
@@ -546,20 +384,26 @@ pub fn sys_dev_map(
                 let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
             }
             if claimed_new {
-                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+                slot.owner_cspace.store(0, Ordering::Release);
             }
             return Err(e);
         }
 
-        let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
+    let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
         pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, cmd | 0x0406);
+        mapped_info = Some((dev_idx, vdev));
         Ok(())
-    })
-    .map_err(|e| {
-        PCI_BLK.dma_denied_ops.fetch_add(1, Ordering::Relaxed);
-        map_cap_err_to_sys(e)
-    })?;
+    });
+    if let Err(e) = map_res {
+        record_pci_denied_first_or(None);
+        return Err(if inval_range {
+            SysError::Inval
+        } else {
+            map_cap_err_to_sys(e)
+        });
+    }
 
+    let (dev_idx, vdev) = mapped_info.ok_or(SysError::NoSys)?;
     // SAFETY: `UserVirtioPciInfo` is `#[repr(C)]` POD (`32` bytes) with `_pad = 0`.
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -568,7 +412,7 @@ pub fn sys_dev_map(
         )
     };
     if let Err(fault) = copy_to_user(user_info_out_ptr, bytes) {
-        quiesce_pci_for_cspace(cspace_id);
+        quiesce_slot_for_cspace(dev_idx, cspace_id);
         for rb in 0..(vdev.num_pages as usize) {
             let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
         }
@@ -577,9 +421,9 @@ pub fn sys_dev_map(
     Ok(vdev.num_pages as isize)
 }
 
-/// `SYS_DMA_ALLOC` (`30`): Allocate a pinned 4 KiB `DEVICE_DMA | NO_DELEGATE` frame for an authorized
-/// `RootSystem` driver holding `pci_cap`, map it at `user_vaddr` (`USER_RW`), write physical DMA
-/// address to `paddr_out_ptr`, and return `(0, frame_cap.0)`.
+/// `SYS_DMA_ALLOC` (`30`): Allocate a pinned `4 KiB` or `2 MiB` (`user_vaddr & DMA_ALLOC_FLAG_2M`)
+/// `DEVICE_DMA | NO_DELEGATE` frame for an authorized `RootSystem` driver holding `pci_cap`,
+/// map it (`USER_RW`), write physical DMA address to `paddr_out_ptr`, and return `(0, frame_cap.0)`.
 pub fn sys_dma_alloc(
     pid: u32,
     cspace_id: CSpaceId,
@@ -591,11 +435,18 @@ pub fn sys_dma_alloc(
     if subj_label.domain != SecDomain::RootSystem
         || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
     {
-        PCI_BLK.dma_denied_ops.fetch_add(1, Ordering::Relaxed);
+        record_pci_denied_first_or(None);
         return Err(SysError::Perm);
     }
-    if (user_vaddr & ((PAGE_SIZE as u64) - 1)) != 0
-        || user_vaddr < (PAGE_SIZE as u64)
+    let is_2m = (user_vaddr & DMA_ALLOC_FLAG_2M) != 0;
+    let map_vaddr = user_vaddr & !DMA_ALLOC_FLAG_2M;
+    let align_mask = if is_2m {
+        (HUGE_2M_FRAMES as u64 * PAGE_SIZE as u64) - 1
+    } else {
+        (PAGE_SIZE as u64) - 1
+    };
+    if (map_vaddr & align_mask) != 0
+        || map_vaddr < (PAGE_SIZE as u64)
         || paddr_out_ptr == 0
         || (paddr_out_ptr & 7) != 0
     {
@@ -605,14 +456,14 @@ pub fn sys_dma_alloc(
     let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
     let now_epoch = current_lease_epoch();
 
-    with_pinned_cap(cspace_id, subj_label, CapPtr(pci_cap_raw), req, now_epoch, |res| {
+    let dev_idx = with_pinned_cap(cspace_id, subj_label, CapPtr(pci_cap_raw), req, now_epoch, |res| {
         if res.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(res.obj_id, res.expected_obj_gen) {
             return Err(CapError::WrongObjectKind);
         }
-        Ok(())
+        Ok(res.obj_id as usize)
     })
     .map_err(|e| {
-        PCI_BLK.dma_denied_ops.fetch_add(1, Ordering::Relaxed);
+        record_pci_denied_first_or(None);
         map_cap_err_to_sys(e)
     })?;
 
@@ -622,31 +473,27 @@ pub fn sys_dma_alloc(
         subj_label.compartment_id,
         subj_label.policy_tag,
     );
-    let (frame_cap, fh) = cspace_alloc_frame(
-        cspace_id,
-        subj_label,
-        dma_label,
-        PageOrder::Order4KiB,
-        false,
-        0,
-    )
-    .map_err(map_cap_err_to_sys)?;
+    let order = if is_2m {
+        PageOrder::Order2MiB
+    } else {
+        PageOrder::Order4KiB
+    };
+    let (frame_cap, fh) =
+        cspace_alloc_frame(cspace_id, subj_label, dma_label, order, false, 0)
+            .map_err(map_cap_err_to_sys)?;
 
-    if let Err(e) = cspace_vspace_map_4k(
-        cspace_id,
-        subj_label,
-        vs_cap,
-        frame_cap,
-        user_vaddr,
-        VmProt::USER_RW,
-        0,
-    ) {
-        let _ = crate::cspace::revoke::cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
+    let map_res = if is_2m {
+        cspace_vspace_map_2m(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, VmProt::USER_RW, 0)
+    } else {
+        cspace_vspace_map_4k(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, VmProt::USER_RW, 0)
+    };
+    if let Err(e) = map_res {
+        let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
         return Err(map_cap_err_to_sys(e));
     }
 
-    let pinned_ok = with_dma_lock(|pins| {
-        let claimed_new = match PCI_BLK.owner_cspace.compare_exchange(
+    let pinned_ok = with_dma_lock(dev_idx, |slot, pins| {
+        let claimed_new = match slot.owner_cspace.compare_exchange(
             0,
             cspace_id,
             Ordering::AcqRel,
@@ -658,13 +505,13 @@ pub fn sys_dma_alloc(
         };
         let Some(free_slot) = pins.iter_mut().find(|s| s.is_none()) else {
             if claimed_new {
-                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+                slot.owner_cspace.store(0, Ordering::Release);
             }
             return Err(SysError::NoMem);
         };
         if adjust_frame_iommu_pin(fh, 1).is_err() {
             if claimed_new {
-                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+                slot.owner_cspace.store(0, Ordering::Release);
             }
             return Err(SysError::NoMem);
         }
@@ -672,29 +519,23 @@ pub fn sys_dma_alloc(
         Ok(())
     });
     if let Err(e) = pinned_ok {
-        let _ = crate::cspace::objects::cspace_vspace_unmap_4k(
-            cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0,
-        );
-        let _ = crate::cspace::revoke::cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
+        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
         return Err(e);
     }
 
     let dma_paddr: u64 = fh.phys_addr();
     let pa_bytes = dma_paddr.to_le_bytes();
     if let Err(fault) = copy_to_user(paddr_out_ptr, &pa_bytes) {
-        with_dma_lock(|pins| {
-            for slot in pins.iter_mut() {
-                if *slot == Some(fh) {
-                    *slot = None;
+        with_dma_lock(dev_idx, |_slot, pins| {
+            for pin in pins.iter_mut() {
+                if *pin == Some(fh) {
+                    *pin = None;
                     let _ = adjust_frame_iommu_pin(fh, -1);
                     break;
                 }
             }
         });
-        let _ = crate::cspace::objects::cspace_vspace_unmap_4k(
-            cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0,
-        );
-        let _ = crate::cspace::revoke::cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
+        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
         return Err(fault);
     }
 

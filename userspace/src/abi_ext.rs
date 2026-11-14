@@ -198,6 +198,8 @@ pub struct UserVirtioPciInfo {
 
 const _: () = assert!(size_of::<UserVirtioPciInfo>() == 32);
 
+pub const DMA_ALLOC_FLAG_2M: u64 = 1;
+
 #[inline]
 pub fn sys_dev_map(
     pci_cap: u64,

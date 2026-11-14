@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Standalone Driver Island package (`ADR-005` GPL isolation boundary):
+# Links unmodified Linux v6.18 `virtio-rng.c` + minimal freestanding C shim ONLY into `dry-lx-rng.elf`.
+
+[workspace]
+
+[package]
+name = "dry-lx-rng"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "dry-lx-rng"
+path = "src/main.rs"
+
+[dependencies]
+dry-userspace = { path = "../../userspace" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 1
+panic = "abort"

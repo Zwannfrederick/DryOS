@@ -28,11 +28,13 @@ from qemu_p3_validators import run_p3_suite
 from qemu_p3c_validators import run_p3_hardware_matrix
 from qemu_p4_validators import run_p4_suite
 from qemu_p5_island_validators import run_p5_island_suite
+from qemu_p6_lx_island_validators import run_p6_lx_island_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
 USERSPACE_DIR = ROOT / "userspace"
+LX_ISLAND_DIR = ROOT / "drivers" / "lx-virtio-rng-island"
 BUILD_DIR = KERNEL_DIR / "build"
 TC_DIR = ROOT / ".toolchains"
 SYSROOT = TC_DIR / "sysroot"
@@ -62,6 +64,7 @@ USERSPACE_MODS = (
     ("dry-vault", "dry-vault.elf"),
     ("dry-broker", "dry-broker.elf"),
     ("dry-mock-drv", "dry-mock-drv.elf"),
+    ("dry-lx-rng", "dry-lx-rng.elf"),
     ("dry-fpu-test", "dry-fpu-test.elf"),
     ("dry-fault-test", "dry-fault-test.elf"),
 )
@@ -113,6 +116,110 @@ def userspace_cargo_env() -> dict[str, str]:
     }
 
 
+def build_lx_rng_island() -> pathlib.Path:
+    """Compile unmodified Linux v6.18 `virtio-rng.c` + minimal C shim and link `dry-lx-rng`."""
+    subprocess.check_call(
+        [sys.executable, str(ROOT / "tools" / "h2-audit" / "fetch_virtio_rng_sources.py"), "--verify"]
+    )
+    obj_dir = BUILD_DIR / "lx_rng"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    inc_dir = LX_ISLAND_DIR / "cshim" / "include"
+    cflags = [
+        "clang",
+        "-std=gnu11",
+        "-target",
+        "x86_64-unknown-none-elf",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fno-stack-protector",
+        "-fno-pic",
+        "-fno-pie",
+        "-mno-red-zone",
+        "-mno-sse",
+        "-mno-sse2",
+        "-mno-avx",
+        "-mcmodel=small",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Werror",
+        '-DKBUILD_MODNAME="virtio_rng"',
+        f"-I{inc_dir}",
+    ]
+    drv_src = ROOT / "vendor" / "linux-drivers" / "v6.18" / "virtio_rng" / "virtio-rng.c"
+    shim_src = LX_ISLAND_DIR / "cshim" / "lx_virtio_shim.c"
+    drv_obj = obj_dir / "virtio-rng.o"
+    shim_obj = obj_dir / "lx_virtio_shim.o"
+    lib_a = obj_dir / "liblx_virtio_rng.a"
+
+    subprocess.check_call(cflags + ["-c", str(drv_src), "-o", str(drv_obj)])
+    subprocess.check_call(cflags + ["-c", str(shim_src), "-o", str(shim_obj)])
+    subprocess.check_call(["llvm-ar", "rcs", str(lib_a), str(drv_obj), str(shim_obj)])
+
+    linker_script = LX_ISLAND_DIR / "linker.ld"
+    lx_env = {
+        **os.environ,
+        "RUSTC_BOOTSTRAP": "1",
+        "CARGO_HOME": str(CARGO_HOME),
+        "__CARGO_TESTS_ONLY_SRC_ROOT": str(SYSROOT / "lib" / "rustlib" / "src" / "rust" / "library"),
+        "RUSTFLAGS": " ".join(
+            [
+                f"--sysroot={SYSROOT}",
+                "-C",
+                "relocation-model=static",
+                "-C",
+                "target-feature=-sse,-sse2,-avx",
+                "-C",
+                f"link-arg=-T{linker_script}",
+                "-C",
+                "link-arg=-zmax-page-size=0x1000",
+                "-L",
+                f"native={obj_dir}",
+            ]
+        ),
+    }
+    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-lx-rng...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "clippy",
+            "--offline",
+            "--manifest-path",
+            str(LX_ISLAND_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        env=lx_env,
+    )
+    print("[QEMU-TEST] Building release ELF64 dry-lx-rng (GPL-2.0-only isolated crate)...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "build",
+            "--offline",
+            "--manifest-path",
+            str(LX_ISLAND_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--release",
+        ],
+        env=lx_env,
+    )
+    lx_bin = LX_ISLAND_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-rng"
+    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-rng"
+    dst_bin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(lx_bin, dst_bin)
+    return dst_bin
+
+
 def build_userspace() -> list[pathlib.Path]:
     env = userspace_cargo_env()
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
@@ -153,6 +260,7 @@ def build_userspace() -> list[pathlib.Path]:
         env=env,
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
+    build_lx_rng_island()
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():
@@ -480,6 +588,7 @@ def main() -> None:
     parser.add_argument("--p3-matrix", action="store_true", help="Run Milestone 2A-3 SMP (1..20 vCPU) & RAM (256M..2G) desktop matrix")
     parser.add_argument("--p4-only", action="store_true", help="Run only Milestone 2B persistent storage & DRY Vault suite")
     parser.add_argument("--island-only", action="store_true", help="Run only Milestone 2C-0 Adaptive Driver Islands PoC suite")
+    parser.add_argument("--lx-island-only", action="store_true", help="Run only Milestone 2C-1 Genuine Linux virtio-rng Driver Island suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -508,6 +617,11 @@ def main() -> None:
     if args.island_only:
         n_p5 = run_p5_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p5} MILESTONE 2C-0 ADAPTIVE DRIVER ISLANDS POC CHECKS PASSED.")
+        return
+
+    if args.lx_island_only:
+        n_p6 = run_p6_lx_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p6} MILESTONE 2C-1 GENUINE LINUX DRIVER ISLAND CHECKS PASSED.")
         return
 
     if args.p3_matrix:

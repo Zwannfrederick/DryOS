@@ -332,5 +332,15 @@
         }
       ]
     }
+  },
+  "virtio_rng": {
+    "upstream_path": "drivers/char/hw_random/virtio-rng.c",
+    "tag": "v6.18",
+    "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "license": "GPL-2.0-only",
+    "local_path": "vendor/linux-drivers/v6.18/virtio_rng/virtio-rng.c",
+    "bytes": 5481,
+    "lines": 259,
+    "sha256": "720433a85ce0ce6f84e85842b54d23c7c8e9bad792c66b1066accbaa7fb95a75"
   }
 }
