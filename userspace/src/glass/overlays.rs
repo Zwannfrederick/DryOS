@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! `DRY Glass` Overlays, Hit-Testing, Searchable Launcher, Genuine Quick Settings,
-//! Notification Center & Frosted Session Lock Shield (`Milestone Ascension 3.0`).
+//! DRY Glass Overlays — Spotlight Launcher, Quick Settings, Notifications & Lock Shield (`DRY Glass 2.0`).
 
 use crate::action::{AppId, DesktopAction, APP_COUNT};
 use crate::compositor::DesktopCompositor;
 use crate::gfx::{DirtyRegion, Rect};
-use crate::glass::blur::{backdrop_frosted_rect, fill_rounded_raw};
-use crate::glass::icons::{draw_icon16, icon_for_app, ICON_BELL, ICON_SEARCH};
+use crate::glass::blur::{backdrop_frosted_rect, blend_soft_rrect_shadow};
 use crate::glass::theme::{GlassTokens, ThemeMode};
-use crate::glass::typography::draw_str_raw;
 use crate::glass::{DOCK_H, DOCK_MARGIN_B};
 use crate::input::{InputEvent, InputEventKind, MOUSE_BTN_LEFT};
 use crate::keymap::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP};
 use crate::shell::LineBuilder;
+use crate::ttf::{FontId, PixelFormat};
+use crate::ui::canvas::Canvas;
+use crate::ui::icons::{draw_vector_icon, IconKind};
+use crate::ui::theme::UiTheme;
 use crate::wm::{
     LayoutMode, SessionVisualState, WindowManager, WmInputAction, TITLE_KIND_CALC, TITLE_KIND_EDITOR,
     TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL, TOPBAR_H,
@@ -65,12 +66,7 @@ pub fn dock_rect(wm: &WindowManager) -> Rect {
 #[inline]
 pub fn dock_item_rect(wm: &WindowManager, idx: usize) -> Rect {
     let dr = dock_rect(wm);
-    Rect::new(
-        dr.x + 12 + idx * (DOCK_ITEM_W + DOCK_ITEM_GAP),
-        dr.y + 4,
-        DOCK_ITEM_W,
-        DOCK_ITEM_W,
-    )
+    Rect::new(dr.x + 12 + idx * (DOCK_ITEM_W + DOCK_ITEM_GAP), dr.y + 4, DOCK_ITEM_W, DOCK_ITEM_W)
 }
 
 #[inline]
@@ -89,7 +85,7 @@ pub fn launcher_app_rect(wm: &WindowManager, row: usize) -> Rect {
 #[inline]
 pub fn qs_panel_rect(wm: &WindowManager) -> Rect {
     let w = 324usize.min(wm.screen_w.saturating_sub(24));
-    Rect::new(wm.screen_w.saturating_sub(w + 10), TOPBAR_H + 8, w, 308)
+    Rect::new(wm.screen_w.saturating_sub(w + 10), TOPBAR_H + 8, w, 348)
 }
 
 #[inline]
@@ -154,32 +150,37 @@ fn log_glass_toggle(kind: &[u8], open: bool) {
     wm_log_line(&lb);
 }
 
+#[inline]
+fn pad_overlay(r: Rect) -> Rect {
+    Rect::new(r.x.saturating_sub(8), r.y.saturating_sub(6), r.w + 16, r.h + 16)
+}
+
 pub fn toggle_launcher(wm: &mut WindowManager, dirty: &mut DirtyRegion) {
     let next = !wm.glass.launcher_open;
     if wm.glass.qs_open {
-        dirty.mark(qs_panel_rect(wm));
+        dirty.mark(pad_overlay(qs_panel_rect(wm)));
     }
     if wm.glass.notif_open {
-        dirty.mark(notif_panel_rect(wm));
+        dirty.mark(pad_overlay(notif_panel_rect(wm)));
     }
     wm.glass.close_overlays();
     wm.glass.launcher_open = next;
     dirty.mark(Rect::new(0, 0, wm.screen_w, TOPBAR_H));
-    dirty.mark(launcher_modal_rect(wm));
+    dirty.mark(pad_overlay(launcher_modal_rect(wm)));
     log_glass_toggle(b"LAUNCHER", next);
 }
 
 pub fn close_all_overlays(wm: &mut WindowManager, dirty: &mut DirtyRegion) {
     if wm.glass.launcher_open {
-        dirty.mark(launcher_modal_rect(wm));
+        dirty.mark(pad_overlay(launcher_modal_rect(wm)));
         log_glass_toggle(b"LAUNCHER", false);
     }
     if wm.glass.qs_open {
-        dirty.mark(qs_panel_rect(wm));
+        dirty.mark(pad_overlay(qs_panel_rect(wm)));
         log_glass_toggle(b"QS", false);
     }
     if wm.glass.notif_open {
-        dirty.mark(notif_panel_rect(wm));
+        dirty.mark(pad_overlay(notif_panel_rect(wm)));
         log_glass_toggle(b"NOTIF", false);
     }
     wm.glass.close_overlays();
@@ -298,7 +299,7 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
             let next = !wm.glass.qs_open;
             close_all_overlays(wm, dirty);
             wm.glass.qs_open = next;
-            dirty.mark(qs_panel_rect(wm));
+            dirty.mark(pad_overlay(qs_panel_rect(wm)));
             dirty.mark(Rect::new(0, 0, wm.screen_w, TOPBAR_H));
             log_glass_toggle(b"QS", next);
             return Some(WmInputAction::None);
@@ -310,7 +311,7 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
             if next {
                 wm.glass.notif_unread = 0;
             }
-            dirty.mark(notif_panel_rect(wm));
+            dirty.mark(pad_overlay(notif_panel_rect(wm)));
             dirty.mark(Rect::new(0, 0, wm.screen_w, TOPBAR_H));
             log_glass_toggle(b"NOTIF", next);
             return Some(WmInputAction::None);
@@ -336,19 +337,20 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
     if wm.glass.qs_open {
         let qr = qs_panel_rect(wm);
         if qr.contains(wm.cursor_x, wm.cursor_y) {
-            let cur_flags = u8::from(wm.high_contrast)
-                | (u8::from(wm.cursor_large) << 1)
-                | (u8::from(wm.light_mode) << 2)
-                | (u8::from(wm.low_overhead_glass) << 3);
-            for row in 0..6usize {
+            let cur_flags = wm.theme_flags_byte();
+            for row in 0..7usize {
                 if qs_row_rect(wm, row).contains(wm.cursor_x, wm.cursor_y) {
-                    dirty.mark(qr);
+                    dirty.mark(pad_overlay(qr));
                     let act = match row {
                         0 => DesktopAction::SetThemeContrast(cur_flags ^ 4),
                         1 => DesktopAction::SetThemeContrast(cur_flags ^ 8),
                         2 => DesktopAction::SetThemeContrast(cur_flags ^ 1),
                         3 => DesktopAction::SetThemeContrast(cur_flags ^ 2),
                         4 => DesktopAction::SetLayoutMode(wm.layout.next_mode() as u8),
+                        5 => {
+                            let next_dpi = (wm.dpi_scale + 1) % 3;
+                            DesktopAction::SetThemeContrast((cur_flags & 0x0f) | (next_dpi << 4))
+                        }
                         _ => {
                             close_all_overlays(wm, dirty);
                             DesktopAction::LockSession
@@ -367,7 +369,7 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
         if nr.contains(wm.cursor_x, wm.cursor_y) {
             if notif_clear_rect(wm).contains(wm.cursor_x, wm.cursor_y) {
                 wm.glass.clear_notifs();
-                dirty.mark(nr);
+                dirty.mark(pad_overlay(nr));
                 dirty.mark(Rect::new(0, 0, wm.screen_w, TOPBAR_H));
             }
             return Some(WmInputAction::None);
@@ -378,9 +380,7 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
     if dock_rect(wm).contains(wm.cursor_x, wm.cursor_y) {
         for idx in 0..APP_COUNT {
             if dock_item_rect(wm, idx).contains(wm.cursor_x, wm.cursor_y) {
-                return Some(
-                    wm.enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(AppId::ALL[idx])),
-                );
+                return Some(wm.enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(AppId::ALL[idx])));
             }
         }
         return Some(WmInputAction::None);
@@ -455,171 +455,200 @@ pub fn paint_overlays(
         return;
     }
     let blur = !wm.low_overhead_glass && tokens.mode != ThemeMode::HighContrast;
+    let ui = UiTheme::new(tokens.mode, wm.dpi_pct());
+    let fmt = PixelFormat::from_fb(&comp.fb_info);
     if wm.glass.launcher_open {
-        paint_launcher(comp, wm, tokens, blur, clip);
-    } else if wm.glass.qs_open {
-        paint_quick_settings(comp, wm, tokens, blur, clip);
-    } else if wm.glass.notif_open {
-        paint_notif_center(comp, wm, tokens, blur, clip);
+        paint_launcher(comp, wm, tokens, &ui, fmt, clip, blur);
     }
+    if wm.glass.qs_open {
+        paint_qs(comp, wm, tokens, &ui, fmt, clip, blur);
+    }
+    if wm.glass.notif_open {
+        paint_notifs(comp, wm, tokens, &ui, fmt, clip, blur);
+    }
+}
+
+fn paint_frosted_panel(
+    comp: &mut DesktopCompositor,
+    tokens: &GlassTokens,
+    ui: &UiTheme,
+    fmt: PixelFormat,
+    rect: Rect,
+    clip: Rect,
+    blur: bool,
+) -> Option<Canvas> {
+    let sc = Rect::new(rect.x.saturating_sub(6), rect.y.saturating_sub(4), rect.w + 12, rect.h + 12)
+        .intersect(clip)
+        .clamp_to(comp.w, comp.h);
+    if sc.is_empty() {
+        return None;
+    }
+    if tokens.mode != ThemeMode::HighContrast {
+        unsafe {
+            blend_soft_rrect_shadow(
+                comp.back_ptr, comp.w, comp.h, &comp.fb_info, rect, sc,
+                12, tokens.shadow_rgb, 96, 6,
+            );
+        }
+    }
+    let ic = rect.intersect(sc);
+    if !ic.is_empty() {
+        unsafe {
+            backdrop_frosted_rect(
+                comp.back_ptr, comp.w, comp.h, &comp.fb_info, rect, ic,
+                tokens.overlay_tint_rgb, tokens.overlay_alpha, blur, 12,
+                tokens.glass_rim, tokens.glass_rim_soft,
+            );
+        }
+    }
+    let mut c = unsafe { Canvas::from_raw(comp.back_ptr, comp.w, comp.h, comp.fb_stride, fmt, sc) };
+    let bd = if tokens.mode == ThemeMode::HighContrast { ui.accent } else { ui.border_strong };
+    c.stroke_rrect_aa(rect, 12, bd, 235);
+    Some(c)
 }
 
 fn paint_launcher(
     comp: &mut DesktopCompositor,
     wm: &WindowManager,
     tokens: &GlassTokens,
-    blur: bool,
+    ui: &UiTheme,
+    fmt: PixelFormat,
     clip: Rect,
+    blur: bool,
 ) {
     let r = launcher_modal_rect(wm);
-    let ic = r.intersect(clip).clamp_to(comp.w, comp.h);
-    if ic.is_empty() {
-        return;
-    }
-    unsafe {
-        backdrop_frosted_rect(
-            comp.back_ptr, comp.w, comp.h, &comp.fb_info, r, ic,
-            tokens.overlay_tint_rgb, tokens.overlay_alpha, blur, 10,
-            tokens.border_focus, tokens.glass_rim_soft,
-        );
-    }
-    let sb = Rect::new(r.x + 14, r.y + 14, r.w - 28, 34);
-    unsafe {
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, sb, ic, 6, tokens.card_bg);
-        draw_icon16(comp.back_ptr, comp.w, comp.h, sb.x + 10, sb.y + 9, &ICON_SEARCH, tokens.fg_primary, tokens.accent, ic);
-    }
-    let q = &wm.glass.launcher_query[..wm.glass.launcher_len as usize];
-    let mut qlb = LineBuilder::new();
-    if q.is_empty() {
-        qlb.push_bytes(b"Type app name... (Esc close)");
+    let Some(mut c) = paint_frosted_panel(comp, tokens, ui, fmt, r, clip, blur) else { return };
+    let sb = Rect::new(r.x + 14, r.y + 14, r.w - 28, 36);
+    c.fill_bordered_rrect_aa(sb, 8, ui.bg_input, ui.accent);
+    draw_vector_icon(&mut c, Rect::new(sb.x + 10, sb.y + 10, 16, 16), IconKind::Search, ui.accent, ui.accent);
+
+    if wm.glass.launcher_len == 0 {
+        c.draw_text((sb.x + 34) as i32, (sb.y + 9) as i32, FontId::SansRegular, 13, b"Search DRY OS applications...", ui.fg_muted);
     } else {
-        qlb.push_bytes(q);
-        qlb.push_byte(b'_');
+        c.draw_text((sb.x + 34) as i32, (sb.y + 9) as i32, FontId::SansSemiBold, 13, &wm.glass.launcher_query[..wm.glass.launcher_len as usize], ui.fg_primary);
     }
-    unsafe {
-        draw_str_raw(
-            comp.back_ptr, comp.w, comp.h, sb.x + 34, sb.y + 9,
-            qlb.as_bytes(), if q.is_empty() { tokens.fg_muted } else { tokens.fg_primary }, None, ic,
-        );
-    }
+
     let mut apps = [AppId::Terminal; APP_COUNT];
     let n = filter_launcher_apps(wm, &mut apps);
+    if n == 0 {
+        c.draw_text((r.x + 22) as i32, (r.y + 74) as i32, FontId::SansRegular, 13, b"No matching applications found.", ui.fg_muted);
+        return;
+    }
+
     for (row, &app) in apps.iter().take(n).enumerate() {
         let rr = launcher_app_rect(wm, row);
         let sel = row == wm.glass.launcher_sel.min(n - 1);
-        let bg = if sel { tokens.pill_active } else { tokens.card_alt };
-        unsafe {
-            fill_rounded_raw(comp.back_ptr, comp.w, comp.h, rr, ic, 6, bg);
-            draw_icon16(comp.back_ptr, comp.w, comp.h, rr.x + 10, rr.y + 10, icon_for_app(app), tokens.fg_primary, tokens.accent, ic);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, rr.x + 34, rr.y + 10, app.display_title(), tokens.fg_primary, None, ic);
-        }
+        c.fill_bordered_rrect_aa(rr, 8, if sel { ui.accent_subtle } else { ui.bg_card_alt }, if sel { ui.accent } else { ui.border_subtle });
+        draw_vector_icon(
+            &mut c, Rect::new(rr.x + 10, rr.y + 8, 20, 20), IconKind::from_app(app),
+            if sel { ui.accent_fg } else { ui.fg_primary }, ui.accent,
+        );
+        c.draw_text(
+            (rr.x + 38) as i32, (rr.y + 9) as i32,
+            if sel { FontId::SansSemiBold } else { FontId::SansRegular },
+            13, app.display_title(), ui.fg_primary,
+        );
         let running = (wm.running_apps_mask & (1u8 << (app as usize))) != 0;
-        let tag: &[u8] = if running { b"RUNNING" } else { b"LAUNCH" };
-        unsafe {
-            draw_str_raw(
-                comp.back_ptr, comp.w, comp.h, rr.x + rr.w - tag.len() * 8 - 12, rr.y + 10,
-                tag, if running { tokens.ok } else { tokens.accent }, None, ic,
-            );
-        }
+        let tag: &[u8] = if running { b"Running" } else { b"Open" };
+        let tw = if running { 60 } else { 44 };
+        let tr = Rect::new(rr.x + rr.w.saturating_sub(tw + 10), rr.y + 7, tw, 22);
+        c.fill_rrect_aa(tr, 6, if running { ui.ok_bg } else { ui.bg_card }, 255);
+        c.draw_text_centered(tr, FontId::SansSemiBold, 11, tag, if running { ui.ok_fg } else { ui.fg_muted });
     }
 }
 
-fn paint_quick_settings(
+fn paint_qs(
     comp: &mut DesktopCompositor,
     wm: &WindowManager,
     tokens: &GlassTokens,
-    blur: bool,
+    ui: &UiTheme,
+    fmt: PixelFormat,
     clip: Rect,
+    blur: bool,
 ) {
     let r = qs_panel_rect(wm);
-    let ic = r.intersect(clip).clamp_to(comp.w, comp.h);
-    if ic.is_empty() {
-        return;
-    }
-    unsafe {
-        backdrop_frosted_rect(
-            comp.back_ptr, comp.w, comp.h, &comp.fb_info, r, ic,
-            tokens.overlay_tint_rgb, tokens.overlay_alpha, blur, 10,
-            tokens.glass_rim, tokens.glass_rim_soft,
-        );
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, r.x + 16, r.y + 12, b"QUICK SETTINGS", tokens.accent, None, ic);
-    }
-    let rows: [&[u8]; 6] = [
-        if wm.light_mode { b"[1] Theme   : Frosted Daylight" } else { b"[1] Theme   : Obsidian Dark" },
-        if wm.low_overhead_glass { b"[2] Material: Low-Overhead" } else { b"[2] Material: Frosted Blur" },
-        if wm.high_contrast { b"[3] Contrast: High-Contrast" } else { b"[3] Contrast: Standard AA" },
-        if wm.cursor_large { b"[4] Pointer : 2x Large" } else { b"[4] Pointer : 1x Standard" },
-        match wm.layout {
-            LayoutMode::Floating => b"[5] Layout  : Floating",
-            LayoutMode::SideBySideTiled => b"[5] Layout  : Side-by-Side",
-            LayoutMode::Stacked => b"[5] Layout  : Stacked",
-            LayoutMode::Tabbed => b"[5] Layout  : Tabbed",
-        },
-        b"[6] Action  : Lock Session Shield",
+    let Some(mut c) = paint_frosted_panel(comp, tokens, ui, fmt, r, clip, blur) else { return };
+    draw_vector_icon(&mut c, Rect::new(r.x + 14, r.y + 12, 16, 16), IconKind::Sliders, ui.accent, ui.accent);
+    c.draw_text((r.x + 36) as i32, (r.y + 11) as i32, FontId::SansSemiBold, 14, b"Quick Settings", ui.fg_primary);
+
+    let mode_val: &[u8] = match tokens.mode {
+        ThemeMode::FrostedDaylight => b"Daylight",
+        ThemeMode::HighContrast => b"Contrast",
+        ThemeMode::ObsidianDark => b"Obsidian",
+    };
+    let blur_val: &[u8] = if wm.low_overhead_glass { b"Off" } else { b"Frosted" };
+    let hc_val: &[u8] = if wm.high_contrast { b"On" } else { b"Off" };
+    let cur_val: &[u8] = if wm.cursor_large { b"Large" } else { b"Standard" };
+    let lay_val: &[u8] = match wm.layout {
+        LayoutMode::Floating => b"Floating",
+        LayoutMode::SideBySideTiled => b"Tiled",
+        LayoutMode::Stacked => b"Stacked",
+        LayoutMode::Tabbed => b"Tabbed",
+    };
+    let dpi_val: &[u8] = match wm.dpi_scale {
+        1 => b"125%",
+        2 => b"150%",
+        _ => b"100%",
+    };
+    let rows: [(IconKind, &[u8], &[u8], bool); 7] = [
+        (IconKind::Sun, b"Appearance", mode_val, wm.light_mode),
+        (IconKind::Sliders, b"Glass Blur", blur_val, !wm.low_overhead_glass),
+        (IconKind::Shield, b"High Contrast", hc_val, wm.high_contrast),
+        (IconKind::Info, b"Pointer Size", cur_val, wm.cursor_large),
+        (IconKind::LayoutTiled, b"Window Layout", lay_val, true),
+        (IconKind::Refresh, b"Display Scale", dpi_val, wm.dpi_scale != 0),
+        (IconKind::Lock, b"Lock Session", b"Shield", false),
     ];
-    for (i, lbl) in rows.iter().enumerate() {
-        let rr = qs_row_rect(wm, i);
-        unsafe {
-            fill_rounded_raw(comp.back_ptr, comp.w, comp.h, rr, ic, 6, tokens.card_alt);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, rr.x + 10, rr.y + 8, lbl, tokens.fg_primary, None, ic);
-        }
+
+    for (row, &(icon, lbl, val, active)) in rows.iter().enumerate() {
+        let rr = qs_row_rect(wm, row);
+        c.fill_bordered_rrect_aa(rr, 8, ui.bg_card_alt, ui.border_subtle);
+        draw_vector_icon(&mut c, Rect::new(rr.x + 10, rr.y + 8, 16, 16), icon, if active { ui.accent } else { ui.fg_secondary }, ui.accent);
+        c.draw_text((rr.x + 32) as i32, (rr.y + 7) as i32, FontId::SansRegular, 12, lbl, ui.fg_primary);
+        let pill = Rect::new(rr.x + rr.w.saturating_sub(92), rr.y + 5, 84, 22);
+        c.fill_rrect_aa(pill, 6, if active { ui.accent_subtle } else { ui.bg_card }, 255);
+        c.draw_text_centered(pill, FontId::SansSemiBold, 11, val, if active { ui.accent_fg } else { ui.fg_muted });
     }
-    let mut flb = LineBuilder::new();
-    flb.push_bytes(if wm.gpu_ep_cap != 0 { b"Scanout: VirtIO-GPU P=" } else { b"Scanout: UEFI GOP P=" });
-    flb.push_u64(wm.gpu_presents);
-    flb.push_bytes(b" F=");
-    flb.push_u64(wm.gpu_fallbacks);
-    unsafe {
-        draw_str_raw(
-            comp.back_ptr, comp.w, comp.h, r.x + 16, r.y + r.h - 26,
-            flb.as_bytes(), if wm.gpu_ep_cap != 0 { tokens.ok } else { tokens.warn }, None, ic,
-        );
-    }
+
+    let foot: &[u8] = if wm.gpu_ep_cap != 0 { b"Backend: VirtIO-GPU 2D Active" } else { b"Backend: UEFI GOP Fallback" };
+    let foot_col = if wm.gpu_ep_cap != 0 { ui.ok } else { ui.warn };
+    c.draw_text((r.x + 16) as i32, r.y.saturating_add(r.h.saturating_sub(24)) as i32, FontId::SansSemiBold, 11, foot, foot_col);
 }
 
-fn paint_notif_center(
+fn paint_notifs(
     comp: &mut DesktopCompositor,
     wm: &WindowManager,
     tokens: &GlassTokens,
-    blur: bool,
+    ui: &UiTheme,
+    fmt: PixelFormat,
     clip: Rect,
+    blur: bool,
 ) {
     let r = notif_panel_rect(wm);
-    let ic = r.intersect(clip).clamp_to(comp.w, comp.h);
-    if ic.is_empty() {
-        return;
-    }
-    unsafe {
-        backdrop_frosted_rect(
-            comp.back_ptr, comp.w, comp.h, &comp.fb_info, r, ic,
-            tokens.overlay_tint_rgb, tokens.overlay_alpha, blur, 10,
-            tokens.glass_rim, tokens.glass_rim_soft,
-        );
-        draw_icon16(comp.back_ptr, comp.w, comp.h, r.x + 14, r.y + 12, &ICON_BELL, tokens.fg_primary, tokens.accent, ic);
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, r.x + 34, r.y + 12, b"NOTIFICATIONS", tokens.fg_primary, None, ic);
-        let cr = notif_clear_rect(wm);
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, cr, ic, 5, tokens.pill_bg);
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, cr.x + 9, cr.y + 3, b"Clear", tokens.accent, None, ic);
-    }
+    let Some(mut c) = paint_frosted_panel(comp, tokens, ui, fmt, r, clip, blur) else { return };
+    draw_vector_icon(&mut c, Rect::new(r.x + 14, r.y + 12, 16, 16), IconKind::Bell, ui.accent, ui.accent);
+    c.draw_text((r.x + 36) as i32, (r.y + 11) as i32, FontId::SansSemiBold, 14, b"Notifications", ui.fg_primary);
+    let cr = notif_clear_rect(wm);
+    c.fill_bordered_rrect_aa(cr, 6, ui.bg_card_alt, ui.border_subtle);
+    c.draw_text_centered(cr, FontId::SansSemiBold, 11, b"Clear", ui.accent_fg);
+
     if wm.glass.notif_len == 0 {
-        unsafe {
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, r.x + 16, r.y + 52, b"No live notifications recorded.", tokens.fg_muted, None, ic);
-        }
+        let emp = Rect::new(r.x + 14, r.y + 56, r.w - 28, 74);
+        c.fill_bordered_rrect_aa(emp, 8, ui.bg_card_alt, ui.border_subtle);
+        c.draw_text_centered(emp, FontId::SansRegular, 12, b"All caught up - no notifications", ui.fg_muted);
         return;
     }
-    for i in 0..wm.glass.notif_len {
-        let idx = wm.glass.notif_len - 1 - i;
-        let n = &wm.glass.notifs[idx];
-        let nr = Rect::new(r.x + 12, r.y + 42 + i * 33, r.w - 24, 27);
-        let fg = match n.kind {
-            1 => tokens.ok,
-            2 => tokens.warn,
-            _ => tokens.fg_primary,
-        };
-        unsafe {
-            fill_rounded_raw(comp.back_ptr, comp.w, comp.h, nr, ic, 6, tokens.card_alt);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, nr.x + 8, nr.y + 5, &n.msg[..n.len as usize], fg, None, ic);
-        }
+    let show = wm.glass.notif_len.min(4);
+    for idx in 0..show {
+        let n = &wm.glass.notifs[wm.glass.notif_len - 1 - idx];
+        let nr = Rect::new(r.x + 14, r.y + 48 + idx * 48, r.w - 28, 42);
+        c.fill_bordered_rrect_aa(nr, 8, ui.bg_card_alt, ui.border_subtle);
+        let dot = match n.kind { 1 => ui.ok, 2 => ui.warn, _ => ui.accent };
+        c.fill_circle_aa((nr.x + 12) as i32, (nr.y + 21) as i32, 4, dot, 255);
+        c.draw_text_ellipsis(
+            (nr.x + 24) as i32, (nr.y + 12) as i32, (nr.w.saturating_sub(34)) as i32,
+            FontId::SansRegular, 12, &n.msg[..n.len as usize], ui.fg_primary,
+        );
     }
 }
 
@@ -629,57 +658,72 @@ pub fn paint_lock_shield_glass(
     tokens: &GlassTokens,
     clip: Rect,
 ) {
-    comp.fill_back_clipped(Rect::new(0, 0, comp.w, comp.h), clip, comp.pal.bg_shadow);
-    let (cw, ch) = (640usize, 224usize);
+    let ui = UiTheme::new(tokens.mode, wm.dpi_pct());
+    let fmt = PixelFormat::from_fb(&comp.fb_info);
+    let full = clip.clamp_to(comp.w, comp.h);
+    if full.is_empty() {
+        return;
+    }
+    comp.paint_wallpaper_clipped(wm.p3_mode, full);
+    let mut bgc = unsafe { Canvas::from_raw(comp.back_ptr, comp.w, comp.h, comp.fb_stride, fmt, full) };
+    bgc.fill_rect_alpha(full, 0x050811, 145);
+
+    let (cw, ch) = (560usize.min(comp.w.saturating_sub(24)), 236usize);
     let cx = comp.w.saturating_sub(cw) / 2;
     let cy = comp.h.saturating_sub(ch) / 2;
     let card = Rect::new(cx, cy, cw, ch);
-    let cclip = card.intersect(clip).clamp_to(comp.w, comp.h);
+    let cclip = Rect::new(card.x.saturating_sub(6), card.y.saturating_sub(4), card.w + 12, card.h + 12)
+        .intersect(clip)
+        .clamp_to(comp.w, comp.h);
     if cclip.is_empty() {
         return;
     }
     unsafe {
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, card, cclip, 8, tokens.border_focus);
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, Rect::new(cx + 2, cy + 2, cw - 4, ch - 4), cclip, 6, comp.pal.bg_win);
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, Rect::new(cx + 2, cy + 2, cw - 4, 32), cclip, 6, tokens.pill_active);
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 10, b"DRY OS // SESSION LOCK SHIELD [CPL=3 COMPOSITOR GATE]", tokens.accent, None, cclip);
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 48, b"STATUS : INPUT ROUTING BLOCKED TO ALL USER COMPARTMENTS", tokens.ok, None, cclip);
+        blend_soft_rrect_shadow(comp.back_ptr, comp.w, comp.h, &comp.fb_info, card, cclip, 12, tokens.shadow_rgb, 110, 6);
     }
+    let mut c = unsafe { Canvas::from_raw(comp.back_ptr, comp.w, comp.h, comp.fb_stride, fmt, cclip) };
+    c.fill_bordered_rrect_aa(card, 12, ui.bg_card, ui.border_strong);
+
+    let hdr = Rect::new(cx + 16, cy + 16, cw - 32, 32);
+    c.fill_rrect_aa(hdr, 8, ui.bg_card_alt, 255);
+    draw_vector_icon(&mut c, Rect::new(hdr.x + 10, hdr.y + 8, 16, 16), IconKind::Lock, ui.accent, ui.accent);
+    c.draw_text((hdr.x + 34) as i32, (hdr.y + 7) as i32, FontId::SansSemiBold, 14, b"DRY OS Session Lock Shield", ui.fg_primary);
+    c.draw_text((cx + 20) as i32, (cy + 60) as i32, FontId::SansRegular, 12, b"Input routing isolated to CPL=3 compositor gate.", ui.ok);
+
     if wm.vault_auth_required {
+        c.draw_text((cx + 20) as i32, (cy + 82) as i32, FontId::SansSemiBold, 12, b"DRY Vault Passphrase (PBKDF2-SHA256):", ui.fg_secondary);
+        let box_r = Rect::new(cx + 20, cy + 104, cw - 40, 32);
+        c.fill_bordered_rrect_aa(box_r, 8, ui.bg_input, ui.accent);
         let mut plb = LineBuilder::new();
-        plb.push_bytes(b"Passphrase [ ");
         for _ in 0..(wm.lock_pin_len as usize).min(24) {
             plb.push_byte(b'*');
         }
-        plb.push_bytes(b"_ ] (Type + Enter)");
+        plb.push_byte(b'_');
+        c.draw_text((box_r.x + 12) as i32, (box_r.y + 7) as i32, FontId::MonoSemiBold, 13, plb.as_bytes(), ui.fg_primary);
+
         let mut flb = LineBuilder::new();
         flb.push_bytes(b"Auth failures: ");
         flb.push_u64(wm.vault_auth_failures as u64);
-        flb.push_bytes(b" | Blocked inputs: ");
+        flb.push_bytes(b"   Blocked inputs: ");
         flb.push_u64(wm.locked_blocked_events);
-        unsafe {
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 70, b"AUTH   : DRY VAULT PASSPHRASE REQUIRED (PBKDF2-SHA256)", tokens.accent, None, cclip);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 96, plb.as_bytes(), tokens.fg_primary, None, cclip);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 124, flb.as_bytes(), if wm.vault_auth_failures > 0 { tokens.warn } else { tokens.fg_muted }, None, cclip);
-        }
+        c.draw_text(
+            (cx + 20) as i32, (cy + 144) as i32, FontId::SansRegular, 11, flb.as_bytes(),
+            if wm.vault_auth_failures > 0 { ui.warn } else { ui.fg_muted },
+        );
     } else {
+        c.draw_text((cx + 20) as i32, (cy + 86) as i32, FontId::SansRegular, 12, b"Ring 3 applications stay running safely underneath.", ui.fg_muted);
         let mut blb = LineBuilder::new();
-        blb.push_bytes(b"Blocked key/mouse inputs while locked: ");
+        blb.push_bytes(b"Blocked inputs while locked: ");
         blb.push_u64(wm.locked_blocked_events);
-        unsafe {
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 72, b"AUTH   : UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)", tokens.warn, None, cclip);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 98, b"Active Ring 3 apps continue executing isolated underneath.", tokens.fg_muted, None, cclip);
-            draw_str_raw(comp.back_ptr, comp.w, comp.h, cx + 18, cy + 124, blb.as_bytes(), tokens.fg_primary, None, cclip);
-        }
+        c.draw_text((cx + 20) as i32, (cy + 114) as i32, FontId::SansSemiBold, 12, blb.as_bytes(), ui.fg_primary);
     }
+
     let btn = wm.unlock_button_rect();
+    c.fill_bordered_rrect_aa(btn, 8, ui.accent, ui.accent_hover);
     let lbl: &[u8] = if wm.vault_auth_required {
-        b"[ AUTHENTICATE & UNLOCK (Enter) ]"
+        b"Authenticate & Unlock (Enter)"
     } else {
-        b"[ UNLOCK SESSION (Enter/Click) ]"
+        b"Unlock Session (Enter / Click)"
     };
-    unsafe {
-        fill_rounded_raw(comp.back_ptr, comp.w, comp.h, btn, cclip, 6, tokens.pill_active);
-        draw_str_raw(comp.back_ptr, comp.w, comp.h, btn.x + 16, btn.y + 6, lbl, tokens.accent, None, cclip);
-    }
+    c.draw_text_centered(btn, FontId::SansSemiBold, 12, lbl, ui.fg_on_accent);
 }

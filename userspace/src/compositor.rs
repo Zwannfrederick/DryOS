@@ -177,6 +177,8 @@ pub fn write_u32_ascii(out: &mut [u8], mut v: u32) -> usize {
 pub struct DesktopCompositor {
     pub fb_ptr: *mut u32,
     pub back_ptr: *mut u32,
+    pub wall_ptr: *mut u32,
+    pub wall_key: u32,
     pub w: usize,
     pub h: usize,
     pub fb_stride: usize,
@@ -193,6 +195,8 @@ impl DesktopCompositor {
         Self {
             fb_ptr: core::ptr::null_mut(),
             back_ptr: core::ptr::null_mut(),
+            wall_ptr: core::ptr::null_mut(),
+            wall_key: u32::MAX,
             w: 0,
             h: 0,
             fb_stride: 0,
@@ -239,9 +243,17 @@ impl DesktopCompositor {
         }
     }
 
-    pub fn init(&mut self, fb_ptr: *mut u32, back_ptr: *mut u32, info: &UserFbInfo) {
+    pub fn init(
+        &mut self,
+        fb_ptr: *mut u32,
+        back_ptr: *mut u32,
+        wall_ptr: *mut u32,
+        info: &UserFbInfo,
+    ) {
         self.fb_ptr = fb_ptr;
         self.back_ptr = back_ptr;
+        self.wall_ptr = wall_ptr;
+        self.wall_key = u32::MAX;
         self.w = info.width as usize;
         self.h = info.height as usize;
         self.fb_stride = (info.pitch as usize) / 4;
@@ -258,6 +270,7 @@ impl DesktopCompositor {
             &self.fb_info,
             ThemeMode::from_wm(wm.high_contrast, wm.light_mode),
         );
+        self.wall_key = u32::MAX;
         self.scene_dirty.mark(Rect::new(0, 0, self.w, self.h));
     }
 
@@ -333,6 +346,153 @@ impl DesktopCompositor {
         }
     }
 
+    /// Build or reuse the cached full-screen wallpaper in `wall_ptr`.
+    pub fn ensure_wallpaper_cache(&mut self, p3_mode: bool) {
+        if self.wall_ptr.is_null() || self.w == 0 || self.h == 0 {
+            return;
+        }
+        let want_key = (u32::from(p3_mode) << 8) | (self.glass.mode as u32);
+        if self.wall_key == want_key {
+            return;
+        }
+        const BAYER_4X4: [i32; 16] = [-8, 0, -6, 2, 4, -4, 6, -2, -5, 3, -7, 1, 7, -1, 5, -3];
+        let t = self.glass;
+        let top = t.wall_top_rgb;
+        let bot = t.wall_bot_rgb;
+        let glow = t.wall_glow_rgb;
+        let hm1 = self.h.saturating_sub(1).max(1) as i32;
+        let cx1 = (self.w * 28 / 100) as i64;
+        let cy1 = (self.h * 24 / 100) as i64;
+        let rx1 = (self.w * 56 / 100).max(1) as i64;
+        let ry1 = (self.h * 58 / 100).max(1) as i64;
+        let cx2 = (self.w * 80 / 100) as i64;
+        let cy2 = (self.h * 78 / 100) as i64;
+        let rx2 = (self.w * 52 / 100).max(1) as i64;
+        let ry2 = (self.h * 54 / 100).max(1) as i64;
+
+        for py in 0..self.h {
+            let y16 = ((py as i32) << 12) / hm1; // 0..4096
+            let br16 = ((top.0 as i32) << 4) + (((bot.0 as i32 - top.0 as i32) * y16) >> 8);
+            let bg16 = ((top.1 as i32) << 4) + (((bot.1 as i32 - top.1 as i32) * y16) >> 8);
+            let bb16 = ((top.2 as i32) << 4) + (((bot.2 as i32 - top.2 as i32) * y16) >> 8);
+            let dy1 = ((py as i64 - cy1) * 256) / ry1;
+            let dy2 = ((py as i64 - cy2) * 256) / ry2;
+            let dy1_sq = dy1 * dy1;
+            let dy2_sq = dy2 * dy2;
+            let row_ptr = unsafe { self.wall_ptr.add(py * self.w) };
+            let grid_row = !p3_mode && (py & 15) == 0;
+            let bayer_row = (py & 3) << 2;
+
+            for px in 0..self.w {
+                if grid_row && (px & 15) == 0 {
+                    unsafe { *row_ptr.add(px) = t.dot_grid };
+                    continue;
+                }
+                let mut r16 = br16;
+                let mut g16 = bg16;
+                let mut b16 = bb16;
+                if p3_mode {
+                    let dx1 = ((px as i64 - cx1) * 256) / rx1;
+                    let d1 = dx1 * dx1 + dy1_sq;
+                    let mut w_glow = 0i32;
+                    if d1 < 65_536 {
+                        let s = 256 - ((d1 >> 8) as i32);
+                        w_glow += (s * s * 96) >> 16; // up to ~37% ambient bloom
+                    }
+                    let dx2 = ((px as i64 - cx2) * 256) / rx2;
+                    let d2 = dx2 * dx2 + dy2_sq;
+                    if d2 < 65_536 {
+                        let s = 256 - ((d2 >> 8) as i32);
+                        w_glow += (s * s * 64) >> 16; // soft secondary corner sheen
+                    }
+                    if w_glow > 0 {
+                        let w = w_glow.min(180);
+                        r16 += ((((glow.0 as i32) << 4) - r16) * w) >> 8;
+                        g16 += ((((glow.1 as i32) << 4) - g16) * w) >> 8;
+                        b16 += ((((glow.2 as i32) << 4) - b16) * w) >> 8;
+                    }
+                    let dither = BAYER_4X4[bayer_row | (px & 3)];
+                    r16 += dither;
+                    g16 += dither;
+                    b16 += dither;
+                }
+                let r = (r16 >> 4).clamp(0, 255) as u8;
+                let g = (g16 >> 4).clamp(0, 255) as u8;
+                let b = (b16 >> 4).clamp(0, 255) as u8;
+                unsafe { *row_ptr.add(px) = pack_rgb(&self.fb_info, r, g, b) };
+            }
+        }
+        self.wall_key = want_key;
+    }
+
+    /// Blit cached wallpaper pixels clipped to `clip` (falls back to flat gradient if uncached).
+    pub fn paint_wallpaper_clipped(&mut self, p3_mode: bool, clip: Rect) {
+        let c = clip.clamp_to(self.w, self.h);
+        if c.is_empty() {
+            return;
+        }
+        self.ensure_wallpaper_cache(p3_mode);
+        if !self.wall_ptr.is_null() {
+            for py in c.y..(c.y + c.h) {
+                unsafe {
+                    let src = self.wall_ptr.add(py * self.w + c.x);
+                    let dst = self.back_ptr.add(py * self.fb_stride + c.x);
+                    core::ptr::copy_nonoverlapping(src, dst, c.w);
+                }
+            }
+            return;
+        }
+        let col = pack_rgb(
+            &self.fb_info,
+            self.glass.wall_top_rgb.0,
+            self.glass.wall_top_rgb.1,
+            self.glass.wall_top_rgb.2,
+        );
+        self.fill_back_clipped(c, c, col);
+    }
+
+    /// Blit an `0x00RRGGBB` `SharedPixelSurface` into `back_ptr` clipped to `cclip`.
+    ///
+    /// # Safety
+    /// `src_base` must point to at least `src_w * (gy + cclip.h)` readable pixels.
+    pub unsafe fn blit_pixel_surface_clipped(
+        &mut self,
+        src_base: *const u32,
+        src_w: usize,
+        gx: usize,
+        gy: usize,
+        cclip: Rect,
+    ) {
+        let ic = cclip.clamp_to(self.w, self.h);
+        if ic.is_empty() || src_base.is_null() {
+            return;
+        }
+        let native_bgrx = self.fb_info.red_shift == 16
+            && self.fb_info.green_shift == 8
+            && self.fb_info.blue_shift == 0;
+        for py in ic.y..(ic.y + ic.h) {
+            let sy = py - gy;
+            let sx0 = ic.x - gx;
+            unsafe {
+                let src_row = src_base.add(sy * src_w + sx0);
+                let dst_row = self.back_ptr.add(py * self.fb_stride + ic.x);
+                if native_bgrx {
+                    core::ptr::copy_nonoverlapping(src_row, dst_row, ic.w);
+                } else {
+                    for i in 0..ic.w {
+                        let argb = *src_row.add(i);
+                        *dst_row.add(i) = pack_rgb(
+                            &self.fb_info,
+                            ((argb >> 16) & 0xff) as u8,
+                            ((argb >> 8) & 0xff) as u8,
+                            (argb & 0xff) as u8,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Repaint `clip` in `back_ptr` from bottom-to-top Z-order and queue `clip` for MMIO flush.
     pub fn repaint_scene_rect(&mut self, wm: &WindowManager, clip: Rect) {
         let c = clip.clamp_to(self.w, self.h);
@@ -345,12 +505,13 @@ impl DesktopCompositor {
             return;
         }
         let tokens = self.glass;
+        let dpi_pct = wm.dpi_pct();
         if wm.session_state == SessionVisualState::SessionLocked {
             crate::glass::overlays::paint_lock_shield_glass(self, wm, &tokens, c);
             self.mmio_dirty.mark(c);
             return;
         }
-        crate::glass::chrome::paint_wallpaper(self, &tokens, c);
+        crate::glass::chrome::paint_wallpaper(self, wm.p3_mode, &tokens, c);
         crate::glass::chrome::paint_topbar_and_tabs(self, wm, &tokens, c);
         for z in 0..wm.z_len {
             let slot_idx = wm.z_stack[z];
@@ -358,6 +519,7 @@ impl DesktopCompositor {
                 self,
                 &wm.windows[slot_idx],
                 wm.p3_mode,
+                dpi_pct,
                 &tokens,
                 c,
             );

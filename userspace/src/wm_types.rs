@@ -165,6 +165,9 @@ pub struct WindowSlot {
     pub pixel_h: u16,
     pub snap_cap: u64,
     pub snap_vaddr: u64,
+    pub last_cfg_w: u16,
+    pub last_cfg_h: u16,
+    pub last_cfg_flags: u8,
 }
 
 impl WindowSlot {
@@ -193,6 +196,9 @@ impl WindowSlot {
             pixel_h: 0,
             snap_cap: 0,
             snap_vaddr: 0,
+            last_cfg_w: 0,
+            last_cfg_h: 0,
+            last_cfg_flags: 0,
         }
     }
 
@@ -201,11 +207,12 @@ impl WindowSlot {
         if !self.allocated || !self.visible {
             Rect::EMPTY
         } else {
+            let p = SHADOW_OFF + 2;
             Rect::new(
-                self.rect.x,
-                self.rect.y,
-                self.rect.w + SHADOW_OFF,
-                self.rect.h + SHADOW_OFF,
+                self.rect.x.saturating_sub(p),
+                self.rect.y.saturating_sub(p),
+                self.rect.w + p * 2,
+                self.rect.h + p * 2,
             )
         }
     }
@@ -242,9 +249,20 @@ pub const fn compute_window_size(cols: u16, rows: u16) -> (usize, usize) {
     (w, h)
 }
 
+pub const PIXEL_WIN_CHROME_W: usize = WIN_PAD_X * 2 + WIN_BORDER * 2;
+pub const PIXEL_WIN_CHROME_H: usize = WIN_TITLE_H + WIN_PAD_BOTTOM + WIN_BORDER * 2;
+
 #[inline]
 pub const fn compute_pixel_window_size(pw: u16, ph: u16) -> (usize, usize) {
-    let w = (pw as usize) + WIN_PAD_X * 2 + WIN_BORDER * 2;
-    let h = WIN_TITLE_H + (ph as usize) + WIN_PAD_BOTTOM + WIN_BORDER * 2;
+    let w = (pw as usize) + PIXEL_WIN_CHROME_W;
+    let h = (ph as usize) + PIXEL_WIN_CHROME_H;
     (w, h)
+}
+
+#[inline]
+pub const fn client_dims_for_window_rect(win_w: usize, win_h: usize) -> (u16, u16) {
+    crate::surface::clamp_pixel_dims(
+        win_w.saturating_sub(PIXEL_WIN_CHROME_W),
+        win_h.saturating_sub(PIXEL_WIN_CHROME_H),
+    )
 }

@@ -36,6 +36,7 @@ pub mod vault_proto;
 pub mod vfs_mem;
 pub mod vfs_proto;
 pub mod wm;
+pub mod wm_events;
 pub mod wm_ipc;
 pub mod wm_layout;
 pub mod wm_types;

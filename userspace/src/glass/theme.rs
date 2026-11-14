@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! `DRY Glass` Color Tokens & WCAG-AA Dark / Frosted Daylight / High-Contrast Palettes.
+//! DRY Glass Visual System — Theme Tokens & Color Helpers (`Obsidian Dark`, `Frosted Daylight`, `High Contrast`).
 
+use crate::abi_ext::UserFbInfo;
 use crate::compositor::pack_rgb;
-use crate::UserFbInfo;
+use crate::ui::theme::UiTheme;
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ThemeMode {
     ObsidianDark = 0,
     FrostedDaylight = 1,
@@ -25,7 +25,7 @@ impl ThemeMode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone)]
 pub struct GlassTokens {
     pub mode: ThemeMode,
     pub wall_top_rgb: (u8, u8, u8),
@@ -67,11 +67,11 @@ impl GlassTokens {
             wall_glow_rgb: (0, 0, 0),
             dot_grid: 0,
             panel_tint_rgb: (0, 0, 0),
-            panel_alpha: 200,
+            panel_alpha: 0,
             dock_tint_rgb: (0, 0, 0),
-            dock_alpha: 200,
+            dock_alpha: 0,
             overlay_tint_rgb: (0, 0, 0),
-            overlay_alpha: 220,
+            overlay_alpha: 0,
             glass_rim: 0,
             glass_rim_soft: 0,
             title_focus_rgb: (0, 0, 0),
@@ -93,132 +93,139 @@ impl GlassTokens {
         }
     }
 
+    #[inline]
+    pub fn ui_theme(&self, dpi_pct: u16) -> UiTheme {
+        UiTheme::new(self.mode, dpi_pct)
+    }
+
     pub fn from_fb(info: &UserFbInfo, mode: ThemeMode) -> Self {
         match mode {
-            ThemeMode::HighContrast => Self {
+            ThemeMode::ObsidianDark => Self {
                 mode,
-                wall_top_rgb: (0x00, 0x00, 0x00),
-                wall_bot_rgb: (0x00, 0x00, 0x00),
-                wall_glow_rgb: (0x00, 0x10, 0x14),
-                dot_grid: pack_rgb(info, 0x26, 0x26, 0x26),
-                panel_tint_rgb: (0x00, 0x00, 0x00),
-                panel_alpha: 255,
-                dock_tint_rgb: (0x08, 0x08, 0x08),
-                dock_alpha: 255,
-                overlay_tint_rgb: (0x04, 0x06, 0x0A),
-                overlay_alpha: 255,
-                glass_rim: pack_rgb(info, 0x00, 0xFF, 0xEE),
-                glass_rim_soft: pack_rgb(info, 0x94, 0xA3, 0xB8),
-                title_focus_rgb: (0x00, 0x3B, 0x4D),
-                title_idle_rgb: (0x14, 0x14, 0x14),
-                pill_bg: pack_rgb(info, 0x12, 0x24, 0x2E),
-                pill_active: pack_rgb(info, 0x00, 0x52, 0x66),
-                card_bg: pack_rgb(info, 0x08, 0x0C, 0x12),
-                card_alt: pack_rgb(info, 0x14, 0x1E, 0x28),
-                border_focus: pack_rgb(info, 0x00, 0xFF, 0xEE),
-                border_idle: pack_rgb(info, 0x94, 0xA3, 0xB8),
-                fg_primary: pack_rgb(info, 0xFF, 0xFF, 0xFF),
-                fg_muted: pack_rgb(info, 0xD8, 0xE2, 0xEC),
-                accent: pack_rgb(info, 0x00, 0xFF, 0xEE),
-                ok: pack_rgb(info, 0x39, 0xFF, 0x88),
-                warn: pack_rgb(info, 0xFF, 0xEA, 0x00),
-                close_bg: pack_rgb(info, 0x88, 0x00, 0x1E),
-                close_fg: pack_rgb(info, 0xFF, 0xFF, 0xFF),
-                shadow_rgb: (0x00, 0x00, 0x00),
+                wall_top_rgb: (11, 15, 24),
+                wall_bot_rgb: (19, 28, 43),
+                wall_glow_rgb: (34, 72, 118),
+                dot_grid: pack_rgb(info, 28, 36, 52),
+                panel_tint_rgb: (17, 22, 32),
+                panel_alpha: 204,
+                dock_tint_rgb: (20, 26, 38),
+                dock_alpha: 212,
+                overlay_tint_rgb: (18, 24, 35),
+                overlay_alpha: 226,
+                glass_rim: pack_rgb(info, 70, 84, 110),
+                glass_rim_soft: pack_rgb(info, 44, 54, 72),
+                title_focus_rgb: (27, 34, 48),
+                title_idle_rgb: (20, 25, 35),
+                pill_bg: pack_rgb(info, 32, 40, 56),
+                pill_active: pack_rgb(info, 44, 96, 176),
+                card_bg: pack_rgb(info, 24, 30, 42),
+                card_alt: pack_rgb(info, 31, 39, 54),
+                border_focus: pack_rgb(info, 76, 134, 214),
+                border_idle: pack_rgb(info, 42, 51, 67),
+                fg_primary: pack_rgb(info, 238, 242, 248),
+                fg_muted: pack_rgb(info, 152, 163, 182),
+                accent: pack_rgb(info, 96, 165, 250),
+                ok: pack_rgb(info, 52, 211, 153),
+                warn: pack_rgb(info, 245, 158, 11),
+                close_bg: pack_rgb(info, 200, 62, 68),
+                close_fg: pack_rgb(info, 255, 255, 255),
+                shadow_rgb: (4, 7, 13),
             },
             ThemeMode::FrostedDaylight => Self {
                 mode,
-                wall_top_rgb: (0xDC, 0xE9, 0xF7),
-                wall_bot_rgb: (0xBF, 0xD4, 0xEC),
-                wall_glow_rgb: (0x8F, 0xC9, 0xF2),
-                dot_grid: pack_rgb(info, 0xA4, 0xBC, 0xD6),
-                panel_tint_rgb: (0xF6, 0xFA, 0xFE),
-                panel_alpha: 214,
-                dock_tint_rgb: (0xF8, 0xFA, 0xFC),
-                dock_alpha: 218,
-                overlay_tint_rgb: (0xF4, 0xF8, 0xFD),
-                overlay_alpha: 228,
-                glass_rim: pack_rgb(info, 0xFF, 0xFF, 0xFF),
-                glass_rim_soft: pack_rgb(info, 0xA8, 0xBD, 0xD4),
-                title_focus_rgb: (0xE0, 0xEF, 0xFD),
-                title_idle_rgb: (0xEC, 0xF1, 0xF7),
-                pill_bg: pack_rgb(info, 0xE2, 0xEC, 0xF7),
-                pill_active: pack_rgb(info, 0xBA, 0xE0, 0xFD),
-                card_bg: pack_rgb(info, 0xE9, 0xF1, 0xFA),
-                card_alt: pack_rgb(info, 0xD8, 0xE7, 0xF6),
-                border_focus: pack_rgb(info, 0x02, 0x84, 0xC7),
-                border_idle: pack_rgb(info, 0x94, 0xA8, 0xC0),
-                fg_primary: pack_rgb(info, 0x0F, 0x17, 0x2A),
-                fg_muted: pack_rgb(info, 0x47, 0x55, 0x69),
-                accent: pack_rgb(info, 0x03, 0x69, 0xA1),
-                ok: pack_rgb(info, 0x04, 0x78, 0x57),
-                warn: pack_rgb(info, 0xB4, 0x53, 0x09),
-                close_bg: pack_rgb(info, 0xFE, 0xE2, 0xE2),
-                close_fg: pack_rgb(info, 0xB9, 0x1C, 0x1C),
-                shadow_rgb: (0x1E, 0x29, 0x3B),
+                wall_top_rgb: (224, 233, 244),
+                wall_bot_rgb: (202, 216, 235),
+                wall_glow_rgb: (176, 202, 236),
+                dot_grid: pack_rgb(info, 192, 204, 220),
+                panel_tint_rgb: (244, 247, 252),
+                panel_alpha: 218,
+                dock_tint_rgb: (240, 244, 250),
+                dock_alpha: 224,
+                overlay_tint_rgb: (246, 249, 253),
+                overlay_alpha: 234,
+                glass_rim: pack_rgb(info, 255, 255, 255),
+                glass_rim_soft: pack_rgb(info, 198, 209, 224),
+                title_focus_rgb: (234, 240, 248),
+                title_idle_rgb: (222, 229, 239),
+                pill_bg: pack_rgb(info, 225, 232, 242),
+                pill_active: pack_rgb(info, 37, 99, 235),
+                card_bg: pack_rgb(info, 248, 250, 253),
+                card_alt: pack_rgb(info, 234, 240, 248),
+                border_focus: pack_rgb(info, 59, 130, 246),
+                border_idle: pack_rgb(info, 196, 206, 220),
+                fg_primary: pack_rgb(info, 15, 23, 42),
+                fg_muted: pack_rgb(info, 71, 85, 105),
+                accent: pack_rgb(info, 29, 78, 216),
+                ok: pack_rgb(info, 5, 150, 105),
+                warn: pack_rgb(info, 180, 83, 9),
+                close_bg: pack_rgb(info, 220, 38, 38),
+                close_fg: pack_rgb(info, 255, 255, 255),
+                shadow_rgb: (15, 23, 42),
             },
-            ThemeMode::ObsidianDark => Self {
+            ThemeMode::HighContrast => Self {
                 mode,
-                wall_top_rgb: (0x08, 0x0D, 0x19),
-                wall_bot_rgb: (0x12, 0x1F, 0x34),
-                wall_glow_rgb: (0x13, 0x3D, 0x5E),
-                dot_grid: pack_rgb(info, 0x1D, 0x2E, 0x49),
-                panel_tint_rgb: (0x0D, 0x15, 0x26),
-                panel_alpha: 206,
-                dock_tint_rgb: (0x10, 0x1B, 0x30),
-                dock_alpha: 200,
-                overlay_tint_rgb: (0x0F, 0x18, 0x2B),
-                overlay_alpha: 222,
-                glass_rim: pack_rgb(info, 0x48, 0x68, 0x8E),
-                glass_rim_soft: pack_rgb(info, 0x27, 0x39, 0x54),
-                title_focus_rgb: (0x16, 0x26, 0x40),
-                title_idle_rgb: (0x11, 0x1A, 0x2C),
-                pill_bg: pack_rgb(info, 0x19, 0x28, 0x42),
-                pill_active: pack_rgb(info, 0x1B, 0x38, 0x58),
-                card_bg: pack_rgb(info, 0x13, 0x1E, 0x32),
-                card_alt: pack_rgb(info, 0x1B, 0x2B, 0x46),
-                border_focus: pack_rgb(info, 0x22, 0xD3, 0xEE),
-                border_idle: pack_rgb(info, 0x30, 0x42, 0x5C),
-                fg_primary: pack_rgb(info, 0xF8, 0xFA, 0xFC),
-                fg_muted: pack_rgb(info, 0x94, 0xA3, 0xB8),
-                accent: pack_rgb(info, 0x22, 0xD3, 0xEE),
-                ok: pack_rgb(info, 0x34, 0xD3, 0x99),
-                warn: pack_rgb(info, 0xFB, 0xBF, 0x24),
-                close_bg: pack_rgb(info, 0x52, 0x1B, 0x2B),
-                close_fg: pack_rgb(info, 0xFD, 0xA4, 0xAF),
-                shadow_rgb: (0x02, 0x05, 0x0C),
+                wall_top_rgb: (8, 10, 14),
+                wall_bot_rgb: (14, 18, 26),
+                wall_glow_rgb: (22, 42, 68),
+                dot_grid: pack_rgb(info, 38, 46, 62),
+                panel_tint_rgb: (10, 12, 18),
+                panel_alpha: 242,
+                dock_tint_rgb: (12, 15, 22),
+                dock_alpha: 244,
+                overlay_tint_rgb: (12, 15, 22),
+                overlay_alpha: 248,
+                glass_rim: pack_rgb(info, 250, 204, 21),
+                glass_rim_soft: pack_rgb(info, 148, 163, 184),
+                title_focus_rgb: (22, 28, 40),
+                title_idle_rgb: (14, 18, 26),
+                pill_bg: pack_rgb(info, 28, 34, 48),
+                pill_active: pack_rgb(info, 202, 138, 4),
+                card_bg: pack_rgb(info, 18, 22, 30),
+                card_alt: pack_rgb(info, 30, 36, 48),
+                border_focus: pack_rgb(info, 250, 204, 21),
+                border_idle: pack_rgb(info, 148, 163, 184),
+                fg_primary: pack_rgb(info, 255, 255, 255),
+                fg_muted: pack_rgb(info, 226, 232, 240),
+                accent: pack_rgb(info, 250, 204, 21),
+                ok: pack_rgb(info, 74, 222, 128),
+                warn: pack_rgb(info, 251, 146, 60),
+                close_bg: pack_rgb(info, 220, 38, 38),
+                close_fg: pack_rgb(info, 255, 255, 255),
+                shadow_rgb: (0, 0, 0),
             },
         }
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn unpack_rgb(info: &UserFbInfo, px: u32) -> (u8, u8, u8) {
-    let r = ((px >> (info.red_shift & 31)) & 0xff) as u8;
-    let g = ((px >> (info.green_shift & 31)) & 0xff) as u8;
-    let b = ((px >> (info.blue_shift & 31)) & 0xff) as u8;
-    (r, g, b)
+    (
+        ((px >> info.red_shift) & 0xff) as u8,
+        ((px >> info.green_shift) & 0xff) as u8,
+        ((px >> info.blue_shift) & 0xff) as u8,
+    )
 }
 
-#[inline(always)]
+#[inline]
 pub fn blend_rgb(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
     let a = alpha as u16;
     let inv = 255u16 - a;
-    let r = (((src.0 as u16) * a + (dst.0 as u16) * inv + 127) / 255) as u8;
-    let g = (((src.1 as u16) * a + (dst.1 as u16) * inv + 127) / 255) as u8;
-    let b = (((src.2 as u16) * a + (dst.2 as u16) * inv + 127) / 255) as u8;
-    (r, g, b)
+    (
+        ((dst.0 as u16 * inv + src.0 as u16 * a) / 255) as u8,
+        ((dst.1 as u16 * inv + src.1 as u16 * a) / 255) as u8,
+        ((dst.2 as u16 * inv + src.2 as u16 * a) / 255) as u8,
+    )
 }
 
-#[inline(always)]
+#[inline]
 pub fn blend_packed(info: &UserFbInfo, dst_px: u32, src: (u8, u8, u8), alpha: u8) -> u32 {
-    if alpha == 255 {
-        return pack_rgb(info, src.0, src.1, src.2);
-    }
     if alpha == 0 {
         return dst_px;
     }
-    let d = unpack_rgb(info, dst_px);
-    let m = blend_rgb(d, src, alpha);
-    pack_rgb(info, m.0, m.1, m.2)
+    if alpha == 255 {
+        return pack_rgb(info, src.0, src.1, src.2);
+    }
+    let dst = unpack_rgb(info, dst_px);
+    let out = blend_rgb(dst, src, alpha);
+    pack_rgb(info, out.0, out.1, out.2)
 }

@@ -28,7 +28,10 @@ use dry_userspace::surface::{
 use dry_userspace::wm::{
     SessionVisualState, WindowManager, WindowRole, WmInputAction, MAX_WINDOWS, SUP_BIT_WM_ACTION,
 };
-use dry_userspace::wm_ipc::{emit_wm_exit_telemetry, handle_wm_admin_op, wm_log_line as log_line};
+use dry_userspace::wm_ipc::{
+    emit_wm_exit_telemetry, handle_wm_admin_op, wake_pending_pixel_clients, wake_window_client,
+    wm_log_line as log_line,
+};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_query, sys_cap_revoke, sys_exit,
     sys_fb_map, sys_frame_alloc, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_send_inline,
@@ -47,6 +50,7 @@ const SURFACE_BASE_VADDR: u64 = 0x1800_0000;
 const PIXEL_SURF_BASE_VADDR: u64 = 0x1A00_0000;
 const PIXEL_SNAP_BASE_VADDR: u64 = 0x1B00_0000;
 const BACKBUF_VADDR: u64 = 0x2000_0000;
+const WALLPAPER_VADDR: u64 = 0x3000_0000;
 const TWO_MIB: usize = 2 * 1024 * 1024;
 const MAX_BACKBUF_2M: usize = 8; // Supports up to 16 MiB (e.g., 2560x1600x32) with explicit bounds check.
 
@@ -62,40 +66,6 @@ static COMP_STATE: SingleThreadCell<DesktopCompositor> =
 fn reply_err(disp_ep: u64, tok: u64, code: u32) {
     if tok != 0 {
         let _ = sys_ipc_reply_inline(disp_ep, tok, pack_msg_tag(code, 0, 1, 0), [0; 4]);
-    }
-}
-
-fn wake_window_client(disp_ep: u64, wm: &mut WindowManager, slot_idx: usize) {
-    let win = &mut wm.windows[slot_idx];
-    if !win.allocated {
-        return;
-    }
-    if win.close_requested {
-        if win.waiter_reply_tok != 0 {
-            let _ = sys_ipc_reply_inline(
-                disp_ep,
-                win.waiter_reply_tok,
-                pack_msg_tag(IPC_OP_WIN_CLOSED, 0, 1, 0),
-                [win.id as u64, 0, 0, 0],
-            );
-            win.waiter_reply_tok = 0;
-        } else if win.notif_cap != 0 {
-            let _ = sys_notify_signal(win.notif_cap, 1);
-        }
-        return;
-    }
-    if win.waiter_reply_tok != 0 {
-        if let Some(ev) = win.ev_queue.pop() {
-            let _ = sys_ipc_reply_inline(
-                disp_ep,
-                win.waiter_reply_tok,
-                pack_msg_tag(IPC_OP_INPUT_EVENT, 0, 4, 0),
-                ev.to_ipc_mrs(win.ev_queue.overflow_count()),
-            );
-            win.waiter_reply_tok = 0;
-        }
-    } else if win.notif_cap != 0 && !win.ev_queue.is_empty() {
-        let _ = sys_notify_signal(win.notif_cap, 1);
     }
 }
 
@@ -191,12 +161,30 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
         *slot = cap;
     }
 
+    let mut wall_caps = [0u64; MAX_BACKBUF_2M];
+    for (i, slot) in wall_caps.iter_mut().take(num_2m).enumerate() {
+        let cap = match sys_frame_alloc(1) {
+            Ok(c) => c,
+            Err(_) => sys_exit(114),
+        };
+        let va = WALLPAPER_VADDR + (i * TWO_MIB) as u64;
+        if sys_vspace_map(cap, va, VSPACE_MAP_OP_2M_RW).is_err() {
+            sys_exit(115);
+        }
+        *slot = cap;
+    }
+
     // SAFETY: Single-threaded CPL=3 compositor owns `WM_STATE` and `COMP_STATE`.
     let wm = unsafe { &mut *WM_STATE.0.get() };
     let comp = unsafe { &mut *COMP_STATE.0.get() };
     wm.init_screen(w, h);
     wm.back_caps = back_caps;
-    comp.init(FB_MAP_VADDR as *mut u32, BACKBUF_VADDR as *mut u32, &info);
+    comp.init(
+        FB_MAP_VADDR as *mut u32,
+        BACKBUF_VADDR as *mut u32,
+        WALLPAPER_VADDR as *mut u32,
+        &info,
+    );
 
     comp.scene_dirty.mark(Rect::new(0, 0, w, h));
     let _ = comp.flush_all(wm);
@@ -356,12 +344,14 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                         continue;
                     };
                     // SAFETY: `surf_vaddr` (`USER_RO`) & `snap_vaddr` (`USER_RW`) are mapped `2 MiB` frames.
+                    let mut init_pw = w_or_cols as usize;
+                    let mut init_ph = h_or_rows as usize;
                     let ok = unsafe {
                         capture_pixel_dirty_from_ro(
                             surf_vaddr,
                             snap_vaddr,
-                            w_or_cols as usize,
-                            h_or_rows as usize,
+                            &mut init_pw,
+                            &mut init_ph,
                             true,
                         )
                         .is_ok_and(|opt| opt.is_some())
@@ -454,13 +444,25 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 let ro_va = wm.windows[slot_idx].surf_vaddr;
                 let ok = if wm.windows[slot_idx].is_pixel {
                     let snap_va = wm.windows[slot_idx].snap_vaddr;
-                    let pw = wm.windows[slot_idx].pixel_w as usize;
-                    let ph = wm.windows[slot_idx].pixel_h as usize;
+                    let mut pw = wm.windows[slot_idx].pixel_w as usize;
+                    let mut ph = wm.windows[slot_idx].pixel_h as usize;
+                    let (old_pw, old_ph) = (pw, ph);
                     // SAFETY: `ro_va` and `snap_va` remain mapped for the lifetime of `slot_idx`.
-                    let res = unsafe { capture_pixel_dirty_from_ro(ro_va, snap_va, pw, ph, false) };
+                    let res = unsafe {
+                        capture_pixel_dirty_from_ro(ro_va, snap_va, &mut pw, &mut ph, false)
+                    };
                     match res {
                         Ok(Some((dx, dy, dw, dh))) => {
-                            if wm.session_state == SessionVisualState::Active && dw > 0 && dh > 0 {
+                            if pw != old_pw || ph != old_ph {
+                                wm.windows[slot_idx].pixel_w = pw as u16;
+                                wm.windows[slot_idx].pixel_h = ph as u16;
+                                if wm.session_state == SessionVisualState::Active {
+                                    comp.scene_dirty.mark(wm.windows[slot_idx].outer_rect());
+                                }
+                            } else if wm.session_state == SessionVisualState::Active
+                                && dw > 0
+                                && dh > 0
+                            {
                                 let (gx, gy) = wm.windows[slot_idx].grid_origin();
                                 comp.scene_dirty.mark(Rect::new(gx + dx, gy + dy, dw, dh));
                                 comp.scene_dirty.mark(wm.windows[slot_idx].titlebar_rect());
@@ -741,6 +743,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     }
                     _ => {}
                 }
+                wake_pending_pixel_clients(disp_ep_cap, wm);
 
                 let (px, cyc) = comp.flush_all(wm);
                 match action {
@@ -846,6 +849,13 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 for (i, &cap) in back_caps.iter().take(num_2m).enumerate() {
                     if cap != 0 {
                         let va = BACKBUF_VADDR + (i * TWO_MIB) as u64;
+                        let _ = sys_vspace_map(cap, va, VSPACE_MAP_OP_UNMAP_2M);
+                        let _ = sys_cap_revoke(cap, 2);
+                    }
+                }
+                for (i, &cap) in wall_caps.iter().take(num_2m).enumerate() {
+                    if cap != 0 {
+                        let va = WALLPAPER_VADDR + (i * TWO_MIB) as u64;
                         let _ = sys_vspace_map(cap, va, VSPACE_MAP_OP_UNMAP_2M);
                         let _ = sys_cap_revoke(cap, 2);
                     }

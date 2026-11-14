@@ -7,6 +7,7 @@
 pub mod app_kit;
 pub mod blur;
 pub mod chrome;
+pub mod dock_bar;
 pub mod icons;
 pub mod overlays;
 pub mod theme;
@@ -19,7 +20,7 @@ pub const DOCK_H: usize = 46;
 pub const DOCK_MARGIN_B: usize = 8;
 pub const DOCK_CLEARANCE: usize = DOCK_H + DOCK_MARGIN_B + 4;
 pub const MAX_GLASS_NOTIFS: usize = 6;
-pub const GLASS_CORNER_R: usize = 6;
+pub const GLASS_CORNER_R: usize = 8;
 
 #[derive(Clone, Copy)]
 pub struct GlassNotif {

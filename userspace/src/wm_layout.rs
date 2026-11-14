@@ -3,8 +3,10 @@
 //! `DialogTransient` Geometry Policy (`Milestone 2A-3`).
 
 use crate::gfx::{DirtyRegion, Rect};
+use crate::surface::clamp_pixel_dims;
 use crate::wm::{
-    LayoutMode, WindowManager, WindowRole, MAX_WINDOWS, SHADOW_OFF, TOPBAR_H,
+    client_dims_for_window_rect, LayoutMode, WindowManager, WindowRole, MAX_WINDOWS,
+    PIXEL_WIN_CHROME_H, PIXEL_WIN_CHROME_W, SHADOW_OFF, TOPBAR_H,
 };
 
 pub const TABSTRIP_Y: usize = TOPBAR_H + 8;
@@ -131,6 +133,7 @@ impl WindowManager {
         }
         self.ensure_dialogs_above_normal(dirty);
         dirty.mark(Rect::new(0, 0, self.screen_w, TOPBAR_H));
+        self.sync_pixel_window_configs();
         self.layout
     }
 
@@ -186,32 +189,71 @@ impl WindowManager {
                     dirty.mark(self.windows[idx].outer_rect());
                 } else if n == 2 {
                     let (l_idx, r_idx) = (normal_slots[0], normal_slots[1]);
-                    let lnat = self.windows[l_idx].saved_floating_rect;
-                    let rnat = self.windows[r_idx].saved_floating_rect;
-                    let (lw, lh) = if lnat.is_empty() {
-                        (self.windows[l_idx].rect.w, self.windows[l_idx].rect.h)
-                    } else {
-                        (lnat.w, lnat.h)
-                    };
-                    let (rw, rh) = if rnat.is_empty() {
-                        (self.windows[r_idx].rect.w, self.windows[r_idx].rect.h)
-                    } else {
-                        (rnat.w, rnat.h)
-                    };
-                    let total_w = lw + gap + rw;
-                    let start_x = self.screen_w.saturating_sub(total_w) / 2;
+                    if self.p3_mode && self.windows[l_idx].is_pixel && self.windows[r_idx].is_pixel
+                    {
+                        let gap_x = 12usize;
+                        let col_w =
+                            self.screen_w.saturating_sub(24 + gap_x + SHADOW_OFF) / 2;
+                        let dock_pad = crate::glass::DOCK_CLEARANCE;
+                        let avail_h = self
+                            .screen_h
+                            .saturating_sub(TOPBAR_H + 16 + SHADOW_OFF + dock_pad);
+                        let (lcw, lch) = clamp_pixel_dims(
+                            col_w.saturating_sub(PIXEL_WIN_CHROME_W),
+                            avail_h.saturating_sub(PIXEL_WIN_CHROME_H),
+                        );
+                        let (rcw, rch) = clamp_pixel_dims(
+                            col_w.saturating_sub(PIXEL_WIN_CHROME_W),
+                            avail_h.saturating_sub(PIXEL_WIN_CHROME_H),
+                        );
+                        let lw = (lcw as usize) + PIXEL_WIN_CHROME_W;
+                        let lh = (lch as usize) + PIXEL_WIN_CHROME_H;
+                        let rw = (rcw as usize) + PIXEL_WIN_CHROME_W;
+                        let rh = (rch as usize) + PIXEL_WIN_CHROME_H;
 
-                    let old_l = self.windows[l_idx].outer_rect();
-                    let (lx, ly) = self.clamp_window_pos(start_x.max(8) as isize, ty as isize, lw, lh);
-                    self.windows[l_idx].rect = Rect::new(lx, ly, lw, lh);
-                    dirty.mark(old_l);
-                    dirty.mark(self.windows[l_idx].outer_rect());
+                        let old_l = self.windows[l_idx].outer_rect();
+                        self.windows[l_idx].rect = Rect::new(12, TOPBAR_H + 10, lw, lh);
+                        dirty.mark(old_l);
+                        dirty.mark(self.windows[l_idx].outer_rect());
 
-                    let old_r = self.windows[r_idx].outer_rect();
-                    let (rx, ry) = self.clamp_window_pos((lx + lw + gap) as isize, ty as isize, rw, rh);
-                    self.windows[r_idx].rect = Rect::new(rx, ry, rw, rh);
-                    dirty.mark(old_r);
-                    dirty.mark(self.windows[r_idx].outer_rect());
+                        let old_r = self.windows[r_idx].outer_rect();
+                        self.windows[r_idx].rect = Rect::new(12 + col_w + gap_x, TOPBAR_H + 10, rw, rh);
+                        dirty.mark(old_r);
+                        dirty.mark(self.windows[r_idx].outer_rect());
+                    } else {
+                        let lnat = self.windows[l_idx].saved_floating_rect;
+                        let rnat = self.windows[r_idx].saved_floating_rect;
+                        let (lw, lh) = if lnat.is_empty() {
+                            (self.windows[l_idx].rect.w, self.windows[l_idx].rect.h)
+                        } else {
+                            (lnat.w, lnat.h)
+                        };
+                        let (rw, rh) = if rnat.is_empty() {
+                            (self.windows[r_idx].rect.w, self.windows[r_idx].rect.h)
+                        } else {
+                            (rnat.w, rnat.h)
+                        };
+                        let total_w = lw + gap + rw;
+                        let start_x = self.screen_w.saturating_sub(total_w) / 2;
+
+                        let old_l = self.windows[l_idx].outer_rect();
+                        let (lx, ly) =
+                            self.clamp_window_pos(start_x.max(8) as isize, ty as isize, lw, lh);
+                        self.windows[l_idx].rect = Rect::new(lx, ly, lw, lh);
+                        dirty.mark(old_l);
+                        dirty.mark(self.windows[l_idx].outer_rect());
+
+                        let old_r = self.windows[r_idx].outer_rect();
+                        let (rx, ry) = self.clamp_window_pos(
+                            (lx + lw + gap) as isize,
+                            ty as isize,
+                            rw,
+                            rh,
+                        );
+                        self.windows[r_idx].rect = Rect::new(rx, ry, rw, rh);
+                        dirty.mark(old_r);
+                        dirty.mark(self.windows[r_idx].outer_rect());
+                    }
                 } else {
                     let pad_x = 12usize;
                     let gap_x = 12usize;
@@ -228,10 +270,22 @@ impl WindowManager {
                         let col_k = k % 2;
                         let row_k = k / 2;
                         let old_o = self.windows[idx].outer_rect();
-                        let nat = self.windows[idx].saved_floating_rect;
-                        let nat_h = if nat.is_empty() { self.windows[idx].rect.h } else { nat.h };
-                        let ww = col_w.max(240);
-                        let wh = cell_h.min(nat_h).max(140);
+                        let (ww, wh) = if self.p3_mode && self.windows[idx].is_pixel {
+                            let (cw, ch) =
+                                client_dims_for_window_rect(col_w.max(240), cell_h.max(162));
+                            (
+                                (cw as usize) + PIXEL_WIN_CHROME_W,
+                                (ch as usize) + PIXEL_WIN_CHROME_H,
+                            )
+                        } else {
+                            let nat = self.windows[idx].saved_floating_rect;
+                            let nat_h = if nat.is_empty() {
+                                self.windows[idx].rect.h
+                            } else {
+                                nat.h
+                            };
+                            (col_w.max(240), cell_h.min(nat_h).max(140))
+                        };
                         let nx = pad_x + col_k * (col_w + gap_x);
                         let ny = TOPBAR_H + pad_y + row_k * (cell_h + gap_y);
                         self.windows[idx].rect = Rect::new(nx, ny, ww, wh);
@@ -287,5 +341,6 @@ impl WindowManager {
             }
         }
         self.ensure_dialogs_above_normal(dirty);
+        self.sync_pixel_window_configs();
     }
 }

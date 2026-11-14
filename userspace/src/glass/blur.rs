@@ -1,44 +1,65 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! Pure Integer Separable Backdrop Blur, Rounded Corners & Specular Glass Effects.
-//!
-//! Uses a `[1, 4, 6, 4, 1] / 256` 2D Binomial/Gaussian-approximation separable filter via a
-//! 5-row stack ring buffer (`< 2.5 KiB` stack, zero heap, zero SSE/floating point) plus an
-//! optional low-overhead single-pass translucent mode.
+//! Anti-Aliased Glass Backdrop Blur, Rounded AA Fill & Feathered Elevation Shadows.
 
+use crate::abi_ext::UserFbInfo;
 use crate::compositor::pack_rgb;
 use crate::gfx::Rect;
 use crate::glass::theme::{blend_packed, blend_rgb, unpack_rgb};
-use crate::UserFbInfo;
+use crate::ui::canvas::rrect_cov;
 
-const STRIP_W: usize = 128;
+const BLUR_R: usize = 4;
+const TILE_W: usize = 64;
+const TILE_H: usize = 32;
+const PAD_W: usize = TILE_W + BLUR_R * 2;
+const PAD_H: usize = TILE_H + BLUR_R * 2;
 
-#[inline(always)]
+#[inline]
 pub fn in_rounded_rect(r: Rect, corner_r: usize, px: usize, py: usize) -> bool {
-    if corner_r == 0 || r.w < corner_r * 2 || r.h < corner_r * 2 {
-        return true;
-    }
-    let rx = px - r.x;
-    let ry = py - r.y;
-    let dx = if rx < corner_r {
-        corner_r - rx
-    } else if rx >= r.w - corner_r {
-        rx - (r.w - 1 - corner_r)
-    } else {
-        return true;
-    };
-    let dy = if ry < corner_r {
-        corner_r - ry
-    } else if ry >= r.h - corner_r {
-        ry - (r.h - 1 - corner_r)
-    } else {
-        return true;
-    };
-    dx * dx + dy * dy <= corner_r * corner_r + 1
+    rrect_cov(r, corner_r, px, py) >= 128
 }
 
-/// Draw a solid rounded rectangle clipped to `clip`.
+#[inline]
+fn blend_raw_32(dst: u32, src: u32, cov: u8) -> u32 {
+    if cov == 0 {
+        return dst;
+    }
+    if cov == 255 {
+        return src;
+    }
+    let a = cov as u32;
+    let inv = 255 - a;
+    let b0 = (((dst & 0xff) * inv + (src & 0xff) * a) / 255) & 0xff;
+    let b1 = ((((dst >> 8) & 0xff) * inv + ((src >> 8) & 0xff) * a) / 255) & 0xff;
+    let b2 = ((((dst >> 16) & 0xff) * inv + ((src >> 16) & 0xff) * a) / 255) & 0xff;
+    (b2 << 16) | (b1 << 8) | b0
+}
+
+#[inline]
+fn apply_glass_rim(
+    info: &UserFbInfo,
+    bg_rgb: (u8, u8, u8),
+    rect: Rect,
+    px: usize,
+    py: usize,
+    rim_top: u32,
+    rim_outer: u32,
+) -> (u8, u8, u8) {
+    let on_top = py == rect.y;
+    let on_bot = py + 1 == rect.y + rect.h;
+    let on_side = px == rect.x || px + 1 == rect.x + rect.w;
+    if on_top {
+        blend_rgb(bg_rgb, unpack_rgb(info, rim_top), 148)
+    } else if on_bot || on_side {
+        blend_rgb(bg_rgb, unpack_rgb(info, rim_outer), 110)
+    } else {
+        bg_rgb
+    }
+}
+
+/// Anti-aliased packed rounded rectangle fill using `rrect_cov`.
+///
 /// # Safety
-/// `back_ptr` must cover `fb_w * fb_h` `u32` pixels in mapped WB RAM.
+/// `back_ptr` must cover `fb_w * fb_h` 32-bit pixels.
 pub unsafe fn fill_rounded_raw(
     back_ptr: *mut u32,
     fb_w: usize,
@@ -48,23 +69,109 @@ pub unsafe fn fill_rounded_raw(
     corner_r: usize,
     color: u32,
 ) {
-    let inter = r.intersect(clip).clamp_to(fb_w, fb_h);
-    if inter.is_empty() {
+    let ic = r.intersect(clip).clamp_to(fb_w, fb_h);
+    if ic.is_empty() {
         return;
     }
-    for py in inter.y..(inter.y + inter.h) {
-        let row_off = py * fb_w;
-        for px in inter.x..(inter.x + inter.w) {
-            if in_rounded_rect(r, corner_r, px, py) {
-                unsafe { *back_ptr.add(row_off + px) = color };
+    for py in ic.y..(ic.y + ic.h) {
+        let row = py * fb_w;
+        for px in ic.x..(ic.x + ic.w) {
+            let cov = rrect_cov(r, corner_r, px, py);
+            if cov != 0 {
+                let p = back_ptr.add(row + px);
+                *p = blend_raw_32(*p, color, cov);
             }
         }
     }
 }
 
-/// Apply frosted backdrop blur + translucent tint + top specular glass rim over `rect`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn frosted_tile(
+    back_ptr: *mut u32,
+    fb_w: usize,
+    fb_h: usize,
+    info: &UserFbInfo,
+    rect: Rect,
+    tile: Rect,
+    tint_rgb: (u8, u8, u8),
+    alpha: u8,
+    corner_r: usize,
+    rim_top: u32,
+    rim_outer: u32,
+) {
+    let min_x = tile.x.saturating_sub(BLUR_R);
+    let max_x = (tile.x + tile.w + BLUR_R).min(fb_w);
+    let min_y = tile.y.saturating_sub(BLUR_R);
+    let max_y = (tile.y + tile.h + BLUR_R).min(fb_h);
+    let pw = max_x - min_x;
+    let ph = max_y - min_y;
+    if pw == 0 || ph == 0 || pw > PAD_W || ph > PAD_H {
+        return;
+    }
+
+    let mut horiz = [(0u8, 0u8, 0u8); PAD_W * PAD_H];
+    let kx = BLUR_R as isize;
+    for ly in 0..ph {
+        let py = min_y + ly;
+        let row_ptr = back_ptr.add(py * fb_w);
+        for lx in 0..pw {
+            let px = min_x + lx;
+            let (mut sr, mut sg, mut sb, mut cnt) = (0u32, 0u32, 0u32, 0u32);
+            let mut dx = -kx;
+            while dx <= kx {
+                let sx = (px as isize + dx).clamp(0, fb_w as isize - 1) as usize;
+                let (r, g, b) = unpack_rgb(info, *row_ptr.add(sx));
+                sr += r as u32;
+                sg += g as u32;
+                sb += b as u32;
+                cnt += 1;
+                dx += 1;
+            }
+            horiz[ly * pw + lx] = ((sr / cnt) as u8, (sg / cnt) as u8, (sb / cnt) as u8);
+        }
+    }
+
+    let ox = tile.x - min_x;
+    let oy = tile.y - min_y;
+    for ty in 0..tile.h {
+        let py = tile.y + ty;
+        let ly = oy + ty;
+        let out_row = back_ptr.add(py * fb_w);
+        for tx in 0..tile.w {
+            let px = tile.x + tx;
+            let cov = rrect_cov(rect, corner_r, px, py);
+            if cov == 0 {
+                continue;
+            }
+            let lx = ox + tx;
+            let (mut sr, mut sg, mut sb, mut cnt) = (0u32, 0u32, 0u32, 0u32);
+            let mut dy = -kx;
+            while dy <= kx {
+                let sy = (ly as isize + dy).clamp(0, ph as isize - 1) as usize;
+                let c = horiz[sy * pw + lx];
+                sr += c.0 as u32;
+                sg += c.1 as u32;
+                sb += c.2 as u32;
+                cnt += 1;
+                dy += 1;
+            }
+            let blurred = ((sr / cnt) as u8, (sg / cnt) as u8, (sb / cnt) as u8);
+            let tinted = blend_rgb(blurred, tint_rgb, alpha);
+            let rimmed = apply_glass_rim(info, tinted, rect, px, py, rim_top, rim_outer);
+            let dst = out_row.add(px);
+            if cov == 255 {
+                *dst = pack_rgb(info, rimmed.0, rimmed.1, rimmed.2);
+            } else {
+                *dst = blend_packed(info, *dst, rimmed, cov);
+            }
+        }
+    }
+}
+
+/// 2-pass separable frosted blur with anti-aliased rounded corners & subtle inner highlight rim.
+///
 /// # Safety
-/// `back_ptr` must cover `fb_w * fb_h` `u32` pixels in mapped WB RAM.
+/// `back_ptr` must cover `fb_w * fb_h` 32-bit pixels.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn backdrop_frosted_rect(
     back_ptr: *mut u32,
@@ -80,127 +187,63 @@ pub unsafe fn backdrop_frosted_rect(
     rim_top: u32,
     rim_outer: u32,
 ) {
-    let inter = rect.intersect(clip).clamp_to(fb_w, fb_h);
-    if inter.is_empty() {
+    let ic = rect.intersect(clip).clamp_to(fb_w, fb_h);
+    if ic.is_empty() {
+        return;
+    }
+    if !blur_enabled {
+        for py in ic.y..(ic.y + ic.h) {
+            let row = py * fb_w;
+            for px in ic.x..(ic.x + ic.w) {
+                let cov = rrect_cov(rect, corner_r, px, py);
+                if cov == 0 {
+                    continue;
+                }
+                let p = back_ptr.add(row + px);
+                let orig = unpack_rgb(info, *p);
+                let base = blend_rgb(orig, tint_rgb, alpha);
+                let rimmed = apply_glass_rim(info, base, rect, px, py, rim_top, rim_outer);
+                *p = if cov == 255 {
+                    pack_rgb(info, rimmed.0, rimmed.1, rimmed.2)
+                } else {
+                    blend_packed(info, *p, rimmed, cov)
+                };
+            }
+        }
         return;
     }
 
-    if !blur_enabled {
-        for py in inter.y..(inter.y + inter.h) {
-            let row_off = py * fb_w;
-            for px in inter.x..(inter.x + inter.w) {
-                if !in_rounded_rect(rect, corner_r, px, py) {
-                    continue;
-                }
-                let p = unsafe { back_ptr.add(row_off + px) };
-                let blended = blend_packed(info, unsafe { *p }, tint_rgb, alpha);
-                unsafe { *p = blended };
-            }
+    let mut y = ic.y;
+    let y_end = ic.y + ic.h;
+    let x_end = ic.x + ic.w;
+    while y < y_end {
+        let th = (y_end - y).min(TILE_H);
+        let mut x = ic.x;
+        while x < x_end {
+            let tw = (x_end - x).min(TILE_W);
+            frosted_tile(
+                back_ptr,
+                fb_w,
+                fb_h,
+                info,
+                rect,
+                Rect::new(x, y, tw, th),
+                tint_rgb,
+                alpha,
+                corner_r,
+                rim_top,
+                rim_outer,
+            );
+            x += tw;
         }
-    } else {
-        // Horizontal `[1, 4, 6, 4, 1]` sum (`0..=4080` fits in `u16`), sliding 5-row vertical ring.
-        let mut x0 = inter.x;
-        while x0 < inter.x + inter.w {
-            let chunk_w = (inter.x + inter.w - x0).min(STRIP_W);
-            let mut ring = [[(0u16, 0u16, 0u16); STRIP_W]; 5];
-
-            let fill_hrow = |src_y: usize, slot: &mut [(u16, u16, u16); STRIP_W]| {
-                let sy = src_y.min(fb_h.saturating_sub(1));
-                let row_ptr = unsafe { back_ptr.add(sy * fb_w) };
-                for (cx, cell) in slot.iter_mut().enumerate().take(chunk_w) {
-                    let gx = x0 + cx;
-                    let p0 = unpack_rgb(info, unsafe { *row_ptr.add(gx.saturating_sub(2)) });
-                    let p1 = unpack_rgb(info, unsafe { *row_ptr.add(gx.saturating_sub(1)) });
-                    let p2 = unpack_rgb(info, unsafe { *row_ptr.add(gx) });
-                    let p3 = unpack_rgb(info, unsafe { *row_ptr.add((gx + 1).min(fb_w - 1)) });
-                    let p4 = unpack_rgb(info, unsafe { *row_ptr.add((gx + 2).min(fb_w - 1)) });
-                    let sr = p0.0 as u16 + p1.0 as u16 * 4 + p2.0 as u16 * 6 + p3.0 as u16 * 4 + p4.0 as u16;
-                    let sg = p0.1 as u16 + p1.1 as u16 * 4 + p2.1 as u16 * 6 + p3.1 as u16 * 4 + p4.1 as u16;
-                    let sb = p0.2 as u16 + p1.2 as u16 * 4 + p2.2 as u16 * 6 + p3.2 as u16 * 4 + p4.2 as u16;
-                    *cell = (sr, sg, sb);
-                }
-            };
-
-            let y_start = inter.y;
-            fill_hrow(y_start.saturating_sub(2), &mut ring[0]);
-            fill_hrow(y_start.saturating_sub(1), &mut ring[1]);
-            fill_hrow(y_start, &mut ring[2]);
-            fill_hrow((y_start + 1).min(fb_h - 1), &mut ring[3]);
-
-            for (idx, py) in (inter.y..(inter.y + inter.h)).enumerate() {
-                let ahead_y = (py + 2).min(fb_h - 1);
-                fill_hrow(ahead_y, &mut ring[(idx + 4) % 5]);
-
-                let r0 = &ring[idx % 5];
-                let r1 = &ring[(idx + 1) % 5];
-                let r2 = &ring[(idx + 2) % 5];
-                let r3 = &ring[(idx + 3) % 5];
-                let r4 = &ring[(idx + 4) % 5];
-                let row_off = py * fb_w;
-
-                for cx in 0..chunk_w {
-                    let gx = x0 + cx;
-                    if !in_rounded_rect(rect, corner_r, gx, py) {
-                        continue;
-                    }
-                    let vr = ((r0[cx].0 as u32)
-                        + (r1[cx].0 as u32) * 4
-                        + (r2[cx].0 as u32) * 6
-                        + (r3[cx].0 as u32) * 4
-                        + (r4[cx].0 as u32)
-                        + 128)
-                        >> 8;
-                    let vg = ((r0[cx].1 as u32)
-                        + (r1[cx].1 as u32) * 4
-                        + (r2[cx].1 as u32) * 6
-                        + (r3[cx].1 as u32) * 4
-                        + (r4[cx].1 as u32)
-                        + 128)
-                        >> 8;
-                    let vb = ((r0[cx].2 as u32)
-                        + (r1[cx].2 as u32) * 4
-                        + (r2[cx].2 as u32) * 6
-                        + (r3[cx].2 as u32) * 4
-                        + (r4[cx].2 as u32)
-                        + 128)
-                        >> 8;
-                    let blurred = (vr.min(255) as u8, vg.min(255) as u8, vb.min(255) as u8);
-                    let tinted = blend_rgb(blurred, tint_rgb, alpha);
-                    unsafe {
-                        *back_ptr.add(row_off + gx) = pack_rgb(info, tinted.0, tinted.1, tinted.2);
-                    }
-                }
-            }
-            x0 += chunk_w;
-        }
-    }
-
-    // Draw crisp 1px outer glass rim and brighter top specular sheen.
-    for py in inter.y..(inter.y + inter.h) {
-        let on_top = py == rect.y;
-        let on_bot = py + 1 == rect.y + rect.h;
-        let row_off = py * fb_w;
-        for px in inter.x..(inter.x + inter.w) {
-            if !in_rounded_rect(rect, corner_r, px, py) {
-                continue;
-            }
-            let on_edge = on_top || on_bot || px == rect.x || px + 1 == rect.x + rect.w;
-            let corner_adj = corner_r > 0
-                && (!in_rounded_rect(rect, corner_r, px.saturating_sub(1), py)
-                    || !in_rounded_rect(rect, corner_r, px + 1, py)
-                    || !in_rounded_rect(rect, corner_r, px, py.saturating_sub(1))
-                    || !in_rounded_rect(rect, corner_r, px, py + 1));
-            if on_edge || corner_adj {
-                let col = if on_top { rim_top } else { rim_outer };
-                unsafe { *back_ptr.add(row_off + px) = col };
-            }
-        }
+        y += th;
     }
 }
 
-/// Alpha-blend a rectangular shadow band onto `back_ptr`.
+/// Soft alpha-blended shadow rectangle.
+///
 /// # Safety
-/// `back_ptr` must cover `fb_w * fb_h` pixels.
+/// `back_ptr` must cover `fb_w * fb_h` 32-bit pixels.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn blend_shadow_rect(
     back_ptr: *mut u32,
@@ -212,16 +255,77 @@ pub unsafe fn blend_shadow_rect(
     shadow_rgb: (u8, u8, u8),
     alpha: u8,
 ) {
-    let inter = r.intersect(clip).clamp_to(fb_w, fb_h);
-    if inter.is_empty() {
+    let ic = r.intersect(clip).clamp_to(fb_w, fb_h);
+    if ic.is_empty() || alpha == 0 {
         return;
     }
-    for py in inter.y..(inter.y + inter.h) {
-        let row_off = py * fb_w;
-        for px in inter.x..(inter.x + inter.w) {
-            let p = unsafe { back_ptr.add(row_off + px) };
-            let out = blend_packed(info, unsafe { *p }, shadow_rgb, alpha);
-            unsafe { *p = out };
+    for py in ic.y..(ic.y + ic.h) {
+        let row = py * fb_w;
+        for px in ic.x..(ic.x + ic.w) {
+            let p = back_ptr.add(row + px);
+            *p = blend_packed(info, *p, shadow_rgb, alpha);
+        }
+    }
+}
+
+/// Feathered rounded-rectangle drop shadow (skips interior pixels of `r`).
+///
+/// # Safety
+/// `back_ptr` must cover `fb_w * fb_h` 32-bit pixels.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn blend_soft_rrect_shadow(
+    back_ptr: *mut u32,
+    fb_w: usize,
+    fb_h: usize,
+    info: &UserFbInfo,
+    r: Rect,
+    clip: Rect,
+    corner_r: usize,
+    shadow_rgb: (u8, u8, u8),
+    max_alpha: u8,
+    spread: usize,
+) {
+    if spread == 0 || max_alpha == 0 {
+        return;
+    }
+    let y_off = (spread / 3).max(1);
+    let halo = Rect::new(
+        r.x.saturating_sub(spread),
+        r.y.saturating_sub(spread.saturating_sub(y_off)),
+        r.w + spread * 2,
+        r.h + spread * 2 + y_off,
+    );
+    let ic = halo.intersect(clip).clamp_to(fb_w, fb_h);
+    if ic.is_empty() {
+        return;
+    }
+    let layers = spread.clamp(2, 6);
+    for layer in 0..layers {
+        let pad = ((layers - layer) * spread) / layers;
+        let lr = Rect::new(
+            r.x.saturating_sub(pad),
+            r.y.saturating_sub(pad) + y_off,
+            r.w + pad * 2,
+            r.h + pad * 2,
+        );
+        let lcov_r = corner_r + pad;
+        let alpha = ((max_alpha as usize * (layer + 1)) / (layers * layers)).max(2) as u8;
+        let lic = lr.intersect(ic);
+        for py in lic.y..(lic.y + lic.h) {
+            let row = py * fb_w;
+            for px in lic.x..(lic.x + lic.w) {
+                if rrect_cov(r, corner_r, px, py) >= 240 {
+                    continue;
+                }
+                let cov = rrect_cov(lr, lcov_r, px, py);
+                if cov != 0 {
+                    let a = ((alpha as u16 * cov as u16) / 255) as u8;
+                    if a != 0 {
+                        let p = back_ptr.add(row + px);
+                        *p = blend_packed(info, *p, shadow_rgb, a);
+                    }
+                }
+            }
         }
     }
 }

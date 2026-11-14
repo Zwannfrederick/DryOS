@@ -30,6 +30,7 @@ pub enum InputEventKind {
     MouseButtonDown = 4,
     MouseButtonUp = 5,
     MouseScroll = 6,
+    WindowConfig = 7,
 }
 
 impl InputEventKind {
@@ -44,6 +45,7 @@ impl InputEventKind {
             4 => Self::MouseButtonDown,
             5 => Self::MouseButtonUp,
             6 => Self::MouseScroll,
+            7 => Self::WindowConfig,
             _ => Self::None,
         }
     }
@@ -85,6 +87,26 @@ impl InputEvent {
         wheel: 0,
         timestamp_tsc48: 0,
     };
+
+    /// Construct a `WindowConfig` notification delivering new client dimensions and theme/DPI flags.
+    #[inline]
+    pub const fn window_config(client_w: u16, client_h: u16, theme_flags: u8) -> Self {
+        Self {
+            seq: 0,
+            device_id: 0,
+            kind: InputEventKind::WindowConfig,
+            modifiers: theme_flags,
+            scancode: 0,
+            keycode: 0,
+            ascii: 0,
+            flags: 0,
+            dx: client_w as i16,
+            dy: client_h as i16,
+            buttons: 0,
+            wheel: 0,
+            timestamp_tsc48: 0,
+        }
+    }
 
     /// Pack event + low-16-bit `overflow_count` + 48-bit TSC timestamp into inline IPC `R12..R15`.
     #[inline]
@@ -217,6 +239,30 @@ impl<const N: usize> InputRingQueue<N> {
                     self.coalesced_moves = self.coalesced_moves.wrapping_add(1);
                     return true;
                 }
+            }
+        }
+        self.push(ev)
+    }
+
+    /// Enqueue `ev`, replacing a trailing entry of the same kind (`MouseMove` with client-relative
+    /// coordinates or `WindowConfig`) so window queues retain only the latest state snapshot.
+    #[inline]
+    pub fn push_replacing_abs(&mut self, ev: InputEvent) -> bool {
+        if self.len > 0
+            && matches!(
+                ev.kind,
+                InputEventKind::MouseMove | InputEventKind::WindowConfig
+            )
+        {
+            let last_idx = (self.tail + N - 1) % N;
+            let last = &mut self.buf[last_idx];
+            if last.kind == ev.kind
+                && (ev.kind == InputEventKind::WindowConfig
+                    || (last.buttons == ev.buttons && last.modifiers == ev.modifiers))
+            {
+                *last = ev;
+                self.coalesced_moves = self.coalesced_moves.wrapping_add(1);
+                return true;
             }
         }
         self.push(ev)

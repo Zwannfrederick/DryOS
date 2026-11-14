@@ -299,9 +299,37 @@ impl Default for SurfaceSnapshot {
 pub const PIXEL_SURFACE_MAGIC: u64 = 0x4452_595f_5049_584c; // "DRY_PIXL"
 pub const SURF_ATTACH_FLAG_PIXEL: u64 = 1 << 18;
 pub const PIXEL_SURF_HEADER_BYTES: usize = 64;
-pub const PIXEL_SURF_MAX_W: usize = 960;
-pub const PIXEL_SURF_MAX_H: usize = 640;
+pub const PIXEL_SURF_MAX_W: usize = 1280;
+pub const PIXEL_SURF_MAX_H: usize = 960;
 pub const PIXEL_SURF_MAX_PIXELS: usize = (2 * 1024 * 1024 - PIXEL_SURF_HEADER_BYTES) / 4;
+
+/// Clamp arbitrary requested pixel client dimensions into a valid `Frame2M` pixel surface budget.
+#[inline]
+pub const fn clamp_pixel_dims(w: usize, h: usize) -> (u16, u16) {
+    let cw = if w < 160 {
+        160
+    } else if w > PIXEL_SURF_MAX_W {
+        PIXEL_SURF_MAX_W
+    } else {
+        w
+    };
+    let max_h = PIXEL_SURF_MAX_PIXELS / cw;
+    let max_h_clamped = if max_h > PIXEL_SURF_MAX_H {
+        PIXEL_SURF_MAX_H
+    } else if max_h < 120 {
+        120
+    } else {
+        max_h
+    };
+    let ch = if h < 120 {
+        120
+    } else if h > max_h_clamped {
+        max_h_clamped
+    } else {
+        h
+    };
+    (cw as u16, ch as u16)
+}
 
 #[repr(C)]
 pub struct SharedPixelSurfaceHeader {
@@ -356,26 +384,45 @@ pub unsafe fn publish_pixel_rect_rw(rw_va: u64, x: u16, y: u16, w: u16, h: u16) 
     hdr.seq.store(odd.wrapping_add(1), Ordering::Release);
 }
 
+/// Atomically update pixel surface dimensions (`w x h`) and mark the entire surface dirty.
+/// # Safety
+/// `rw_va` must point to a mapped initialized `SharedPixelSurfaceHeader` + pixels with `w * h <= PIXEL_SURF_MAX_PIXELS`.
+pub unsafe fn publish_pixel_resize_rw(rw_va: u64, w: u16, h: u16) {
+    let hdr = unsafe { &*(rw_va as *const SharedPixelSurfaceHeader) };
+    let seq0 = hdr.seq.load(Ordering::Relaxed);
+    let odd = seq0.wrapping_add(1) | 1;
+    hdr.seq.store(odd, Ordering::Release);
+    hdr.width.store(w, Ordering::Relaxed);
+    hdr.height.store(h, Ordering::Relaxed);
+    hdr.dirty_x.store(0, Ordering::Relaxed);
+    hdr.dirty_y.store(0, Ordering::Relaxed);
+    hdr.dirty_w.store(w, Ordering::Relaxed);
+    hdr.dirty_h.store(h, Ordering::Relaxed);
+    fence(Ordering::Release);
+    hdr.seq.store(odd.wrapping_add(1), Ordering::Release);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelSurfaceError;
 
-/// Capture dirty (or full when `force_full`) BGRA pixel rect from `ro_va` into `snap_va`.
+/// Capture dirty (or full when `force_full` or resized) pixel rect from `ro_va` into `snap_va`.
+/// Updates `reg_w` and `reg_h` when the app publishes a new valid surface geometry.
 /// # Safety
 /// `ro_va` (`USER_RO`, `Frame2M`) and `snap_va` (`USER_RW`, `Frame2M`) must be mapped.
 pub unsafe fn capture_pixel_dirty_from_ro(
     ro_va: u64,
     snap_va: u64,
-    reg_w: usize,
-    reg_h: usize,
+    reg_w: &mut usize,
+    reg_h: &mut usize,
     force_full: bool,
 ) -> Result<Option<(usize, usize, usize, usize)>, PixelSurfaceError> {
     if ro_va == 0
         || snap_va == 0
-        || reg_w < 160
-        || reg_h < 120
-        || reg_w > PIXEL_SURF_MAX_W
-        || reg_h > PIXEL_SURF_MAX_H
-        || reg_w * reg_h > PIXEL_SURF_MAX_PIXELS
+        || *reg_w < 160
+        || *reg_h < 120
+        || *reg_w > PIXEL_SURF_MAX_W
+        || *reg_h > PIXEL_SURF_MAX_H
+        || (*reg_w) * (*reg_h) > PIXEL_SURF_MAX_PIXELS
     {
         return Err(PixelSurfaceError);
     }
@@ -394,10 +441,14 @@ pub unsafe fn capture_pixel_dirty_from_ro(
         }
         let w = hdr.width.load(Ordering::Relaxed) as usize;
         let h = hdr.height.load(Ordering::Relaxed) as usize;
-        if w != reg_w || h != reg_h {
+        if !(160..=PIXEL_SURF_MAX_W).contains(&w)
+            || !(120..=PIXEL_SURF_MAX_H).contains(&h)
+            || w.saturating_mul(h) > PIXEL_SURF_MAX_PIXELS
+        {
             return Err(PixelSurfaceError);
         }
-        let (dx, dy, dw, dh) = if force_full {
+        let resized = w != *reg_w || h != *reg_h;
+        let (dx, dy, dw, dh) = if force_full || resized {
             (0, 0, w, h)
         } else {
             let x0 = (hdr.dirty_x.load(Ordering::Relaxed) as usize).min(w);
@@ -417,6 +468,8 @@ pub unsafe fn capture_pixel_dirty_from_ro(
         }
         fence(Ordering::Acquire);
         if hdr.seq.load(Ordering::Relaxed) == s1 {
+            *reg_w = w;
+            *reg_h = h;
             return Ok(Some((dx, dy, dw, dh)));
         }
     }

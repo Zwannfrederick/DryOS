@@ -13,16 +13,62 @@ use crate::shell::LineBuilder;
 use crate::vault_crypto::scrub_bytes;
 use crate::vault_proto::{pack_passphrase_mrs, pack_vault_label};
 use crate::virtio_gpu::MAX_GPU_SCANOUT_2M;
-use crate::wm::{LayoutMode, SessionVisualState, WindowManager, TOPBAR_H};
+use crate::wm::{LayoutMode, SessionVisualState, WindowManager, MAX_WINDOWS, TOPBAR_H};
 use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_call_inline,
-    sys_ipc_call_with_grant, sys_ipc_reply_inline, sys_write_debug, UserIpcRecvExt,
-    BADGE_INPUT_SVC, BADGE_SUPERVISOR, EBADCAP, EREVOKED, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
-    IPC_OP_PONG, IPC_OP_WIN_EMPTY, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER,
-    IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_SET_LAYOUT,
-    IPC_OP_WM_SET_PREFS, IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TAKE_LOCK_PIN,
-    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ,
+    sys_ipc_call_with_grant, sys_ipc_reply_inline, sys_notify_signal, sys_write_debug,
+    UserIpcRecvExt, BADGE_INPUT_SVC, BADGE_SUPERVISOR, EBADCAP, EREVOKED, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_PERM, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY,
+    IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_FOCUS_OWNER, IPC_OP_WM_POLL_ACTION,
+    IPC_OP_WM_QUERY_STATE, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_SET_LAYOUT, IPC_OP_WM_SET_PREFS,
+    IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TAKE_LOCK_PIN, IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP,
+    RIGHT_READ,
 };
+
+pub fn wake_window_client(disp_ep: u64, wm: &mut WindowManager, slot_idx: usize) {
+    let win = &mut wm.windows[slot_idx];
+    if !win.allocated {
+        return;
+    }
+    if win.close_requested {
+        if win.waiter_reply_tok != 0 {
+            let _ = sys_ipc_reply_inline(
+                disp_ep,
+                win.waiter_reply_tok,
+                pack_msg_tag(IPC_OP_WIN_CLOSED, 0, 1, 0),
+                [win.id as u64, 0, 0, 0],
+            );
+            win.waiter_reply_tok = 0;
+        } else if win.notif_cap != 0 {
+            let _ = sys_notify_signal(win.notif_cap, 1);
+        }
+        return;
+    }
+    if win.waiter_reply_tok != 0 {
+        if let Some(ev) = win.ev_queue.pop() {
+            let _ = sys_ipc_reply_inline(
+                disp_ep,
+                win.waiter_reply_tok,
+                pack_msg_tag(IPC_OP_INPUT_EVENT, 0, 4, 0),
+                ev.to_ipc_mrs(win.ev_queue.overflow_count()),
+            );
+            win.waiter_reply_tok = 0;
+        }
+    } else if win.notif_cap != 0 && !win.ev_queue.is_empty() {
+        let _ = sys_notify_signal(win.notif_cap, 1);
+    }
+}
+
+pub fn wake_pending_pixel_clients(disp_ep: u64, wm: &mut WindowManager) {
+    for s in 0..MAX_WINDOWS {
+        if wm.windows[s].allocated
+            && wm.windows[s].is_pixel
+            && (!wm.windows[s].ev_queue.is_empty() || wm.windows[s].close_requested)
+        {
+            wake_window_client(disp_ep, wm, s);
+        }
+    }
+}
 
 pub fn wm_log_line(lb: &LineBuilder) {
     let mut out = [0u8; 196];
@@ -107,6 +153,7 @@ pub fn handle_wm_admin_op(
             }
             let m = wm.toggle_tiling(&mut comp.scene_dirty);
             let (_, cyc) = comp.flush_all(wm);
+            wake_pending_pixel_clients(disp_ep_cap, wm);
             let mut lb = LineBuilder::new();
             lb.push_bytes(b"[DRY-WM] LAYOUT mode=");
             lb.push_u64(m as u64);
@@ -291,6 +338,7 @@ pub fn handle_wm_admin_op(
             };
             let m = wm.set_layout_mode(target, &mut comp.scene_dirty);
             let (_, cyc) = comp.flush_all(wm);
+            wake_pending_pixel_clients(disp_ep_cap, wm);
             let mut lb = LineBuilder::new();
             lb.push_bytes(b"[DRY-WM] LAYOUT mode=");
             lb.push_u64(m as u64);
@@ -311,7 +359,8 @@ pub fn handle_wm_admin_op(
                 reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
                 return true;
             }
-            if (mrs[0] & !0x0f) != 0 {
+            let dpi_bits = ((mrs[0] >> 4) & 3) as u8;
+            if (mrs[0] & !0x3f) != 0 || dpi_bits == 3 {
                 wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
                 reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
                 return true;
@@ -320,6 +369,7 @@ pub fn handle_wm_admin_op(
             wm.cursor_large = (mrs[0] & 2) != 0;
             wm.light_mode = (mrs[0] & 4) != 0;
             wm.low_overhead_glass = (mrs[0] & 8) != 0;
+            wm.dpi_scale = dpi_bits;
             wm.glass.push_notif(
                 if wm.high_contrast {
                     b"Theme: High Contrast active"
@@ -331,7 +381,9 @@ pub fn handle_wm_admin_op(
                 0,
             );
             comp.apply_display_prefs(wm);
+            let _ = wm.sync_pixel_window_configs();
             let (px, cyc) = comp.flush_all(wm);
+            wake_pending_pixel_clients(disp_ep_cap, wm);
             let mut lb = LineBuilder::new();
             lb.push_bytes(b"[DRY-WM] PREFS contrast=");
             lb.push_u64(u64::from(wm.high_contrast));
@@ -341,6 +393,8 @@ pub fn handle_wm_admin_op(
             lb.push_u64(u64::from(wm.light_mode));
             lb.push_bytes(b" glass_low=");
             lb.push_u64(u64::from(wm.low_overhead_glass));
+            lb.push_bytes(b" dpi=");
+            lb.push_u64(wm.dpi_pct() as u64);
             lb.push_bytes(b" px=");
             lb.push_u64(px);
             wm_log_line(&lb);
@@ -349,7 +403,7 @@ pub fn handle_wm_admin_op(
                     disp_ep_cap,
                     reply_tok,
                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
-                    [mrs[0] & 0x0f, px, cyc, 0],
+                    [mrs[0] & 0x3f, px, cyc, 0],
                 );
             }
             true
