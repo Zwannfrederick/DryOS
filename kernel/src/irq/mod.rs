@@ -20,6 +20,7 @@
 
 pub mod bench;
 pub mod ioport;
+pub mod msi;
 pub mod session;
 pub mod tests;
 
@@ -586,6 +587,7 @@ pub fn on_notif_cap_revoked_for_irq(notif_id: u32, notif_gen: u32, notif_global_
             ioapic_set_pin_masked(gsi, true);
         }
     }
+    msi::on_notif_revoked_for_msi(notif_id, notif_gen, notif_global_slot);
 }
 
 /// Bind an `IrqLine` capability to a `Notification` capability in one-shot mode and unmask the pin.
@@ -596,14 +598,25 @@ pub fn sys_irq_bind(
     notif_cap: CapPtr,
     flags: u64,
 ) -> Result<u8, SysError> {
-    if subj_label.domain != SecDomain::RootSystem {
+    if subj_label.domain != SecDomain::RootSystem
+        || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
+    {
         return Err(SysError::Perm);
     }
+
+    let now_epoch = current_lease_epoch();
+    let is_pci_dev = with_pinned_cap(cspace_id, subj_label, irq_cap, CapRights::READ, now_epoch, |c| {
+        Ok(c.obj_kind == CapObjectKind::PciDev)
+    })
+    .unwrap_or(false);
+    if is_pci_dev {
+        return msi::bind_pci_msi(cspace_id, subj_label, irq_cap, notif_cap, flags);
+    }
+
     if flags != 0 && flags != IRQF_ONESHOT {
         return Err(SysError::Inval);
     }
 
-    let now_epoch = current_lease_epoch();
     let irq_req = CapRights(CapRights::READ.0 | CapRights::WAIT.0 | CapRights::SIGNAL.0);
     let notif_req = CapRights::SIGNAL;
 
@@ -657,14 +670,25 @@ pub fn sys_irq_ack(
     irq_cap: CapPtr,
     action: u64,
 ) -> Result<u64, SysError> {
-    if subj_label.domain != SecDomain::RootSystem {
+    if subj_label.domain != SecDomain::RootSystem
+        || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
+    {
         return Err(SysError::Perm);
     }
+
+    let now_epoch = current_lease_epoch();
+    let is_pci_dev = with_pinned_cap(cspace_id, subj_label, irq_cap, CapRights::READ, now_epoch, |c| {
+        Ok(c.obj_kind == CapObjectKind::PciDev)
+    })
+    .unwrap_or(false);
+    if is_pci_dev {
+        return msi::ack_pci_msi(cspace_id, subj_label, irq_cap, action);
+    }
+
     if action > IRQ_ACK_UNBIND {
         return Err(SysError::Inval);
     }
 
-    let now_epoch = current_lease_epoch();
     let mut op_err: Option<SysError> = None;
     let mut delivered_total = 0u64;
 

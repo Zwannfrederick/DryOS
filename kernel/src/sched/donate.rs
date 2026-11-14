@@ -168,6 +168,31 @@ pub fn inspect_slot_priorities(slot: usize) -> (usize, usize) {
     })
 }
 
+/// Propagate effective-priority changes upstream along `waiting_on_slot` edges (`<= MAX_DONATION_DEPTH`).
+fn recompute_chain_from(nodes: &mut [DonateNode; TOTAL_TCB_SLOTS], start_slot: usize) -> bool {
+    let mut changed = false;
+    let mut cur = start_slot;
+    for _ in 0..MAX_DONATION_DEPTH {
+        if cur >= TOTAL_TCB_SLOTS {
+            break;
+        }
+        let new_eff = recompute_effective_prio(nodes, cur);
+        if new_eff != nodes[cur].effective_prio {
+            nodes[cur].effective_prio = new_eff;
+            tcb(cur).prio.store(new_eff as usize, Ordering::Release);
+            changed = true;
+        } else {
+            break;
+        }
+        let nxt = nodes[cur].waiting_on_slot;
+        if nxt == NO_SLOT {
+            break;
+        }
+        cur = nxt as usize;
+    }
+    changed
+}
+
 /// Register synchronous `caller_slot -> server_slot` call dependency, detect cycles up to
 /// `MAX_DONATION_DEPTH`, and propagate `caller_slot`'s effective priority to `server_slot`.
 pub fn donate_on_call(caller_slot: usize, server_slot: usize) -> Result<usize, DonateError> {
@@ -182,11 +207,12 @@ pub fn donate_on_call(caller_slot: usize, server_slot: usize) -> Result<usize, D
     }
 
     with_donate_lock(|nodes| {
-        // Detach any stale outgoing edge defensively before linking the new call edge.
+        // Detach any stale outgoing edge defensively and recompute the previous server chain.
         let prev_srv = nodes[caller_slot].waiting_on_slot;
         if prev_srv != NO_SLOT {
             nodes[caller_slot].waiting_on_slot = NO_SLOT;
             nodes[prev_srv as usize].remove_donor(caller_slot);
+            let _ = recompute_chain_from(nodes, prev_srv as usize);
         }
 
         // Cycle detection across up to `MAX_DONATION_DEPTH` downstream call hops.
@@ -211,23 +237,7 @@ pub fn donate_on_call(caller_slot: usize, server_slot: usize) -> Result<usize, D
         nodes[server_slot].add_donor(caller_slot);
         ACTIVE_OUTGOING_EDGE[caller_slot].store(true, Ordering::Release);
 
-        let mut boosted = false;
-        let mut cur = server_slot;
-        for _ in 0..MAX_DONATION_DEPTH {
-            let new_eff = recompute_effective_prio(nodes, cur);
-            if new_eff < nodes[cur].effective_prio {
-                nodes[cur].effective_prio = new_eff;
-                tcb(cur).prio.store(new_eff as usize, Ordering::Release);
-                boosted = true;
-            } else {
-                break;
-            }
-            let nxt = nodes[cur].waiting_on_slot;
-            if nxt == NO_SLOT {
-                break;
-            }
-            cur = nxt as usize;
-        }
+        let boosted = recompute_chain_from(nodes, server_slot);
 
         if boosted {
             GLOBAL_DONATIONS_APPLIED.fetch_add(1, Ordering::Relaxed);
@@ -256,25 +266,8 @@ pub fn revert_donation_for_caller(caller_slot: usize) -> bool {
         nodes[caller_slot].waiting_on_slot = NO_SLOT;
         ACTIVE_OUTGOING_EDGE[caller_slot].store(false, Ordering::Release);
 
-        let mut cur = srv_u16 as usize;
-        nodes[cur].remove_donor(caller_slot);
-
-        let mut changed = false;
-        for _ in 0..MAX_DONATION_DEPTH {
-            let new_eff = recompute_effective_prio(nodes, cur);
-            if new_eff != nodes[cur].effective_prio {
-                nodes[cur].effective_prio = new_eff;
-                tcb(cur).prio.store(new_eff as usize, Ordering::Release);
-                changed = true;
-            } else {
-                break;
-            }
-            let nxt = nodes[cur].waiting_on_slot;
-            if nxt == NO_SLOT {
-                break;
-            }
-            cur = nxt as usize;
-        }
+        nodes[srv_u16 as usize].remove_donor(caller_slot);
+        let changed = recompute_chain_from(nodes, srv_u16 as usize);
 
         if changed {
             GLOBAL_DONATIONS_REVERTED.fetch_add(1, Ordering::Relaxed);

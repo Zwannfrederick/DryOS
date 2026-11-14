@@ -29,16 +29,30 @@ pub const USER_DS: u16 = 0x18 | 3; // 0x1b (`GDT[3]` User Data, `RPL = 3`)
 pub const USER_CS: u16 = 0x20 | 3; // 0x23 (`GDT[4]` User 64-bit Code, `RPL = 3`)
 pub const TSS_SEL: u16 = 0x28;
 pub const DF_IST_INDEX: u8 = 1;
+pub const NMI_IST_INDEX: u8 = 2;
+pub const MC_IST_INDEX: u8 = 3;
 
 pub const PER_CPU_STACK_BYTES: usize = 16 * 1024;
+pub const PER_CPU_AUX_IST_BYTES: usize = 8 * 1024;
+pub const PER_CPU_BOOT_STACK_BYTES: usize = 32 * 1024;
 pub const MAX_CPUS: usize = 64;
 
 const BOOT_CANARY_MAGIC: u64 = 0x4452_595f_4254_5354; // "DRY_BTST"
 const DF_CANARY_MAGIC: u64 = 0x4452_595f_4446_4953;   // "DRY_DFIS"
+const NMI_CANARY_MAGIC: u64 = 0x4452_595f_4e4d_4953;  // "DRY_NMIS"
+const MC_CANARY_MAGIC: u64 = 0x4452_595f_4d43_4953;   // "DRY_MCIS"
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 struct AlignedStack([u8; PER_CPU_STACK_BYTES]);
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct AuxIstStack([u8; PER_CPU_AUX_IST_BYTES]);
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct BootAlignedStack([u8; PER_CPU_BOOT_STACK_BYTES]);
 
 /// Architectural 64-bit Task State Segment (`104` bytes).
 #[repr(C, packed)]
@@ -75,7 +89,9 @@ struct CpuDescBlock {
     gdt: [u64; 7],
     tss: Tss64,
     df_stack: AlignedStack,
-    boot_stack: AlignedStack,
+    nmi_stack: AuxIstStack,
+    mc_stack: AuxIstStack,
+    boot_stack: BootAlignedStack,
 }
 
 impl CpuDescBlock {
@@ -92,7 +108,9 @@ impl CpuDescBlock {
             ],
             tss: Tss64::empty(),
             df_stack: AlignedStack([0; PER_CPU_STACK_BYTES]),
-            boot_stack: AlignedStack([0; PER_CPU_STACK_BYTES]),
+            nmi_stack: AuxIstStack([0; PER_CPU_AUX_IST_BYTES]),
+            mc_stack: AuxIstStack([0; PER_CPU_AUX_IST_BYTES]),
+            boot_stack: BootAlignedStack([0; PER_CPU_BOOT_STACK_BYTES]),
         }
     }
 }
@@ -138,10 +156,15 @@ pub fn prepare_cpu_boot_stack(cpu_idx: usize) -> (u64, u64) {
     unsafe {
         let block = &mut (*CPU_DESCS.0.get())[cpu_idx];
         let boot_base = block.boot_stack.0.as_mut_ptr() as u64;
-        let boot_top = boot_base + (PER_CPU_STACK_BYTES as u64);
+        let boot_top = boot_base + (PER_CPU_BOOT_STACK_BYTES as u64);
         let df_base = block.df_stack.0.as_mut_ptr() as u64;
-        write_volatile(boot_base as *mut u64, BOOT_CANARY_MAGIC ^ (cpu_idx as u64));
-        write_volatile(df_base as *mut u64, DF_CANARY_MAGIC ^ (cpu_idx as u64));
+        let nmi_base = block.nmi_stack.0.as_mut_ptr() as u64;
+        let mc_base = block.mc_stack.0.as_mut_ptr() as u64;
+        let mask = cpu_idx as u64;
+        write_volatile(boot_base as *mut u64, BOOT_CANARY_MAGIC ^ mask);
+        write_volatile(df_base as *mut u64, DF_CANARY_MAGIC ^ mask);
+        write_volatile(nmi_base as *mut u64, NMI_CANARY_MAGIC ^ mask);
+        write_volatile(mc_base as *mut u64, MC_CANARY_MAGIC ^ mask);
         assert_eq!(boot_top & 0xf, 0, "Unaligned boot_stack_top");
         (boot_base, boot_top)
     }
@@ -155,13 +178,19 @@ pub fn init_cpu_gdt_tss(cpu_idx: usize) -> CpuDescLayout {
     let (gdtr, layout) = unsafe {
         let block = &mut (*CPU_DESCS.0.get())[cpu_idx];
         let boot_base = block.boot_stack.0.as_ptr() as u64;
-        let boot_top = boot_base + (PER_CPU_STACK_BYTES as u64);
+        let boot_top = boot_base + (PER_CPU_BOOT_STACK_BYTES as u64);
         let df_base = block.df_stack.0.as_ptr() as u64;
         let df_top = df_base + (PER_CPU_STACK_BYTES as u64);
+        let nmi_top = (block.nmi_stack.0.as_ptr() as u64) + (PER_CPU_AUX_IST_BYTES as u64);
+        let mc_top = (block.mc_stack.0.as_ptr() as u64) + (PER_CPU_AUX_IST_BYTES as u64);
         assert_eq!(df_top & 0xf, 0, "Unaligned IST1 stack top");
+        assert_eq!(nmi_top & 0xf, 0, "Unaligned IST2 (NMI) stack top");
+        assert_eq!(mc_top & 0xf, 0, "Unaligned IST3 (#MC) stack top");
         assert_eq!(boot_top & 0xf, 0, "Unaligned RSP0 stack top");
 
         block.tss.ist[(DF_IST_INDEX - 1) as usize] = df_top;
+        block.tss.ist[(NMI_IST_INDEX - 1) as usize] = nmi_top;
+        block.tss.ist[(MC_IST_INDEX - 1) as usize] = mc_top;
         block.tss.rsp[0] = boot_top;
         block.tss.iomap_base = size_of::<Tss64>() as u16;
 
@@ -247,13 +276,43 @@ pub fn verify_cpu_tss_and_canaries(cpu_idx: usize) {
             cpu_idx, access_byte
         );
         let boot_canary = read_volatile(block.boot_stack.0.as_ptr().cast::<u64>());
+        let mask = cpu_idx as u64;
         assert_eq!(
             boot_canary,
-            BOOT_CANARY_MAGIC ^ (cpu_idx as u64),
+            BOOT_CANARY_MAGIC ^ mask,
             "CPU {} boot stack bottom canary corrupted",
             cpu_idx
         );
+        let nmi_canary = read_volatile(block.nmi_stack.0.as_ptr().cast::<u64>());
+        assert_eq!(
+            nmi_canary,
+            NMI_CANARY_MAGIC ^ mask,
+            "CPU {} NMI IST2 stack bottom canary corrupted",
+            cpu_idx
+        );
+        let mc_canary = read_volatile(block.mc_stack.0.as_ptr().cast::<u64>());
+        assert_eq!(
+            mc_canary,
+            MC_CANARY_MAGIC ^ mask,
+            "CPU {} #MC IST3 stack bottom canary corrupted",
+            cpu_idx
+        );
+        let ist = block.tss.ist;
+        assert!(
+            ist[0] != 0 && ist[1] != 0 && ist[2] != 0
+                && ist[0] != ist[1] && ist[0] != ist[2] && ist[1] != ist[2],
+            "CPU {} IST1..3 stacks must be non-zero and pairwise disjoint",
+            cpu_idx
+        );
     }
+}
+
+/// Return hardware `TSS.IST[0..3]` tops `(df_ist1_top, nmi_ist2_top, mc_ist3_top)` for `cpu_idx`.
+pub fn cpu_ist_tops(cpu_idx: usize) -> (u64, u64, u64) {
+    assert!(cpu_idx < MAX_CPUS);
+    // SAFETY: `CPU_DESCS[cpu_idx].tss.ist[0..3]` are initialized once at bring-up in `'static` `.bss`.
+    let ist = unsafe { (*CPU_DESCS.0.get())[cpu_idx].tss.ist };
+    (ist[0], ist[1], ist[2])
 }
 
 /// Update `TSS.RSP0` and `PerCpuData.kernel_rsp0` (`gs:[192]`) for `cpu_idx` when switching to a

@@ -418,11 +418,27 @@ fn try_resolve_ipc_wait(
             let _ = revert_donation_for_caller(cur_slot);
             Err(e)
         }),
-        WaitPhase::WaitingRecv => abort.map(|e| {
-            unlink_recv_q(inner, slots, cur_slot as u16);
-            slots[cur_slot].wait_phase = WaitPhase::Idle;
-            Err(e)
-        }),
+        WaitPhase::WaitingRecv => {
+            if !killed {
+                if let Some(bits) = crate::ipc::bound_notif::poll_bound_notif_for_recv(cur_slot) {
+                    unlink_recv_q(inner, slots, cur_slot as u16);
+                    slots[cur_slot].tag =
+                        crate::ipc::MsgTag::new(crate::ipc::IPC_OP_BOUND_NOTIF, 0, 0, 0);
+                    slots[cur_slot].mrs = [0; 4];
+                    slots[cur_slot].sender_badge = bits;
+                    slots[cur_slot].transferred_cap = CapPtr::NULL;
+                    slots[cur_slot].reply_token = 0;
+                    slots[cur_slot].extra_len = 0;
+                    slots[cur_slot].wait_phase = WaitPhase::Idle;
+                    return Some(Ok(()));
+                }
+            }
+            abort.map(|e| {
+                unlink_recv_q(inner, slots, cur_slot as u16);
+                slots[cur_slot].wait_phase = WaitPhase::Idle;
+                Err(e)
+            })
+        }
         WaitPhase::WaitingReply => abort.map(|e| {
             slots[cur_slot].call_seq = next_seq16(slots[cur_slot].call_seq);
             slots[cur_slot].replier_slot = NO_SLOT;

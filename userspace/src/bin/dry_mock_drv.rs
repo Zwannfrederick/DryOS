@@ -8,8 +8,8 @@
 //! - Owns a single 4 KiB `IoRingSharedPage` (`ISLAND_RING_VADDR = 0x2400_0000`) delegated only via
 //!   `Device Broker` (`dry-broker.elf`); when `dry-mock-drv` crashes (`#UD`) or exits, `reclaim_process`
 //!   revokes and unmaps its `IoRing` CDT subtree across all client `VSpace`s (`0` leaked frames).
-//! - Parks with `timeout_tsc = 0` (`0 Hz` timer polling when idle) on either `sys_ipc_recv_ext`
-//!   (`park_mode == 0`) or `sys_notify_wait(sq_notif)` (`park_mode == 1`).
+//! - Parks with `timeout_tsc = 0` (`0 Hz` timer polling when idle) on unified `TCB`-bound
+//!   `Notification` + synchronous `sys_ipc_recv_ext` (zero `50 ms` polling timer fallback).
 
 #![no_std]
 #![no_main]
@@ -20,18 +20,17 @@ use dry_userspace::init_legacy::log_line;
 use dry_userspace::ioring::IoRingSharedPage;
 use dry_userspace::island_proto::{
     execute_mock_sqe, island_session_badge, mock_island_transform, BADGE_ISLAND_BROKER,
-    IPC_OP_ERR_STALE_GEN, ISLAND_DOORBELL_CTL, MOCK_OP_BIND_NOTIF, MOCK_OP_INIT_ISLAND,
-    MOCK_OP_SET_PARK_MODE, MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE,
+    IPC_OP_ERR_STALE_GEN, MOCK_OP_BIND_NOTIF, MOCK_OP_INIT_ISLAND, MOCK_OP_SET_PARK_MODE,
+    MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE,
 };
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_get_tid, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_reply_with_grant,
-    sys_notify_signal, sys_notify_wait, sys_proc_kill, sys_sysinfo, sys_vspace_map,
-    UserIpcRecvExt, UserSysInfo, BADGE_SUPERVISOR, EAGAIN, EINVAL, EPERM,
-    EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN,
-    IPC_OP_PONG, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE,
-    VSPACE_MAP_OP_4K_RW,
+    sys_notify_bind_tcb, sys_notify_signal, sys_notify_unbind_tcb, sys_proc_kill, sys_vspace_map,
+    UserIpcRecvExt, BADGE_SUPERVISOR, EINVAL, EPERM, EREVOKED, IPC_OP_BOUND_NOTIF,
+    IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG,
+    RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW,
 };
 
 const ISLAND_RING_VADDR: u64 = 0x2400_0000;
@@ -58,10 +57,6 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
     // Verify `ADR-007` MAC confinement: `SecDomain::Userspace` cannot invoke supervisor kill (`-EPERM`).
     let mac_isolated = sys_proc_kill(1) == Err(EPERM);
 
-    let mut sys = UserSysInfo::default();
-    let _ = sys_sysinfo(&mut sys);
-    let ctl_wait_tsc = 50_000u64.saturating_mul(sys.tsc_mhz.max(1000));
-
     let ring_cap = match sys_frame_alloc(0) {
         Ok(c) => c,
         Err(_) => sys_exit(181),
@@ -75,14 +70,23 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
     let mut generation = 0u64;
     let mut sq_notif = 0u64;
     let mut cq_notif = 0u64;
-    let mut park_mode = 0u64;
     let mut processed_ops = 0u64;
     let mut ring_ops = 0u64;
     let mut wake_events = 0u64;
 
     loop {
         let mut ext = UserIpcRecvExt::default();
-        let (tag, tok, mrs, t_awake) = if park_mode == 1 && sq_notif != 0 {
+        let (tag, tok, mrs, t_awake) = match sys_ipc_recv_ext(drv_ep_cap, 0, 0, &mut ext) {
+            Ok((tg, tk, mr)) => {
+                let awake_tsc = rdtsc_user();
+                wake_events = wake_events.wrapping_add(1);
+                (tg, tk, mr, awake_tsc)
+            }
+            Err(_) => break,
+        };
+
+        let op = msg_tag_label(tag);
+        if op == IPC_OP_BOUND_NOTIF {
             let mut drained = false;
             while let Some(sqe) = ring.pop_sqe() {
                 let cqe = execute_mock_sqe(sqe, generation);
@@ -94,33 +98,8 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
             if drained && cq_notif != 0 {
                 let _ = sys_notify_signal(cq_notif, 1);
             }
-
-            let bits = match sys_notify_wait(sq_notif, 0, 0) {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            let awake_tsc = rdtsc_user();
-            wake_events = wake_events.wrapping_add(1);
-            if (bits & ISLAND_DOORBELL_CTL) == 0 {
-                continue;
-            }
-            match sys_ipc_recv_ext(drv_ep_cap, 0, ctl_wait_tsc, &mut ext) {
-                Ok((tg, tk, mr)) => (tg, tk, mr, awake_tsc),
-                Err(ETIMEDOUT | EAGAIN) => continue,
-                Err(_) => break,
-            }
-        } else {
-            match sys_ipc_recv_ext(drv_ep_cap, 0, 0, &mut ext) {
-                Ok((tg, tk, mr)) => {
-                    let awake_tsc = rdtsc_user();
-                    wake_events = wake_events.wrapping_add(1);
-                    (tg, tk, mr, awake_tsc)
-                }
-                Err(_) => break,
-            }
-        };
-
-        let op = msg_tag_label(tag);
+            continue;
+        }
         let is_sup = ext.sender_badge == BADGE_SUPERVISOR;
         let is_broker = ext.sender_badge == BADGE_ISLAND_BROKER || is_sup;
         let is_session = generation != 0 && ext.sender_badge == island_session_badge(generation);
@@ -137,9 +116,11 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 match mrs[0] {
                     0 => {
                         if sq_notif != 0 {
+                            let _ = sys_notify_unbind_tcb(sq_notif);
                             let _ = sys_cap_revoke(sq_notif, 1);
                         }
                         sq_notif = ext.transferred_cap;
+                        let _ = sys_notify_bind_tcb(sq_notif);
                     }
                     1 => {
                         if cq_notif != 0 {
@@ -248,7 +229,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
                     continue;
                 }
-                park_mode = if mrs[0] == 1 && sq_notif != 0 { 1 } else { 0 };
+                let park_mode = if mrs[0] == 1 && sq_notif != 0 { 1 } else { 0 };
                 if tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         drv_ep_cap,
@@ -278,6 +259,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     continue;
                 }
                 if sq_notif != 0 {
+                    let _ = sys_notify_unbind_tcb(sq_notif);
                     let _ = sys_cap_revoke(sq_notif, 1);
                 }
                 if cq_notif != 0 {

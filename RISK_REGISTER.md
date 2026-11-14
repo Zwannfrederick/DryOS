@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 12 Kasım 2026 (`Milestone 2C-0` / `Adaptive Driver Island PoC` Kapanışı — `90/90` QEMU + `5/5` Matris)  
+> **Son Güncelleme:** 14 Kasım 2026 (`Milestone 2C-2` / `Hardware Foundations & P1 Audit Closure` — `95/95` QEMU + `5/5` Matris)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -19,17 +19,17 @@
 - **Uygulanan Savunma:** Çift-nesil ABA kalkanı (`slot_gen` + canlı nesne `generation`), `with_pinned_cap` içindeki `slot.in_flight_ops` (`SeqCst`) Dekker pini, `CSpace`-sahibi `TCB` yuvalarının yalnızca `cspace_destroy_object -> release_dead_tcb_slot` sonrasında havuza dönmesi ve çerçeve geri kazanımı öncesi senkron SMP TLB shootdown (`INV-CAP-05`, `INV-USR-08`).
 
 ### R-03: Kalıcı IOVA `DmaArena` İçinde DMA Sahiplik İhlali ve Çökme Sonrası Kaçak DMA
-- **Durum:** `MITIGATED (QEMU BME=0 + Pin)` / `OPEN (Bare-Metal Fiziksel VT-d/AMD-Vi Silikon — P5)` (`Milestone 2B` `ADR-015` ile çekirdek mekanizması doğrulandı).
-- **Azaltma:** `SYS_DMA_ALLOC` çerçeveleri `DEVICE_DMA | NO_DELEGATE` ve `iommu_pin_count == 1` ile sabitlenir (`INV-CAP-08`, erken `destroy` `-EBUSY`); `IoRing` kontrol sayfaları normal çerçevelerde tutulur; sürücü çöküşünde (`#UD` canlı testi: `p4c_vault_dma_devws_security_e2e`) veya çıkışında `quiesce_pci_for_cspace` bellek iadesinden **önce** donanımda `PCI Command.BME = 0` bitini temizler (`pci_quiesce=2`, `leaked_frames=0`). Fiziksel PCIe FLR ve silikon VT-d/AMD-Vi IOTLB temizliği `P5` bare-metal kapısındadır.
+- **Durum:** `MITIGATED (QEMU VT-d SLPT + Reset + BME=0 + Pin)` / `OPEN (Bare-Metal Fiziksel VT-d/AMD-Vi Silikon — P5)` (`Milestone 2B` `ADR-015` + `Milestone 2C-2` `ADR-019` ile çekirdek mekanizması doğrulandı).
+- **Azaltma:** `SYS_DMA_ALLOC` çerçeveleri `DEVICE_DMA | NO_DELEGATE` ve `iommu_pin_count == 1` ile sabitlenir (`INV-CAP-08`, erken `destroy` `-EBUSY`); yalnızca yetkili DMA sayfaları `VT-d` `SLPT` bağlamına eşlenir ve yetkisiz cihaz DMA'sı `FRCD` fault kaydında yakalanır (`p8a`: `vtd_faults=1`); sürücü çöküşünde veya çıkışında `quiesce_slot_for_cspace` sırasıyla `MSI` susturma, VirtIO `device_status=0` sıfırlama, `PCI Command.BME = 0` temizleme ve `detach_and_scrub_domain` (`VT-d` SLPT/IOTLB temizliği) uyguladıktan sonra pinleri bırakır (`quiesce=3`, `leaked_frames=0`). Fiziksel silikon bare-metal VT-d/AMD-Vi doğrulaması `P5` kapısındadır.
 
 ### R-04: Alt-Sistem Geçişli Bağımlılık Patlaması (*Monolithic Shim Creep*)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-006`).
 - **Kanıt & Azaltma:** `igc` (`247` sembol) ve `e1000e` (`200` sembol) dar bir ağ adasına (`3.028 SLOC` runtime) sığarken `amdgpu` (`1.107` sembol, `30.5 MiB` ELF) ve `nvidia-open` (`HMM`/`mmu_notifier`) sığmamaktadır. Ortak `LinuxKPI` yasaktır; `< 10.000 LOC` sınırını aşan sınıflar çevrilmez.
 
-### R-11: `16 KiB` Sabit Çekirdek Yığını Bütçesi ve Derleyici Satır-İçi (*Inlining*) Yığın Taşması (Yeni — 11 Kasım 2026)
+### R-11: Sabit Çekirdek Yığını Bütçesi, Derleyici Satır-İçi (*Inlining*) ve `NMI/#MC` `IST` Güvenliği (Güncelleme — 14 Kasım 2026)
 - **Durum:** `MITIGATED (QEMU)` — Yeni kod eklenirken aktif dikkat gerektirir!
-- **Kanıt:** `Optimization Pass v1` sırasında `verify_cpu_stack_canaries_fast`, `bsp_kmain` (`5.448 B`) -> `verify_userspace_and_syscalls` içine gömülen `run_stage_g_benchmarks` (`8.192 B` tampon) + `on_process_terminating` (`1.816 B` `[WakeBatchItem; 64]`) zincirinin `16.384 B` yığın tavanını aştığını (`16.680 B`) yakaladı.
-- **Azaltma:** Soğuk/test/benchmark fonksiyonları `#[inline(never)]` ile izole edilerek `CPU 0` yığınında `+7.704 B` boşluk açıldı (`proc/bench.rs`, `proc/tests.rs`); `Milestone 2A-1` (`P1`) çağrıları da ayrı `syscall/cold.rs` (`216 B` çerçeve) içine alınarak sıcak `rust_syscall_dispatch` (`248 B`) hiç büyütülmedi. **Kural:** Çekirdekte `>= 1 KiB` yığın dizisi ayırmak yasaktır veya mutlaka `#[inline(never)]` yaprak fonksiyon / per-CPU statik kazıma alanı kullanılmalıdır; Faz 2'de çekirdek yığınları koruma sayfalı (*guard-paged*) sanal aralıklara taşınacaktır.
+- **Kanıt:** `Optimization Pass v1` sırasında `verify_cpu_stack_canaries_fast`, `bsp_kmain` (`5.448 B`) -> `verify_userspace_and_syscalls` içine gömülen `run_stage_g_benchmarks` (`8.192 B` tampon) + `on_process_terminating` (`1.816 B` `[WakeBatchItem; 64]`) zincirinin `16.384 B` yığın tavanını aştığını (`16.680 B`) yakaladı; ayrıca `NMI`/`#MC` kesmeleri `IST0` üzerindeydi (`AUD-K7`).
+- **Azaltma:** Soğuk/test/benchmark fonksiyonları `#[inline(never)]` ile izole edilerek `boot_stack` `32 KiB`'a sertleştirildi (`Milestone 2C-2`); `#DF` (`IST1`), `NMI` (`IST2`) ve `#MC` (`IST3`) kesmeleri her CPU için kanaryalı ayrık `8 KiB` yığınlara bağlandı (`gdt_tss.rs`, `audit_tests.rs` `cases=9/9`); `rust_syscall_dispatch` (`248 B`) `<= 256 B` tavanında tutuldu. **Kural:** Çekirdekte `>= 1 KiB` yığın dizisi ayırmak yasaktır veya mutlaka `#[inline(never)]` yaprak fonksiyon / per-CPU statik kazıma alanı kullanılmalıdır.
 
 ### R-14: Harici Donanım Kesme Fırtınası (`IRQ Storm`), `Revoke` Yarışı ve Port I/O Ayrıcalık Sızıntısı (Yeni — 12 Kasım 2026)
 - **Durum:** `MITIGATED (QEMU)` — `Milestone 2A-1` & `2A-2` (`ADR-012`, `ADR-013`, `23` donanım/E2E/güvenlik testiyle doğrulandı).

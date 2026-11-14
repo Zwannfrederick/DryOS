@@ -121,7 +121,10 @@ fn emit_gpu_init_log(gpu: &VirtioGpu2d) {
     lb.push_u64(gpu.width as u64);
     lb.push_byte(b'x');
     lb.push_u64(gpu.height as u64);
-    lb.push_bytes(b" fmt=B8G8R8X8 dma_2m=2");
+    lb.push_bytes(b" fmt=B8G8R8X8 dma_2m=2 msix_vec=");
+    lb.push_u64(gpu.msix_vec as u64);
+    lb.push_bytes(b" msi_irqs=");
+    lb.push_u64(gpu.msi_irqs);
     log_line(&lb);
 }
 

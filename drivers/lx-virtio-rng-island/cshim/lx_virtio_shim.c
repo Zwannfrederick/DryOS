@@ -70,6 +70,9 @@ static bool g_vq0_active = false;
 static struct hwrng *g_registered_rng = NULL;
 static u64 g_vq_completions = 0;
 static u8 g_dev_status = 0;
+static u32 g_use_msix = 0;
+
+extern int dry_lx_wait_vq_irq(u64 timeout_tsc);
 
 static inline u8 mmio_r8(u64 addr) {
     return *(volatile u8 *)(uintptr_t)addr;
@@ -296,6 +299,13 @@ struct virtqueue *virtio_find_single_vq(
     }
 
     memset((void *)(uintptr_t)g_vq_va, 0, 4096U);
+    mmio_w16(common + 0x10ULL, 0xffffU); /* config_msix_vector = NO_VECTOR */
+    if (g_use_msix != 0U) {
+        mmio_w16(common + 0x1aULL, 0U); /* queue_msix_vector = entry 0 */
+        if (mmio_r16(common + 0x1aULL) == 0xffffU) {
+            g_use_msix = 0U;
+        }
+    }
     mmio_w64_split(common + 0x20ULL, g_vq_pa + VQ_DESC_OFF);
     mmio_w64_split(common + 0x28ULL, g_vq_pa + VQ_AVAIL_OFF);
     mmio_w64_split(common + 0x30ULL, g_vq_pa + VQ_USED_OFF);
@@ -417,6 +427,20 @@ static void lx_poll_vq_once(void) {
 }
 
 int wait_for_completion_killable(struct completion *x) {
+    if (g_use_msix != 0U) {
+        for (u32 iter = 0; iter < 64U; iter++) {
+            lx_poll_vq_once();
+            if (__atomic_load_n(&x->done, __ATOMIC_ACQUIRE) != 0U) {
+                (void)dry_lx_wait_vq_irq(0ULL);
+                return 0;
+            }
+            (void)dry_lx_wait_vq_irq(50000000ULL);
+            lx_poll_vq_once();
+            if (__atomic_load_n(&x->done, __ATOMIC_ACQUIRE) != 0U) {
+                return 0;
+            }
+        }
+    }
     for (u32 iter = 0; iter < 2000000U; iter++) {
         if (__atomic_load_n(&x->done, __ATOMIC_ACQUIRE) != 0U) {
             return 0;
@@ -439,7 +463,8 @@ int lx_shim_init_device(
     u64 vq_va,
     u64 vq_pa,
     u64 slab_va,
-    u64 slab_pa
+    u64 slab_pa,
+    u32 use_msix
 ) {
     g_bar_va = bar_va;
     g_common_off = common_off;
@@ -450,6 +475,7 @@ int lx_shim_init_device(
     g_vq_pa = vq_pa;
     g_slab_va = slab_va;
     g_slab_pa = slab_pa;
+    g_use_msix = use_msix;
     g_registered_rng = NULL;
     g_vq_completions = 0;
     g_vq0_active = false;
@@ -477,7 +503,8 @@ int lx_shim_init_device(
     mmio_w32(common + 0x08ULL, 0U);
     mmio_w32(common + 0x0cULL, 0U);
     mmio_w32(common + 0x08ULL, 1U);
-    mmio_w32(common + 0x0cULL, 1U);
+    /* Negotiate VIRTIO_F_VERSION_1 (bit 32) + VIRTIO_F_ACCESS_PLATFORM (bit 33) when offered. */
+    mmio_w32(common + 0x0cULL, dev_feat_hi & 0x3U);
 
     g_dev_status |= (u8)VIRTIO_CONFIG_S_FEATURES_OK;
     mmio_w8(common + 0x14ULL, g_dev_status);

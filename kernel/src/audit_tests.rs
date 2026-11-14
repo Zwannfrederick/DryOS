@@ -18,19 +18,25 @@ use crate::cspace::objects::{
 };
 use crate::cspace::revoke::{cspace_delete_cap, cspace_destroy_object};
 use crate::cspace::{create_cspace, cspace_derive, destroy_cspace};
+use crate::ipc::bound_notif::sys_notify_bind_or_unbind;
 use crate::ipc::endpoint::{ep_create, ep_recv, ep_send_or_call, IpcSendInput};
 use crate::ipc::notif::{notif_create, notif_signal, notif_wait};
-use crate::ipc::{MsgTag, MSG_FLAG_GRANT_CAP};
+use crate::ipc::{
+    MsgTag, IPC_OP_BOUND_NOTIF, MSG_FLAG_GRANT_CAP, NOTIFY_FLAG_BIND_TCB, NOTIFY_FLAG_UNBIND_TCB,
+};
 use crate::pmm::{flush_all_magazines_quiescent, inspect_frame_live, measure_fragmentation, PageOrder};
 use crate::proc::{
     activate_raw_bench_pid_slot, reclaim_process, release_raw_bench_pid_slot, slot_ref,
     spawn_elf_process, ProcessOutcome, ReclaimStatus, SpawnOptions, MAX_PROCESSES,
 };
+use crate::sched::donate::{
+    donate_on_call, init_slot_priority, inspect_slot_priorities, revert_donation_for_caller,
+};
 use crate::sched::preempt_tests::{begin_preemptive_epoch, drain_preemptive_epoch_and_audit};
 use crate::sched::{
     current_cpu_idx, current_slot_on_cpu, exit_current_thread, init_scheduler,
     note_current_thread_progress, set_preemptive_mode_active, tcb, try_spawn_thread_bound,
-    yield_now,
+    yield_now, TOTAL_TCB_SLOTS,
 };
 use crate::security::{encode_compartment, CapRights, SecDomain, SecFlags, SecLabel};
 use crate::uaccess::SysError;
@@ -328,6 +334,176 @@ fn case_pre_park_kill_cancels_untimed_waits(online_cpus: usize) {
     destroy_cspace(cs).unwrap();
 }
 
+/// `AUD-K6`: retargeting an active caller donation edge to a new server must recompute the
+/// previously donated server's priority instead of stranding its stale boost.
+fn case_donate_retarget_recomputes_prev_server() {
+    let caller = TOTAL_TCB_SLOTS - 3;
+    let srv_a = TOTAL_TCB_SLOTS - 2;
+    let srv_b = TOTAL_TCB_SLOTS - 1;
+    init_slot_priority(caller, 1);
+    init_slot_priority(srv_a, 6);
+    init_slot_priority(srv_b, 7);
+
+    assert_eq!(donate_on_call(caller, srv_a), Ok(1));
+    assert_eq!(inspect_slot_priorities(srv_a), (6, 1));
+    assert_eq!(donate_on_call(caller, srv_b), Ok(1));
+    assert_eq!(
+        inspect_slot_priorities(srv_a),
+        (6, 6),
+        "AUD-K6: previous server retained stale donated priority on retarget"
+    );
+    assert_eq!(inspect_slot_priorities(srv_b), (7, 1));
+    assert!(revert_donation_for_caller(caller));
+    assert_eq!(inspect_slot_priorities(srv_b), (7, 7));
+
+    init_slot_priority(caller, 7);
+    init_slot_priority(srv_a, 7);
+    init_slot_priority(srv_b, 7);
+}
+
+/// `AUD-K7`: `#DF` (vec 8 -> `IST1`), `NMI` (vec 2 -> `IST2`), and `#MC` (vec 18 -> `IST3`) must use
+/// dedicated, pairwise-disjoint per-CPU IST stacks with valid canaries across all CPUs.
+fn case_ist_stacks_disjoint_for_df_nmi_mc(online_cpus: usize) {
+    assert_eq!(crate::idt::idt_gate_ist(8), crate::gdt_tss::DF_IST_INDEX);
+    assert_eq!(crate::idt::idt_gate_ist(2), crate::gdt_tss::NMI_IST_INDEX);
+    assert_eq!(crate::idt::idt_gate_ist(18), crate::gdt_tss::MC_IST_INDEX);
+
+    for cpu in 0..online_cpus {
+        let (df_top, nmi_top, mc_top) = crate::gdt_tss::cpu_ist_tops(cpu);
+        assert!(df_top != 0 && nmi_top != 0 && mc_top != 0);
+        let df_base = df_top - (crate::gdt_tss::PER_CPU_STACK_BYTES as u64);
+        let nmi_base = nmi_top - (crate::gdt_tss::PER_CPU_AUX_IST_BYTES as u64);
+        let mc_base = mc_top - (crate::gdt_tss::PER_CPU_AUX_IST_BYTES as u64);
+        let disjoint = |a0: u64, a1: u64, b0: u64, b1: u64| a1 <= b0 || b1 <= a0;
+        assert!(disjoint(df_base, df_top, nmi_base, nmi_top), "AUD-K7 DF/NMI overlap cpu={}", cpu);
+        assert!(disjoint(df_base, df_top, mc_base, mc_top), "AUD-K7 DF/MC overlap cpu={}", cpu);
+        assert!(disjoint(nmi_base, nmi_top, mc_base, mc_top), "AUD-K7 NMI/MC overlap cpu={}", cpu);
+        crate::gdt_tss::verify_cpu_tss_and_canaries(cpu);
+    }
+}
+
+const BOUND_NOTIF_ROUNDS: u64 = 4_000;
+
+fn bound_notif_recv_worker(cs_raw: u64) {
+    let (cs, lbl) = (cs_raw as u16, test_label());
+    let na = CapPtr(CAP_A.load(Ordering::Acquire));
+    let nb = CapPtr(CAP_B.load(Ordering::Acquire));
+    let ep = CapPtr(COUNTER.load(Ordering::Acquire));
+
+    sys_notify_bind_or_unbind(cs, lbl, na, NOTIFY_FLAG_BIND_TCB).expect("bind_tcb failed");
+    assert_eq!(
+        notif_wait(cs, lbl, na, false, 0),
+        Err(SysError::Busy),
+        "bound notif must reject direct notif_wait"
+    );
+    assert_eq!(
+        notif_wait(cs, lbl, na, true, 0),
+        Err(SysError::Busy),
+        "bound notif must reject non-blocking notif_wait"
+    );
+
+    notif_signal(cs, lbl, nb, 1).unwrap();
+    // Wait until sender queues an Endpoint send AND signals `na`, verifying Endpoint priority.
+    for _ in 0..512 {
+        yield_now();
+    }
+    let first = ep_recv(cs, lbl, ep, false, NOTIF_LOST_TIMEOUT_TSC, None)
+        .expect("Endpoint priority recv failed");
+    assert_eq!(first.tag.label(), 0x55, "Endpoint message must beat pending bound notif");
+    assert_eq!(first.mrs[0], 0x1234);
+
+    let second = ep_recv(cs, lbl, ep, false, NOTIF_LOST_TIMEOUT_TSC, None)
+        .expect("Bound notif recv after Endpoint failed");
+    assert_eq!(second.tag.label(), IPC_OP_BOUND_NOTIF);
+    assert_eq!(second.sender_badge, 0xaa);
+
+    for r in 0..BOUND_NOTIF_ROUNDS {
+        notif_signal(cs, lbl, nb, 1).unwrap();
+        match ep_recv(cs, lbl, ep, false, NOTIF_LOST_TIMEOUT_TSC, None) {
+            Ok(out) => {
+                assert_eq!(out.tag.label(), IPC_OP_BOUND_NOTIF);
+                assert_eq!(out.sender_badge, 1u64 << ((r % 16) as u32));
+            }
+            Err(_) => {
+                LOST.fetch_add(1, Ordering::AcqRel);
+                break;
+            }
+        }
+        note_current_thread_progress();
+    }
+
+    sys_notify_bind_or_unbind(cs, lbl, na, NOTIFY_FLAG_UNBIND_TCB).expect("unbind_tcb failed");
+    assert_eq!(notif_wait(cs, lbl, na, false, 1000), Err(SysError::TimedOut));
+    DONE.fetch_add(1, Ordering::AcqRel);
+    exit_current_thread()
+}
+
+fn bound_notif_send_worker(cs_raw: u64) {
+    let (cs, lbl) = (cs_raw as u16, test_label());
+    let na = CapPtr(CAP_A.load(Ordering::Acquire));
+    let nb = CapPtr(CAP_B.load(Ordering::Acquire));
+    let ep_send = CapPtr(COUNTER.load(Ordering::Acquire));
+
+    notif_wait(cs, lbl, nb, false, NOTIF_LOST_TIMEOUT_TSC).unwrap();
+    notif_signal(cs, lbl, na, 0xaa).unwrap();
+    let input = IpcSendInput {
+        tag: MsgTag::new(0x55, 0, 1, 0),
+        mrs: [0x1234, 0, 0, 0],
+        extra: &[],
+        grant: None,
+        shared_desc: None,
+    };
+    ep_send_or_call(cs, lbl, ep_send, input, false, NOTIF_LOST_TIMEOUT_TSC, None).unwrap();
+
+    for r in 0..BOUND_NOTIF_ROUNDS {
+        wait_or_count_lost(cs, lbl, nb);
+        notif_signal(cs, lbl, na, 1u64 << ((r % 16) as u32)).unwrap();
+        note_current_thread_progress();
+    }
+    DONE.fetch_add(1, Ordering::AcqRel);
+    exit_current_thread()
+}
+
+/// `Milestone 2C-2`: `TCB`-bound `Notification` cross-CPU Dekker race + synchronous `Endpoint` priority.
+fn case_bound_notif_dekker_and_ep_priority(online_cpus: usize) {
+    let lbl = test_label();
+    let (cs, _) = create_cspace(lbl, 0).unwrap();
+    let (na, _) = notif_create(cs, lbl, lbl, 0).unwrap();
+    let (nb, _) = notif_create(cs, lbl, lbl, 0).unwrap();
+    let (ep, _) = ep_create(cs, lbl, lbl, 0).unwrap();
+    CAP_A.store(na.0, Ordering::Release);
+    CAP_B.store(nb.0, Ordering::Release);
+    COUNTER.store(ep.0, Ordering::Release);
+    DONE.store(0, Ordering::Release);
+    LOST.store(0, Ordering::Release);
+
+    set_preemptive_mode_active(true);
+    init_scheduler(online_cpus);
+    begin_preemptive_epoch(0xb2, 2);
+    try_spawn_thread_bound(2, 0, KERNEL_VSPACE_ID, cs, lbl, bound_notif_recv_worker, cs as u64, true)
+        .unwrap();
+    try_spawn_thread_bound(
+        2,
+        1 % online_cpus,
+        KERNEL_VSPACE_ID,
+        cs,
+        lbl,
+        bound_notif_send_worker,
+        cs as u64,
+        true,
+    )
+    .unwrap();
+    drain_preemptive_epoch_and_audit(online_cpus);
+    set_preemptive_mode_active(false);
+
+    assert_eq!(DONE.load(Ordering::Acquire), 2, "bound_notif cross-CPU stress incomplete");
+    assert_eq!(LOST.load(Ordering::Acquire), 0, "bound_notif lost a wakeup across CPUs");
+    cspace_destroy_object(cs, lbl, ep, 1).unwrap();
+    cspace_destroy_object(cs, lbl, nb, 1).unwrap();
+    cspace_destroy_object(cs, lbl, na, 1).unwrap();
+    destroy_cspace(cs).unwrap();
+}
+
 pub fn verify_audit_regressions(online_cpus: usize) {
     flush_all_magazines_quiescent(online_cpus);
     let before = measure_fragmentation(online_cpus);
@@ -337,12 +513,15 @@ pub fn verify_audit_regressions(online_cpus: usize) {
     case_notif_no_lost_wakeup(online_cpus);
     case_recv_wakes_every_dequeued_sender(online_cpus);
     case_pre_park_kill_cancels_untimed_waits(online_cpus);
+    case_donate_retarget_recomputes_prev_server();
+    case_ist_stacks_disjoint_for_df_nmi_mc(online_cpus);
+    case_bound_notif_dekker_and_ep_priority(online_cpus);
     flush_all_magazines_quiescent(online_cpus);
     let after = measure_fragmentation(online_cpus);
     let leaked = before.free_global_frames.saturating_sub(after.free_global_frames);
     assert_eq!(leaked, 0, "Frame leak in audit regression suite: {}", leaked);
     crate::serial_println!(
-        "[DRY-AUDIT-REG] PASS: cpus={} cases=6/6 notif_rounds={} leaked_frames={}",
+        "[DRY-AUDIT-REG] PASS: cpus={} cases=9/9 notif_rounds={} leaked_frames={}",
         online_cpus,
         NOTIF_ROUNDS,
         leaked

@@ -10,6 +10,7 @@
 //!   and H1 `wait` with unforgeable capability badge accumulation.
 
 pub mod bench;
+pub mod bound_notif;
 pub mod endpoint;
 pub mod endpoint_state;
 pub mod notif;
@@ -60,6 +61,10 @@ pub const MSG_FLAG_NON_BLOCKING: u8 = 1 << 2;
 pub const MSG_FLAG_SHARED_DESC: u8 = 1 << 3;
 const MSG_KNOWN_FLAGS_MASK: u8 =
     MSG_FLAG_EXTRA_BUF | MSG_FLAG_GRANT_CAP | MSG_FLAG_NON_BLOCKING | MSG_FLAG_SHARED_DESC;
+
+pub const NOTIFY_FLAG_BIND_TCB: u64 = 1 << 4;
+pub const NOTIFY_FLAG_UNBIND_TCB: u64 = 1 << 5;
+pub const IPC_OP_BOUND_NOTIF: u32 = 0x7fff_0001;
 
 /// 64-bit IPC Message Descriptor (`MsgTag`), always keeping bit `63 == 0` so valid tags returned in
 /// `RAX` are strictly non-negative (`>= 0`) and never alias `-errno` (`[-4095..-1]`).
@@ -255,6 +260,7 @@ pub fn on_process_terminating(pid: u32, cspace_id: CSpaceId) {
 /// Invoked on every worker/user thread exit (`sched::exit_current_thread`) to cancel pending waits
 /// and fail any `ReplyToken`s held by the dying thread (`SysError::Pipe`).
 pub fn on_thread_terminating(slot: usize, pid: u32) {
+    bound_notif::on_thread_exit_cleanup(slot);
     endpoint::on_thread_exit_cleanup(slot, pid);
     notif::on_thread_exit_cleanup(slot);
 }

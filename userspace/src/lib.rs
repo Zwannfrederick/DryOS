@@ -103,6 +103,9 @@ pub const MSG_FLAG_EXTRA_BUF: u8 = 1 << 0;
 pub const MSG_FLAG_GRANT_CAP: u8 = 1 << 1;
 pub const MSG_FLAG_NON_BLOCKING: u8 = 1 << 2;
 pub const MSG_FLAG_SHARED_DESC: u8 = 1 << 3;
+pub const NOTIFY_FLAG_BIND_TCB: u64 = 1 << 4;
+pub const NOTIFY_FLAG_UNBIND_TCB: u64 = 1 << 5;
+pub const IPC_OP_BOUND_NOTIF: u32 = 0x7fff_0001;
 
 // IRQ / IoPort / VSpace map operation constants (`kernel/src/syscall/cold.rs`)
 pub const IRQF_ONESHOT: u64 = 1;
@@ -426,6 +429,21 @@ pub fn sys_notify_signal(notif_cap: u64, bits: u64) -> Result<u64, isize> {
 pub fn sys_notify_wait(notif_cap: u64, flags: u64, timeout_ticks: u64) -> Result<u64, isize> {
     let (r0, bits) = raw_syscall6(SYS_NOTIFY_WAIT, notif_cap, flags, timeout_ticks, 0, 0, 0);
     if r0 < 0 { Err(r0) } else { Ok(bits) }
+}
+
+/// Bind `notif_cap` (`CapRights::WAIT`) to the calling thread's `TCB` so synchronous `Endpoint`
+/// waits (`sys_ipc_recv*` / `sys_ipc_reply_recv*`) also deliver `IPC_OP_BOUND_NOTIF` (`0 Hz`).
+#[inline]
+pub fn sys_notify_bind_tcb(notif_cap: u64) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(SYS_NOTIFY_WAIT, notif_cap, NOTIFY_FLAG_BIND_TCB, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
+}
+
+/// Unbind any `Notification` (or specifically `notif_cap` when non-zero) from the calling `TCB`.
+#[inline]
+pub fn sys_notify_unbind_tcb(notif_cap: u64) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(SYS_NOTIFY_WAIT, notif_cap, NOTIFY_FLAG_UNBIND_TCB, 0, 0, 0, 0);
+    if r0 < 0 { Err(r0) } else { Ok(()) }
 }
 
 #[inline]

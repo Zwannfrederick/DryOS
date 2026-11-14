@@ -379,3 +379,22 @@
   2. **Bare-Metal `Iris Xe` / `NVIDIA` Uyarısı (`H3` Denetim Sınırı):**
      - Konakta ölçülen `xe.ko` (`1,213` UND), `i915.ko` (`1,244` UND) ve `nvidia*.ko` (`1,189` UND + `162` `os_*` + `81.31 MiB` GSP firmware + `4 GiB` BAR1) yığınları donanım **`VT-d` (`DMAR`) DMA izolasyonu**, **APIC `MSI/MSI-X`** ve **64-bit `>4 GiB` BAR eşlemesi** olmadan Ring 3'e güvenli verilemez (`QEMU/KVM != bare-metal`). Bu nedenle fiziksel GPU sürücüleri `BLOCKED` olarak kayda geçirilip sonraki hedef olarak **`Milestone 2C-2` (`DMAR VT-d` + `MSI-X`)** kilitlenmiştir.
      - İki GPU arasındaki kopyasız paylaşım modeli (`PRIME` `USER_RO` `2x2 MiB` Frame capability + `IoRing` atomic fence) kullanıcı-alanı prototipinde (`48` yineleme) **`18 ns` (`p50`)** vs `262,582 ns` tam CPU kopyası (`14,587.9x` hızlanma) ile doğrulanmıştır.
+
+---
+
+## ADR-019: `Milestone 2C-2` Donanım Temelleri (`VT-d` IOMMU, `MSI`/`MSI-X`, `>4 GiB` `WC` BAR, `TCB`-Bağlı `Notification` ve `AUD-K6/K7/K8/U3/U4/U8` Kapanışı)
+
+- **Durum:** Kabul Edildi ve Uygulandı (`Milestone 2C-2` [`Project Ascension 3.0 Track A`], 14 Kasım 2026, `95/95` QEMU + `5/5` Matris)
+- **Bağlam:** Fiziksel PCIe cihazlar, `BAR64 > 4 GiB` açıklıkları, çok-vektörlü kesme teslimi (`MSI`/`MSI-X`) ve donanım destekli DMA yalıtımı (`VT-d`) olmadan sürücü adaları gerçek donanım yolundan yoksun kalıyor; ayrıca `docs/AUDIT_2A4A.md` içindeki son 6 açık P1 bulgusu (`AUD-K6/K7/K8/U3/U4/U8`) kapanış bekliyordu.
+- **Karar:**
+  1. **64-bit `>4 GiB` PCI BAR & `PAT` `WC` (`Step A1` — `pci_cfg.rs`, `pci_window.rs`, `vspace`):**
+     - `SYS_DEV_MAP (29)` üzerine pencere eşleme (`op=1` temizlenmiş BAR sorgusu, `op=2` sayfalı `UC` veya `prefetchable` `WC` pencere eşlemesi) ve `>4 GiB` (`max_phys_limit = 0x7fffffffff`) BAR doğrulaması eklendi (`[DRY-BAR64] unit_cases=8`, QEMU `ivshmem-plain` `BAR2 > 4 GiB` üzerinde `WC`/`UC` tutarlılık ve sınır reddi kanıtlandı).
+  2. **ACPI `DMAR` & Intel `VT-d` İkinci Seviye (`SLPT`) DMA Yalıtımı (`Step A2` — `kernel/src/iommu/{mod.rs,vtd.rs}`, `pci.rs`):**
+     - Çekirdek ACPI `DMAR` DRHD birimlerini ayrıştırıp (`[DRY-IOMMU] dmar_unit=5`) cihaz bazlı BDF bağlam tabloları ve `SLPT` çeviri alanları kurar (`Root/Context` -> `4`-seviye sayfa tablosu, `FailedClosed` korumalı fail-closed politika, `VIRTIO_F_ACCESS_PLATFORM`).
+     - Yalnızca yetkili `DEVICE_DMA` pencereleri `SLPT`'ye eşlenir; yetkisiz cihaz DMA girişimleri `VT-d` fault kayıtlarında (`FRCD`, `vtd_faults=1`) yakalanıp karantina altına alınır; sürücü çıkışında/çöküşünde `quiesce_slot_for_cspace` (`pci.rs:346`) `MSI` susturma + `VirtIO` `device_status=0` + `PCI Command.BME=0` + `detach_and_scrub_domain` (`SLPT` & `IOTLB` temizliği) uyguladıktan sonra pinleri bırakır (`AUD-K8`). `boot_stack` bütçesi `32 KiB`'a sertleştirildi.
+  3. **PCI `MSI` (`0x05`) & `MSI-X` (`0x11`) Kesme Yönlendirmesi (`Step A3` — `kernel/src/irq/msi.rs`, `idt.rs`):**
+     - IDT vektörleri `0x40..=0x5F` (`IRQF_ONESHOT`) üzerinden capability-yetkili `MSI`/`MSI-X` bağlama ve maskeleme eklendi (`dry-lx-rng` ve `dry-gpu` + QEMU `edu` `PCI MSI` `vec=0x40`, `32` kesme doğrulandı).
+  4. **Sıfır-Syscall `TCB`-Bağlı `Notification` & Kalan P1 Bulgularının Kapanışı (`Step A4.1..A4.3`):**
+     - Mevcut `Syscall ABI v0.1` (`0..=31`, `rust_syscall_dispatch = 248 B <= 256 B`) korunarak `Notification` nesnesi `TCB`'ye bağlandı (`sys_notify_bind_tcb` / `sys_notify_unbind_tcb`, `sys_ipc_recv_ext` içinde birleşik IPC+IRQ beklemesi ve bağlı iken doğrudan `sys_notify_wait` -> `-EBUSY`; QEMU `edu` üzerinde `msi_p50 = 22.95 us` [`71,501 cyc`] kanıtlandı).
+     - `docs/AUDIT_2A4A.md` içindeki 6 açık P1 bulgusu kapatıldı: `AUD-K6` (`sched/donate.rs` eski sunucu `recompute_chain_from`), `AUD-K7` (`gdt_tss.rs` `NMI` `IST2` + `#MC` `IST3` ayrık `8 KiB` yığınlar, `cases=9/9`), `AUD-K8` (`quiesce_slot_for_cspace` tam sıfırlama + `VT-d` scrub), `AUD-U3` (`ioring.rs` `user_tag` doğrulaması + sınırlı bekleme & sağlık sorgusu), `AUD-U4` (`dry_blk.rs` zaman aşımında `poisoned=true` + `reset_device`), `AUD-U8` (`dry_broker.rs` `ipc_timeout_tsc` + `ISLAND_STATE_FAULTED` hata yanıtı; panic/exit kaldırıldı).
+     - Uçtan uca doğrulama (`dry-hw-test.elf`, `tools/qemu_p8_hw_validators.py` `p8a_hw_foundations_vtd_msi_bar64_e2e`) `95/95` QEMU + `5/5` SMP/RAM matrisiyle (`leaked_frames=0`) geçirildi.

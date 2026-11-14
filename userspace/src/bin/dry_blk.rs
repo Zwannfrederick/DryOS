@@ -98,6 +98,7 @@ struct VirtioBlkHw {
     total_sectors: u64,
     io_ops: u64,
     flush_ops: u64,
+    poisoned: bool,
 }
 
 fn log_line(lb: &LineBuilder) {
@@ -197,7 +198,7 @@ impl VirtioBlkHw {
             mmio_write32(common + 0x08, 0);
             mmio_write32(common + 0x0c, drv_feat_lo);
             mmio_write32(common + 0x08, 1);
-            mmio_write32(common + 0x0c, VIRTIO_F_VERSION_1_HI);
+            mmio_write32(common + 0x0c, dev_feat_hi & 0x3);
 
             let status_feat = VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK;
             mmio_write8(common + 0x14, status_feat);
@@ -255,6 +256,7 @@ impl VirtioBlkHw {
                 total_sectors,
                 io_ops: 0,
                 flush_ops: 0,
+                poisoned: false,
             })
         }
     }
@@ -263,11 +265,20 @@ impl VirtioBlkHw {
         // SAFETY: Validated `common_cfg` MMIO register.
         unsafe {
             mmio_write8(self.common_base + 0x14, 0);
+            for _ in 0..10_000 {
+                if mmio_read8(self.common_base + 0x14) == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
             let _ = mmio_read8(self.isr_addr);
         }
     }
 
     fn submit_sync(&mut self, req_type: u32, sector: u64, byte_len: u32) -> Result<(), isize> {
+        if self.poisoned {
+            return Err(EIO_RING);
+        }
         let hdr = VirtioBlkReqHdr {
             req_type,
             reserved: 0,
@@ -372,6 +383,8 @@ impl VirtioBlkHw {
                 }
             }
             if !completed {
+                self.poisoned = true;
+                self.reset_device();
                 return Err(EIO_RING);
             }
             fence(Ordering::Acquire);

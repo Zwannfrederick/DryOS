@@ -165,6 +165,38 @@ global_asm!(
     "ISR_NOERR 61",
     "ISR_NOERR 62",
     "ISR_NOERR 63",
+    "ISR_NOERR 64",
+    "ISR_NOERR 65",
+    "ISR_NOERR 66",
+    "ISR_NOERR 67",
+    "ISR_NOERR 68",
+    "ISR_NOERR 69",
+    "ISR_NOERR 70",
+    "ISR_NOERR 71",
+    "ISR_NOERR 72",
+    "ISR_NOERR 73",
+    "ISR_NOERR 74",
+    "ISR_NOERR 75",
+    "ISR_NOERR 76",
+    "ISR_NOERR 77",
+    "ISR_NOERR 78",
+    "ISR_NOERR 79",
+    "ISR_NOERR 80",
+    "ISR_NOERR 81",
+    "ISR_NOERR 82",
+    "ISR_NOERR 83",
+    "ISR_NOERR 84",
+    "ISR_NOERR 85",
+    "ISR_NOERR 86",
+    "ISR_NOERR 87",
+    "ISR_NOERR 88",
+    "ISR_NOERR 89",
+    "ISR_NOERR 90",
+    "ISR_NOERR 91",
+    "ISR_NOERR 92",
+    "ISR_NOERR 93",
+    "ISR_NOERR 94",
+    "ISR_NOERR 95",
     "ISR_NOERR 237",
     "ISR_NOERR 238",
     "ISR_NOERR 239",
@@ -198,6 +230,8 @@ global_asm!(
     "    cmp qword ptr [rsp + 120], 2",
     "    je .Lisr_check_gs_msr",
     "    cmp qword ptr [rsp + 120], 8",
+    "    je .Lisr_check_gs_msr",
+    "    cmp qword ptr [rsp + 120], 18",
     "    jne .Lisr_gs_ready",
     ".Lisr_check_gs_msr:",
     "    mov ecx, 0xc0000101",
@@ -285,6 +319,38 @@ extern "C" {
     fn dry_isr_stub_61();
     fn dry_isr_stub_62();
     fn dry_isr_stub_63();
+    fn dry_isr_stub_64();
+    fn dry_isr_stub_65();
+    fn dry_isr_stub_66();
+    fn dry_isr_stub_67();
+    fn dry_isr_stub_68();
+    fn dry_isr_stub_69();
+    fn dry_isr_stub_70();
+    fn dry_isr_stub_71();
+    fn dry_isr_stub_72();
+    fn dry_isr_stub_73();
+    fn dry_isr_stub_74();
+    fn dry_isr_stub_75();
+    fn dry_isr_stub_76();
+    fn dry_isr_stub_77();
+    fn dry_isr_stub_78();
+    fn dry_isr_stub_79();
+    fn dry_isr_stub_80();
+    fn dry_isr_stub_81();
+    fn dry_isr_stub_82();
+    fn dry_isr_stub_83();
+    fn dry_isr_stub_84();
+    fn dry_isr_stub_85();
+    fn dry_isr_stub_86();
+    fn dry_isr_stub_87();
+    fn dry_isr_stub_88();
+    fn dry_isr_stub_89();
+    fn dry_isr_stub_90();
+    fn dry_isr_stub_91();
+    fn dry_isr_stub_92();
+    fn dry_isr_stub_93();
+    fn dry_isr_stub_94();
+    fn dry_isr_stub_95();
     fn dry_isr_stub_237();
     fn dry_isr_stub_238();
     fn dry_isr_stub_239();
@@ -387,6 +453,12 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
         crate::irq::on_external_irq(frame.vector as u8);
         return;
     }
+    if frame.vector >= (crate::apic::VEC_PCI_MSI_BASE as u64)
+        && frame.vector <= (crate::apic::VEC_PCI_MSI_LAST as u64)
+    {
+        crate::irq::msi::on_pci_msi_interrupt(frame.vector as u8);
+        return;
+    }
 
     if frame.vector == (crate::apic::VEC_PIC_SPURIOUS_MASTER as u64)
         || frame.vector == (crate::apic::VEC_PIC_SPURIOUS_SLAVE as u64)
@@ -481,7 +553,12 @@ pub fn init_bsp_idt() {
     unsafe {
         let table = &mut *IDT.0.get();
         for (vec, stub) in stubs.iter().enumerate() {
-            let ist = if vec == 8 { DF_IST_INDEX } else { 0 };
+            let ist = match vec {
+                2 => crate::gdt_tss::NMI_IST_INDEX,
+                8 => DF_IST_INDEX,
+                18 => crate::gdt_tss::MC_IST_INDEX,
+                _ => 0,
+            };
             let dpl = if vec == 3 { 3 } else { 0 };
             table[vec] = IdtEntry::gate(*stub as usize as u64, ist, dpl);
         }
@@ -501,6 +578,20 @@ pub fn init_bsp_idt() {
         ];
         for (idx, stub) in ext_stubs.iter().enumerate() {
             table[(crate::apic::VEC_EXT_IRQ_BASE as usize) + idx] =
+                IdtEntry::gate(*stub as usize as u64, 0, 0);
+        }
+        let msi_stubs: [unsafe extern "C" fn(); 32] = [
+            dry_isr_stub_64, dry_isr_stub_65, dry_isr_stub_66, dry_isr_stub_67,
+            dry_isr_stub_68, dry_isr_stub_69, dry_isr_stub_70, dry_isr_stub_71,
+            dry_isr_stub_72, dry_isr_stub_73, dry_isr_stub_74, dry_isr_stub_75,
+            dry_isr_stub_76, dry_isr_stub_77, dry_isr_stub_78, dry_isr_stub_79,
+            dry_isr_stub_80, dry_isr_stub_81, dry_isr_stub_82, dry_isr_stub_83,
+            dry_isr_stub_84, dry_isr_stub_85, dry_isr_stub_86, dry_isr_stub_87,
+            dry_isr_stub_88, dry_isr_stub_89, dry_isr_stub_90, dry_isr_stub_91,
+            dry_isr_stub_92, dry_isr_stub_93, dry_isr_stub_94, dry_isr_stub_95,
+        ];
+        for (idx, stub) in msi_stubs.iter().enumerate() {
+            table[(crate::apic::VEC_PCI_MSI_BASE as usize) + idx] =
                 IdtEntry::gate(*stub as usize as u64, 0, 0);
         }
         // `IST = 0`: `TrapFrame` lands on the active thread's private 16 KiB stack (`#DF` owns `IST1`).
@@ -553,4 +644,10 @@ pub fn verify_breakpoint_trap_recovery(pcpu: &'static PerCpuData) -> (u64, u64) 
 
 pub fn total_bp_traps() -> u64 {
     TOTAL_BP_TRAPS.load(Ordering::Acquire)
+}
+
+/// Inspect the hardware IST index (`0..=7`) configured in IDT gate `vec`.
+pub fn idt_gate_ist(vec: u8) -> u8 {
+    // SAFETY: `IDT` gates are initialized at boot in `'static` `.bss`.
+    unsafe { (&*IDT.0.get())[vec as usize].ist & 0x7 }
 }

@@ -6,7 +6,11 @@ use core::ptr::{copy_nonoverlapping, read_volatile, write_bytes, write_volatile}
 use core::sync::atomic::{fence, Ordering};
 
 use crate::abi_ext::{sys_dev_map, sys_dma_alloc, sys_dma_alloc_2m, UserVirtioPciInfo};
-use crate::{sys_cap_revoke, sys_vspace_map, VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K};
+use crate::{
+    sys_cap_revoke, sys_irq_ack, sys_irq_bind, sys_notify_create, sys_notify_wait, sys_vspace_map,
+    IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, IRQF_ONESHOT, MSG_FLAG_NON_BLOCKING, VSPACE_MAP_OP_UNMAP_2M,
+    VSPACE_MAP_OP_UNMAP_4K,
+};
 
 const GPU_BAR_VADDR: u64 = 0x2540_0000;
 const GPU_VQ_VADDR: u64 = 0x2541_0000;
@@ -166,6 +170,8 @@ pub struct VirtioGpu2d {
     common_base: u64,
     notify_q0_addr: u64,
     isr_addr: u64,
+    pci_cap: u64,
+    irq_notif: u64,
     cmd_pa: u64,
     vq_cap: u64,
     cmd_cap: u64,
@@ -174,11 +180,13 @@ pub struct VirtioGpu2d {
     queue_size: u16,
     avail_idx: u16,
     last_used_idx: u16,
+    pub msix_vec: u8,
     pub vendor_id: u16,
     pub device_id: u16,
     pub width: u32,
     pub height: u32,
     pub virtq_cmds: u64,
+    pub msi_irqs: u64,
     pub transfer_bytes: u64,
 }
 
@@ -246,14 +254,15 @@ impl VirtioGpu2d {
             mmio_w8(common + 0x14, status);
 
             mmio_w32(common, 1);
-            if (mmio_r32(common + 0x04) & VIRTIO_F_VERSION_1_HI) == 0 {
+            let dev_feat_hi = mmio_r32(common + 0x04);
+            if (dev_feat_hi & VIRTIO_F_VERSION_1_HI) == 0 {
                 mmio_w8(common + 0x14, VIRTIO_STATUS_FAILED);
                 return Err(194);
             }
             mmio_w32(common + 0x08, 0);
             mmio_w32(common + 0x0c, 0);
             mmio_w32(common + 0x08, 1);
-            mmio_w32(common + 0x0c, VIRTIO_F_VERSION_1_HI);
+            mmio_w32(common + 0x0c, dev_feat_hi & 0x3);
 
             status |= VIRTIO_STATUS_FEATURES_OK;
             mmio_w8(common + 0x14, status);
@@ -281,6 +290,31 @@ impl VirtioGpu2d {
             mmio_w64_split(common + 0x28, vq_pa + VQ_AVAIL_OFF);
             mmio_w64_split(common + 0x30, vq_pa + VQ_USED_OFF);
             let q_notify_off = mmio_r16(common + 0x1e) as u64;
+
+            let mut irq_notif = 0u64;
+            let mut msix_vec = 0u8;
+            if let Ok(ncap) = sys_notify_create(0) {
+                match sys_irq_bind(pci_cap, ncap, IRQF_ONESHOT) {
+                    Ok(vec) => {
+                        irq_notif = ncap;
+                        msix_vec = vec;
+                    }
+                    Err(_) => {
+                        let _ = sys_cap_revoke(ncap, 2);
+                    }
+                }
+            }
+            mmio_w16(common + 0x10, 0xffff);
+            if irq_notif != 0 {
+                mmio_w16(common + 0x1a, 0);
+                if mmio_r16(common + 0x1a) == 0xffff {
+                    let _ = sys_irq_ack(pci_cap, IRQ_ACK_UNBIND);
+                    let _ = sys_cap_revoke(irq_notif, 2);
+                    irq_notif = 0;
+                    msix_vec = 0;
+                }
+            }
+
             mmio_w16(common + 0x1c, 1);
 
             status |= VIRTIO_STATUS_DRIVER_OK;
@@ -292,6 +326,8 @@ impl VirtioGpu2d {
                     + info.notify_off as u64
                     + q_notify_off * info.notify_mult as u64,
                 isr_addr: GPU_BAR_VADDR + info.isr_off as u64,
+                pci_cap,
+                irq_notif,
                 cmd_pa,
                 vq_cap,
                 cmd_cap,
@@ -300,15 +336,20 @@ impl VirtioGpu2d {
                 queue_size: qsz,
                 avail_idx: 0,
                 last_used_idx: 0,
+                msix_vec,
                 vendor_id: info.vendor_id,
                 device_id: info.device_id,
                 width: 1280,
                 height: 800,
                 virtq_cmds: 0,
+                msi_irqs: 0,
                 transfer_bytes: 0,
             };
 
-            dev.setup_scanout_2d()?;
+            if let Err(err) = dev.setup_scanout_2d() {
+                dev.shutdown_clean();
+                return Err(err);
+            }
             Ok(dev)
         }
     }
@@ -350,10 +391,36 @@ impl VirtioGpu2d {
             mmio_w16(self.notify_q0_addr, 0);
 
             let used_idx_ptr = (GPU_VQ_VADDR + VQ_USED_OFF + 2) as *const u16;
+            if self.irq_notif != 0 {
+                for _attempt in 0..4u32 {
+                    match sys_notify_wait(self.irq_notif, 0, 20_000_000) {
+                        Ok(bits) if bits != 0 => {
+                            let _ = sys_irq_ack(self.pci_cap, IRQ_ACK_UNMASK);
+                            self.msi_irqs = self.msi_irqs.wrapping_add(1);
+                            fence(Ordering::Acquire);
+                            if read_volatile(used_idx_ptr) != self.last_used_idx {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
             for _ in 0..4_000_000u32 {
                 fence(Ordering::Acquire);
                 let hw_used = read_volatile(used_idx_ptr);
                 if hw_used != self.last_used_idx {
+                    if self.irq_notif != 0 {
+                        if let Ok(bits) =
+                            sys_notify_wait(self.irq_notif, MSG_FLAG_NON_BLOCKING as u64, 0)
+                        {
+                            if bits != 0 {
+                                let _ = sys_irq_ack(self.pci_cap, IRQ_ACK_UNMASK);
+                                self.msi_irqs = self.msi_irqs.wrapping_add(1);
+                            }
+                        }
+                    }
                     let _ = mmio_r8(self.isr_addr);
                     self.last_used_idx = self.last_used_idx.wrapping_add(1);
                     self.virtq_cmds = self.virtq_cmds.wrapping_add(1);
@@ -528,6 +595,12 @@ impl VirtioGpu2d {
                 VIRTIO_GPU_RESP_OK_NODATA,
             );
             mmio_w8(self.common_base + 0x14, 0);
+        }
+        if self.irq_notif != 0 {
+            let _ = sys_irq_ack(self.pci_cap, IRQ_ACK_UNBIND);
+            let _ = sys_cap_revoke(self.irq_notif, 2);
+            self.irq_notif = 0;
+            self.msix_vec = 0;
         }
         let _ = sys_vspace_map(self.vq_cap, GPU_VQ_VADDR, VSPACE_MAP_OP_UNMAP_4K);
         let _ = sys_vspace_map(self.cmd_cap, GPU_CMD_VADDR, VSPACE_MAP_OP_UNMAP_4K);

@@ -11,13 +11,14 @@
 #![no_main]
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use dry_userspace::abi_ext::{sys_dev_map, sys_dma_alloc, UserVirtioPciInfo};
 use dry_userspace::init_legacy::log_line;
 use dry_userspace::ioring::{IoCqe, IoRingSharedPage};
 use dry_userspace::island_proto::{
-    island_session_badge, BADGE_ISLAND_BROKER, IPC_OP_ERR_STALE_GEN, ISLAND_DOORBELL_CTL,
-    MOCK_OP_BIND_NOTIF, MOCK_OP_INIT_ISLAND, MOCK_OP_SET_PARK_MODE, MOCK_OP_WAKE_PROBE,
+    island_session_badge, BADGE_ISLAND_BROKER, IPC_OP_ERR_STALE_GEN, MOCK_OP_BIND_NOTIF,
+    MOCK_OP_INIT_ISLAND, MOCK_OP_SET_PARK_MODE, MOCK_OP_WAKE_PROBE,
 };
 use dry_userspace::lx_drv_proto::{
     IORING_OP_RNG_READ, IORING_RNG_DATA_OFFSET, LX_OP_BIND_PCI, LX_OP_READ_ENTROPY,
@@ -26,16 +27,44 @@ use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_revoke, sys_exit,
     sys_frame_alloc, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_reply_with_grant,
-    sys_notify_signal, sys_notify_wait, sys_sysinfo, sys_vspace_map, UserIpcRecvExt, UserSysInfo,
-    BADGE_SUPERVISOR, EAGAIN, EINVAL, EPERM, EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2,
-    IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, RIGHT_GRANT, RIGHT_MAP,
-    RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW,
+    sys_irq_ack, sys_irq_bind, sys_notify_bind_tcb, sys_notify_create, sys_notify_signal,
+    sys_notify_unbind_tcb, sys_notify_wait, sys_vspace_map, UserIpcRecvExt, BADGE_SUPERVISOR,
+    EINVAL, EPERM, EREVOKED, IPC_OP_BOUND_NOTIF, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, IRQF_ONESHOT, IRQ_ACK_UNBIND,
+    IRQ_ACK_UNMASK, MSG_FLAG_NON_BLOCKING, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE,
+    RIGHT_WRITE, VSPACE_MAP_OP_4K_RW,
 };
 
 const ISLAND_RING_VADDR: u64 = 0x2400_0000;
 const VIRTIO_RNG_BAR_VADDR: u64 = 0x2410_0000;
 const DMA_VQ_VADDR: u64 = 0x2420_0000;
 const DMA_SLAB_VADDR: u64 = 0x2420_1000;
+
+static ACTIVE_PCI_CAP: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_IRQ_NOTIF: AtomicU64 = AtomicU64::new(0);
+static MSIX_IRQS_HANDLED: AtomicU64 = AtomicU64::new(0);
+
+#[no_mangle]
+pub extern "C" fn dry_lx_wait_vq_irq(timeout_tsc: u64) -> i32 {
+    let notif = ACTIVE_IRQ_NOTIF.load(Ordering::Acquire);
+    let pci_cap = ACTIVE_PCI_CAP.load(Ordering::Acquire);
+    if notif == 0 || pci_cap == 0 {
+        return 0;
+    }
+    let flags = if timeout_tsc == 0 {
+        MSG_FLAG_NON_BLOCKING as u64
+    } else {
+        0
+    };
+    if let Ok(bits) = sys_notify_wait(notif, flags, timeout_tsc) {
+        if bits != 0 {
+            MSIX_IRQS_HANDLED.fetch_add(1, Ordering::Relaxed);
+            let _ = sys_irq_ack(pci_cap, IRQ_ACK_UNMASK);
+            return 1;
+        }
+    }
+    0
+}
 
 #[link(name = "lx_virtio_rng", kind = "static")]
 extern "C" {
@@ -49,6 +78,7 @@ extern "C" {
         vq_pa: u64,
         slab_va: u64,
         slab_pa: u64,
+        use_msix: u32,
     ) -> i32;
     fn lx_shim_read_entropy(out_buf: *mut u8, len: usize) -> i32;
     fn lx_shim_shutdown_device();
@@ -138,10 +168,6 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
         && sys_dma_alloc(drv_ep_cap, DMA_VQ_VADDR).is_err()
         && sys_dev_map(drv_ep_cap, VIRTIO_RNG_BAR_VADDR, &mut dummy_info).is_err();
 
-    let mut sys = UserSysInfo::default();
-    let _ = sys_sysinfo(&mut sys);
-    let ctl_wait_tsc = 50_000u64.saturating_mul(sys.tsc_mhz.max(1000));
-
     let ring_cap = match sys_frame_alloc(0) {
         Ok(c) => c,
         Err(_) => sys_exit(191),
@@ -156,15 +182,23 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
     let mut sq_notif = 0u64;
     let mut cq_notif = 0u64;
     let mut pci_cap = 0u64;
+    let mut irq_notif = 0u64;
+    let mut msix_vec = 0u64;
     let mut pci_bound = false;
-    let mut park_mode = 0u64;
     let mut processed_ops = 0u64;
     let mut ring_ops = 0u64;
     let mut wake_events = 0u64;
 
     loop {
         let mut ext = UserIpcRecvExt::default();
-        let (tag, tok, mrs, t_awake) = if park_mode == 1 && sq_notif != 0 {
+        let (tag, tok, mrs, t_awake) = match sys_ipc_recv_ext(drv_ep_cap, 0, 0, &mut ext) {
+            Ok((rtag, rtok, rmrs)) => (rtag, rtok, rmrs, rdtsc_user()),
+            Err(_) => break,
+        };
+        wake_events = wake_events.wrapping_add(1);
+
+        let op = msg_tag_label(tag);
+        if op == IPC_OP_BOUND_NOTIF {
             let mut drained = false;
             while let Some(sqe) = ring.pop_sqe() {
                 let cqe = execute_rng_sqe(sqe, generation, pci_bound);
@@ -176,42 +210,8 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
             if drained && cq_notif != 0 {
                 let _ = sys_notify_signal(cq_notif, 1);
             }
-
-            let bits = match sys_notify_wait(sq_notif, 0, 0) {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            let t_notif = rdtsc_user();
-            wake_events = wake_events.wrapping_add(1);
-
-            while let Some(sqe) = ring.pop_sqe() {
-                let cqe = execute_rng_sqe(sqe, generation, pci_bound);
-                let _ = ring.push_cqe(cqe);
-                processed_ops = processed_ops.wrapping_add(1);
-                ring_ops = ring_ops.wrapping_add(1);
-            }
-            if cq_notif != 0 {
-                let _ = sys_notify_signal(cq_notif, 1);
-            }
-
-            if (bits & ISLAND_DOORBELL_CTL) == 0 {
-                continue;
-            }
-            let (ctag, ctok, cmrs) = match sys_ipc_recv_ext(drv_ep_cap, 0, ctl_wait_tsc, &mut ext) {
-                Ok(v) => v,
-                Err(ETIMEDOUT | EAGAIN) => continue,
-                Err(_) => break,
-            };
-            (ctag, ctok, cmrs, t_notif)
-        } else {
-            let (rtag, rtok, rmrs) = match sys_ipc_recv_ext(drv_ep_cap, 0, 0, &mut ext) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-            (rtag, rtok, rmrs, rdtsc_user())
-        };
-
-        let op = msg_tag_label(tag);
+            continue;
+        }
         let from_broker = ext.sender_badge == BADGE_ISLAND_BROKER;
         let from_sup = ext.sender_badge == BADGE_SUPERVISOR;
         let expected_sess = island_session_badge(generation);
@@ -227,8 +227,16 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     continue;
                 }
                 if mrs[0] == 0 {
+                    if sq_notif != 0 {
+                        let _ = sys_notify_unbind_tcb(sq_notif);
+                        let _ = sys_cap_revoke(sq_notif, 1);
+                    }
                     sq_notif = ext.transferred_cap;
+                    let _ = sys_notify_bind_tcb(sq_notif);
                 } else {
+                    if cq_notif != 0 {
+                        let _ = sys_cap_revoke(cq_notif, 1);
+                    }
                     cq_notif = ext.transferred_cap;
                 }
                 if tok != 0 {
@@ -254,6 +262,16 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
                     continue;
                 };
+                if let Ok(ncap) = sys_notify_create(0) {
+                    if let Ok(vec) = sys_irq_bind(pci_cap, ncap, IRQF_ONESHOT) {
+                        irq_notif = ncap;
+                        msix_vec = vec as u64;
+                        ACTIVE_PCI_CAP.store(pci_cap, Ordering::Release);
+                        ACTIVE_IRQ_NOTIF.store(ncap, Ordering::Release);
+                    } else {
+                        let _ = sys_cap_revoke(ncap, 2);
+                    }
+                }
                 let Ok((_, vq_pa)) = sys_dma_alloc(pci_cap, DMA_VQ_VADDR) else {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
                     continue;
@@ -274,6 +292,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                         vq_pa,
                         DMA_SLAB_VADDR,
                         slab_pa,
+                        u32::from(irq_notif != 0),
                     )
                 };
                 if init_rc != 0 {
@@ -289,7 +308,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                         drv_ep_cap,
                         tok,
                         pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
-                        [vdev_packed, pci_info.bus_dev_fn as u64, compl, 0],
+                        [vdev_packed, pci_info.bus_dev_fn as u64, compl, msix_vec],
                     );
                 }
             }
@@ -304,6 +323,8 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 lb.push_u64(generation);
                 lb.push_bytes(b" virtio-rng.c probed pci_bound=");
                 lb.push_u64(u64::from(pci_bound));
+                lb.push_bytes(b" msix_vec=");
+                lb.push_u64(msix_vec);
                 log_line(&lb);
                 if tok != 0 {
                     let _ = sys_ipc_reply_with_grant(
@@ -322,7 +343,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
                     continue;
                 }
-                park_mode = if mrs[0] != 0 { 1 } else { 0 };
+                let park_mode = if mrs[0] != 0 { 1 } else { 0 };
                 if tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         drv_ep_cap,
@@ -409,10 +430,23 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     }
                 }
                 if sq_notif != 0 {
+                    let _ = sys_notify_unbind_tcb(sq_notif);
                     let _ = sys_cap_revoke(sq_notif, 1);
                 }
                 if cq_notif != 0 {
                     let _ = sys_cap_revoke(cq_notif, 1);
+                }
+                if irq_notif != 0 {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"[DRY-LX-RNG] MSIX clean_exit gen=");
+                    lb.push_u64(generation);
+                    lb.push_bytes(b" msix_irqs=");
+                    lb.push_u64(MSIX_IRQS_HANDLED.load(Ordering::Acquire));
+                    log_line(&lb);
+                    ACTIVE_IRQ_NOTIF.store(0, Ordering::Release);
+                    ACTIVE_PCI_CAP.store(0, Ordering::Release);
+                    let _ = sys_irq_ack(pci_cap, IRQ_ACK_UNBIND);
+                    let _ = sys_cap_revoke(irq_notif, 2);
                 }
                 if pci_cap != 0 {
                     let _ = sys_cap_revoke(pci_cap, 1);

@@ -26,27 +26,29 @@ use crate::vspace::tlb::poll_and_ack_pending_shootdown;
 use crate::ipc::{check_blocking_ipc_allowed, map_cap_err_to_sys};
 
 pub const MAX_NOTIFICATIONS: usize = 32;
-const NO_WAITER: u16 = u16::MAX;
+pub(super) const NO_WAITER: u16 = u16::MAX;
 
-const WAIT_IDLE: u8 = 0;
+pub(super) const WAIT_IDLE: u8 = 0;
 const WAIT_BLOCKED: u8 = 1;
 const WAIT_DELIVERED: u8 = 2;
 const WAIT_FAILED: u8 = 3;
 
 #[repr(C, align(64))]
-struct NotifSlot {
-    allocated: AtomicBool,
-    closed: AtomicBool,
-    wait_state: AtomicU8,
+pub(super) struct NotifSlot {
+    pub(super) allocated: AtomicBool,
+    pub(super) closed: AtomicBool,
+    pub(super) wait_state: AtomicU8,
     lock: AtomicBool,
-    generation: AtomicU32,
-    pending_bits: AtomicU64,
+    pub(super) generation: AtomicU32,
+    pub(super) pending_bits: AtomicU64,
     delivered_bits: AtomicU64,
-    waiter_slot: AtomicU16,
+    pub(super) waiter_slot: AtomicU16,
     waiter_cpu: AtomicU16,
     waiter_gen26: AtomicU32,
     waiter_cap_gslot: AtomicU32,
     fail_errno: AtomicI32,
+    pub(super) bound_target: AtomicU64,
+    pub(super) bound_cap_gslot: AtomicU32,
 }
 
 impl NotifSlot {
@@ -64,14 +66,17 @@ impl NotifSlot {
             waiter_gen26: AtomicU32::new(0),
             waiter_cap_gslot: AtomicU32::new(u32::MAX),
             fail_errno: AtomicI32::new(0),
+            bound_target: AtomicU64::new(0),
+            bound_cap_gslot: AtomicU32::new(u32::MAX),
         }
     }
 }
 
-static NOTIF_TABLE: [NotifSlot; MAX_NOTIFICATIONS] = [const { NotifSlot::new() }; MAX_NOTIFICATIONS];
+pub(super) static NOTIF_TABLE: [NotifSlot; MAX_NOTIFICATIONS] =
+    [const { NotifSlot::new() }; MAX_NOTIFICATIONS];
 
 #[inline]
-fn with_notif_lock<R>(n: &NotifSlot, f: impl FnOnce() -> R) -> R {
+pub(super) fn with_notif_lock<R>(n: &NotifSlot, f: impl FnOnce() -> R) -> R {
     let saved_if = irq_save_cli();
     let cpu_idx = read_gs_u64_at_8() as usize;
     while n
@@ -127,6 +132,8 @@ pub fn notif_create(
             n.waiter_slot.store(NO_WAITER, Ordering::Release);
             n.waiter_cap_gslot.store(u32::MAX, Ordering::Release);
             n.fail_errno.store(0, Ordering::Release);
+            n.bound_target.store(0, Ordering::Release);
+            n.bound_cap_gslot.store(u32::MAX, Ordering::Release);
 
             match insert_root_cap(
                 cspace_id,
@@ -181,7 +188,16 @@ pub fn notif_signal(
             fence(Ordering::SeqCst);
 
             let mut wake_target: Option<(ThreadId, usize)> = None;
-            if n.waiter_slot.load(Ordering::SeqCst) != NO_WAITER {
+            let bt = n.bound_target.load(Ordering::SeqCst);
+            if bt != 0 {
+                if !n.closed.load(Ordering::Acquire) {
+                    if let Some((b_slot, b_gen, b_cpu)) =
+                        crate::ipc::bound_notif::unpack_bound_target(bt)
+                    {
+                        wake_target = Some((ThreadId::new(b_slot, b_gen), b_cpu));
+                    }
+                }
+            } else if n.waiter_slot.load(Ordering::SeqCst) != NO_WAITER {
                 with_notif_lock(n, || {
                     if n.wait_state.load(Ordering::Acquire) == WAIT_BLOCKED {
                         let w_slot = n.waiter_slot.load(Ordering::Relaxed);
@@ -228,7 +244,19 @@ pub(crate) fn notif_signal_from_irq(obj_id: u32, expected_gen: u32, signal_bits:
     fence(Ordering::SeqCst);
 
     let mut wake_target: Option<(ThreadId, usize)> = None;
-    if n.waiter_slot.load(Ordering::SeqCst) != NO_WAITER {
+    let bt = n.bound_target.load(Ordering::SeqCst);
+    if bt != 0 {
+        if n.allocated.load(Ordering::Acquire)
+            && !n.closed.load(Ordering::Acquire)
+            && n.generation.load(Ordering::Acquire) == expected_gen
+        {
+            if let Some((b_slot, b_gen, b_cpu)) =
+                crate::ipc::bound_notif::unpack_bound_target(bt)
+            {
+                wake_target = Some((ThreadId::new(b_slot, b_gen), b_cpu));
+            }
+        }
+    } else if n.waiter_slot.load(Ordering::SeqCst) != NO_WAITER {
         with_notif_lock(n, || {
             if n.allocated.load(Ordering::Acquire)
                 && !n.closed.load(Ordering::Acquire)
@@ -280,6 +308,9 @@ pub fn notif_wait(
             let n = &NOTIF_TABLE[res.obj_id as usize];
             if n.closed.load(Ordering::Acquire) {
                 return Err(CapError::Revoked);
+            }
+            if n.bound_target.load(Ordering::Acquire) != 0 {
+                return Err(CapError::BusyActiveObject);
             }
             let word = n.pending_bits.swap(0, Ordering::AcqRel);
             Ok((res.obj_id as usize, res.expected_obj_gen, res.global_slot, word))
@@ -336,7 +367,8 @@ pub fn notif_wait(
                     return;
                 }
                 // `AUD-K4b`: a delivered-but-not-yet-resumed waiter still owns `wait_state`.
-                if n.waiter_slot.load(Ordering::Acquire) != NO_WAITER
+                if n.bound_target.load(Ordering::Acquire) != 0
+                    || n.waiter_slot.load(Ordering::Acquire) != NO_WAITER
                     || n.wait_state.load(Ordering::Acquire) != WAIT_IDLE
                 {
                     inner_res = Err(SysError::Busy);
@@ -498,6 +530,15 @@ pub(crate) fn on_notif_cap_revoked(obj_id: u32, expected_gen: u32, global_slot: 
         if !n.allocated.load(Ordering::Acquire) || n.generation.load(Ordering::Acquire) != expected_gen {
             return;
         }
+        if n.bound_target.load(Ordering::Acquire) != 0
+            && n.bound_cap_gslot.load(Ordering::Acquire) == global_slot
+        {
+            let bt = n.bound_target.swap(0, Ordering::AcqRel);
+            n.bound_cap_gslot.store(u32::MAX, Ordering::Release);
+            if let Some((b_slot, _, _)) = crate::ipc::bound_notif::unpack_bound_target(bt) {
+                crate::ipc::bound_notif::clear_slot_matching(b_slot, idx as u16, expected_gen);
+            }
+        }
         if n.wait_state.load(Ordering::Acquire) == WAIT_BLOCKED
             && n.waiter_cap_gslot.load(Ordering::Acquire) == global_slot
         {
@@ -529,6 +570,12 @@ pub(crate) fn destroy_notif(obj_id: u32, expected_gen: u32) {
             return;
         }
         n.closed.store(true, Ordering::Release);
+        let bt = n.bound_target.swap(0, Ordering::AcqRel);
+        n.bound_cap_gslot.store(u32::MAX, Ordering::Release);
+        if let Some((b_slot, b_gen, b_cpu)) = crate::ipc::bound_notif::unpack_bound_target(bt) {
+            crate::ipc::bound_notif::clear_slot_matching(b_slot, idx as u16, expected_gen);
+            wake_target = Some((ThreadId::new(b_slot, b_gen), b_cpu));
+        }
         if n.wait_state.load(Ordering::Acquire) == WAIT_BLOCKED {
             let w_slot = n.waiter_slot.swap(NO_WAITER, Ordering::AcqRel);
             if w_slot != NO_WAITER {

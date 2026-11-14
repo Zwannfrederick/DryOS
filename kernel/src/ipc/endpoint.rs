@@ -441,6 +441,17 @@ fn recv_locked(
         }));
     }
 
+    if let Some(bits) = crate::ipc::bound_notif::poll_bound_notif_for_recv(cur_slot) {
+        return Ok(Some(IpcFastOut {
+            tag: crate::ipc::MsgTag::new(crate::ipc::IPC_OP_BOUND_NOTIF, 0, 0, 0),
+            mrs: [0; 4],
+            sender_badge: bits,
+            reply_token: 0,
+            transferred_cap: CapPtr::NULL,
+            extra_len: 0,
+        }));
+    }
+
     if non_blocking {
         return Err(SysError::WouldBlock);
     }

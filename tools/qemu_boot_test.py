@@ -30,6 +30,7 @@ from qemu_p4_validators import run_p4_suite
 from qemu_p5_island_validators import run_p5_island_suite
 from qemu_p6_lx_island_validators import run_p6_lx_island_suite
 from qemu_p7_gpu_validators import run_p7_gpu_suite
+from qemu_p8_hw_validators import run_p8_hw_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -69,6 +70,7 @@ USERSPACE_MODS = (
     ("dry-fpu-test", "dry-fpu-test.elf"),
     ("dry-fault-test", "dry-fault-test.elf"),
     ("dry-gpu", "dry-gpu.elf"),
+    ("dry-hw-test", "dry-hw-test.elf"),
 )
 
 
@@ -527,7 +529,7 @@ def assert_positive_smp_boot(
                 f"[DRY-USER-SEC] PASS: cpus={smp}",
                 f"[DRY-USER-BENCH] PASS: cpus={smp}",
                 f"[DRY-FPU] PASS: cpus={smp}",
-                f"[DRY-AUDIT-REG] PASS: cpus={smp} cases=6/6",
+                f"[DRY-AUDIT-REG] PASS: cpus={smp} cases=9/9",
                 f"[DRY-FAULT-EP] PASS: cpus={smp} delivered=20 resumed=17",
                 f"[DRY-SERVICES] PASS: cpus={smp}",
                 f"[DRY-IPC-SEC] PASS: cpus={smp}",
@@ -592,6 +594,7 @@ def main() -> None:
     parser.add_argument("--island-only", action="store_true", help="Run only Milestone 2C-0 Adaptive Driver Islands PoC suite")
     parser.add_argument("--lx-island-only", action="store_true", help="Run only Milestone 2C-1 Genuine Linux virtio-rng Driver Island suite")
     parser.add_argument("--gpu-only", action="store_true", help="Run only Priority C VirtIO-GPU 2D scanout & GOP fallback suite")
+    parser.add_argument("--p8-only", action="store_true", help="Run only Milestone 2C-2 VT-d, MSI/MSI-X, BAR64 & bound-notification hardware suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -630,6 +633,11 @@ def main() -> None:
     if args.gpu_only:
         n_p7 = run_p7_gpu_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p7} PRIORITY C VIRTIO-GPU SCANOUT & GOP FALLBACK CHECKS PASSED.")
+        return
+
+    if args.p8_only:
+        n_p8 = run_p8_hw_suite(kernel_elf, BUILD_DIR, ROOT, write_mbr_esp_image, run_qemu)
+        print(f"\n[QEMU-TEST] ALL {n_p8} MILESTONE 2C-2 HARDWARE FOUNDATIONS CHECKS PASSED.")
         return
 
     if args.p3_matrix:
@@ -711,12 +719,13 @@ def main() -> None:
     n_p5 = run_p5_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p6 = run_p6_lx_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p7 = run_p7_gpu_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p8 = run_p8_hw_suite(kernel_elf, BUILD_DIR, ROOT, write_mbr_esp_image, run_qemu)
 
     print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7} DETERMINISTIC QEMU CHECKS "
+        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8} DETERMINISTIC QEMU CHECKS "
         f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
-        f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU) PASSED."
+        f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW) PASSED."
     )
 
 

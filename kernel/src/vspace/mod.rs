@@ -480,6 +480,13 @@ pub fn map_mmio_4k(
     if (phys_addr & (PAGE_SIZE_4K - 1)) != 0 {
         return Err(VSpaceError::UnalignedAddress);
     }
+    let max_pa = pte::cpu_max_phys_addr_limit();
+    if phys_addr
+        .checked_add(PAGE_SIZE_4K - 1)
+        .is_none_or(|end_pa| end_pa > max_pa)
+    {
+        return Err(VSpaceError::AddressOverflow);
+    }
     if prot.contains(VmProt::EXEC) {
         return Err(VSpaceError::WxViolation);
     }

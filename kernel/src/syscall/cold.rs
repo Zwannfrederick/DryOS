@@ -21,6 +21,7 @@ use crate::ipc::endpoint::ep_create;
 use crate::ipc::{map_cap_err_to_sys, total_ipc_msgs};
 use crate::ipc::notif::notif_create;
 use crate::irq::ioport::sys_ioport_rw;
+use crate::irq::msi::msi_telemetry;
 use crate::irq::{
     ioapic_present, irq_line_delivered, irq_telemetry, sys_irq_ack, sys_irq_bind,
     IRQ_KEYBOARD_PS2, IRQ_MOUSE_PS2,
@@ -136,6 +137,7 @@ fn sys_sysinfo_impl(user_out_ptr: u64) -> Result<isize, SysError> {
     }
     let (tsc_mhz, uptime_ms, elapsed_tsc) = uptime_telemetry();
     let (ext_irqs, _, _, _) = irq_telemetry();
+    let (msi_irqs, _, _) = msi_telemetry();
     let inv = inventory();
     let free_frames = free_global_frames_snapshot(online);
 
@@ -150,7 +152,7 @@ fn sys_sysinfo_impl(user_out_ptr: u64) -> Result<isize, SysError> {
         uptime_ms,
         elapsed_tsc,
         timer_irqs: GLOBAL_TIMER_IRQS.load(Ordering::Relaxed),
-        total_ext_irqs: ext_irqs,
+        total_ext_irqs: ext_irqs.saturating_add(msi_irqs),
         total_syscalls: syscalls,
         total_ctx_switches: total_ctx_switches(),
         usable_frames_4k: (inv.usable_frames + inv.reclaimable_frames).min(u32::MAX as u64) as u32,

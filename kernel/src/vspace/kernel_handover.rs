@@ -17,9 +17,9 @@ use crate::pmm::{
 };
 use crate::sched::{set_ap_epoch_kind, ApEpochKind, AP_PHASE_DONE_CPUS, AP_PHASE_EPOCH};
 use crate::vspace::pte::{
-    detect_and_enable_cpu_paging_caps, prot_to_pte_flags, pt_indices, PagingHwCaps, VSpaceError,
-    VmProt, PAGE_SIZE_4K, PTE_HUGE_PAGE, PTE_KERNEL_TABLE_INTERMEDIATE, PTE_NX, PTE_PHYS_MASK_4K,
-    PTE_PRESENT, PTE_USER, PTE_WRITABLE,
+    detect_and_enable_cpu_paging_caps, prot_to_pte_flags, pt_indices, vtd_unit_vaddr,
+    PagingHwCaps, VSpaceError, VmProt, KERNEL_VTD_MAX_PAGES, PAGE_SIZE_4K, PTE_HUGE_PAGE,
+    PTE_KERNEL_TABLE_INTERMEDIATE, PTE_NX, PTE_PHYS_MASK_4K, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
 };
 use crate::vspace::{
     alloc_pinned_pt_frame, pt_virt_ptr, tlb, BOOT_CR3_VSPACE_SENTINEL, BOOT_FRAMES_RECLAIMED,
@@ -291,6 +291,37 @@ pub fn init_and_activate_kernel_vspace(
             );
         }
     }
+
+    let drhd_count = crate::iommu::dmar_snapshot().map_or(0, |d| d.drhd_count);
+    for u in 0..drhd_count {
+        let base = crate::iommu::dmar_snapshot().unwrap().drhds[u].register_base_phys;
+        let mut mapped_pages = 0u8;
+        for p in 0..KERNEL_VTD_MAX_PAGES {
+            let pa = base.saturating_add((p as u64) * PAGE_SIZE_4K);
+            if query_frame_state(pa) != FrameState::ReservedOrMmio {
+                break;
+            }
+            map_kernel_4k_init(
+                pml4_h.pfn,
+                vtd_unit_vaddr(u) + (p as u64) * PAGE_SIZE_4K,
+                pa,
+                uc_flags,
+                &mut pt_frames,
+            );
+            mapped_pages += 1;
+        }
+        crate::iommu::dmar::set_drhd_mapped_pages(u, mapped_pages);
+    }
+
+    crate::pci::for_each_kernel_shadow_mmio_page(|va, pa| {
+        assert_eq!(
+            query_frame_state(pa),
+            FrameState::ReservedOrMmio,
+            "PCI supervisor MMIO page {:#x} must reside in ReservedOrMmio space",
+            pa
+        );
+        map_kernel_4k_init(pml4_h.pfn, va, pa, uc_flags, &mut pt_frames);
+    });
 
     let wx_ok = audit_kernel_upper_half_wx_and_us(pml4_h.pfn);
     assert!(wx_ok, "KERNEL_VSPACE upper-half W^X or U/S=0 audit failed");

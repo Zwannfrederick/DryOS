@@ -12,8 +12,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::{
     msg_tag_label, pack_msg_tag, sys_cap_revoke, sys_frame_alloc, sys_ipc_call_inline,
     sys_ipc_call_with_grant, sys_notify_create, sys_notify_signal, sys_notify_wait, sys_vspace_map,
-    BLK_OP_ATTACH_DATA, BLK_OP_DETACH_RING, BLK_OP_SETUP_RING, EINVAL, IPC_OP_PONG, RIGHT_MAP,
-    RIGHT_READ, RIGHT_SIGNAL, RIGHT_WAIT, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    BLK_OP_ATTACH_DATA, BLK_OP_DETACH_RING, BLK_OP_QUERY_INFO, BLK_OP_SETUP_RING, EBADCAP,
+    EINVAL, EPIPE, EREVOKED, ETIMEDOUT, IPC_OP_PONG, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
+    RIGHT_WAIT, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 pub const EIO_RING: isize = -5;
@@ -275,15 +276,34 @@ impl IoRingClient {
             return Err(EIO_RING);
         }
         let _ = sys_notify_signal(self.sq_notif, 1)?;
-        loop {
+        for _slice in 0..20u32 {
             if let Some(cqe) = ring.pop_cqe() {
+                if cqe.user_tag != tag {
+                    return Err(EIO_RING);
+                }
                 if cqe.status < 0 {
                     return Err(cqe.status as isize);
                 }
                 return Ok(cqe);
             }
-            let _ = sys_notify_wait(self.cq_notif, 0, 0)?;
+            match sys_notify_wait(self.cq_notif, 0, 250_000_000) {
+                Ok(_) => {}
+                Err(ETIMEDOUT) => {
+                    if let Err(pe) = sys_ipc_call_inline(
+                        self.blk_ep,
+                        pack_msg_tag(BLK_OP_QUERY_INFO, 0, 0, 0),
+                        [0; 4],
+                        250_000_000,
+                    ) {
+                        if matches!(pe, EPIPE | EREVOKED | EBADCAP) {
+                            return Err(EIO_RING);
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         }
+        Err(ETIMEDOUT)
     }
 
     pub fn read_block_4k(&mut self, block_4k: u32, out: &mut [u8; 4096]) -> Result<(), isize> {

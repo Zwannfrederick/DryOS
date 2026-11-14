@@ -80,6 +80,10 @@ path = "src/bin/dry_fault_test.rs"
 name = "dry-gpu"
 path = "src/bin/dry_gpu.rs"
 
+[[bin]]
+name = "dry-hw-test"
+path = "src/bin/dry_hw_test.rs"
+
 [profile.dev]
 panic = "abort"
 

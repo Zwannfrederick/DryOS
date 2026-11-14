@@ -25,7 +25,11 @@ use crate::cspace::objects::{
 };
 use crate::cspace::revoke::{attach_cap_mapping_range_record, cspace_destroy_object};
 use crate::cspace::{insert_root_cap, split_global_slot, with_pinned_cap};
+use crate::iommu::{attach_device_domain, detach_and_scrub_domain, map_dma_range, unmap_dma_range, VtdStatus};
 use crate::ipc::map_cap_err_to_sys;
+use crate::pci_bar::{
+    DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW, DEV_MAP_OP_MASK, DEV_MAP_OP_QUERY_BARS,
+};
 use crate::pmm::{
     adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
 };
@@ -33,17 +37,29 @@ use crate::proc::process_vspace_cap;
 use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
 use crate::serial_println;
 use crate::uaccess::{copy_to_user, SysError};
-use crate::vspace::pte::{VmProt, USER_VADDR_LIMIT};
+use crate::vspace::pte::{
+    pci_msix_table_vaddr, pci_virtio_common_vaddr, VmProt, KERNEL_MSIX_MAX_PAGES, USER_VADDR_LIMIT,
+};
 use crate::vspace::{inspect_vspace_live, map_mmio_4k, unmap_4k, VSpaceHandle, VSpaceId};
 
 #[path = "pci_cfg.rs"]
 mod pci_cfg;
+#[path = "pci_window.rs"]
+mod pci_window;
 
-pub use pci_cfg::{PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG, UserVirtioPciInfo};
-use pci_cfg::{
-    pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16, probe_virtio_function,
-    ValidatedVirtioPci, PCI_DEV_COUNT,
+pub use pci_cfg::{
+    UserVirtioPciInfo, PCI_OBJ_IOMMU_TEST, PCI_OBJ_IVSHMEM, PCI_OBJ_QEMU_EDU,
+    PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG,
 };
+pub(crate) use pci_cfg::{
+    pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16, pci_write_u32, probe_all_bars_raw,
+    probe_pci_function, ValidatedVirtioPci, PCI_DEV_COUNT,
+};
+
+#[inline]
+pub fn pci_cfg_probe_all_bars_raw(bus: u8, dev: u8, func: u8) -> ([u32; 6], [u32; 6]) {
+    probe_all_bars_raw(bus, dev, func)
+}
 
 const MAX_DMA_PINS_PER_DEV: usize = 16;
 const DMA_ALLOC_FLAG_2M: u64 = 1;
@@ -129,8 +145,10 @@ pub fn pci_dma_telemetry() -> (u64, u64) {
     (denied, quiesces)
 }
 
-/// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover attached VirtIO-Blk/RNG/GPU controllers.
+/// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover VirtIO and test controllers.
+#[inline(never)]
 pub fn init_pci_devices() -> bool {
+    crate::pci_bar::run_bar64_unit_tests();
     let mut found = 0usize;
     for bus in 0..=4u8 {
         for dev in 0..32u8 {
@@ -141,7 +159,7 @@ pub fn init_pci_devices() -> bool {
             let hdr = pci_read_u8(bus, dev, 0, 0x0e);
             let max_fn = if (hdr & 0x80) != 0 { 8u8 } else { 1u8 };
             for func in 0..max_fn {
-                let Some((slot_idx, vdev)) = probe_virtio_function(bus, dev, func) else {
+                let Some((slot_idx, vdev)) = probe_pci_function(bus, dev, func) else {
                     continue;
                 };
                 if PCI_DEVS[slot_idx].present.load(Ordering::Relaxed) {
@@ -157,10 +175,19 @@ pub fn init_pci_devices() -> bool {
                     PCI_OBJ_VIRTIO_BLK => "virtio-blk",
                     PCI_OBJ_VIRTIO_RNG => "virtio-rng",
                     PCI_OBJ_VIRTIO_GPU => "virtio-gpu",
-                    _ => "virtio",
+                    PCI_OBJ_QEMU_EDU => "qemu-edu",
+                    PCI_OBJ_IVSHMEM => "ivshmem",
+                    PCI_OBJ_IOMMU_TEST => "iommu-testdev",
+                    _ => "pci",
                 };
+                let bar64_cnt = vdev
+                    .bars
+                    .iter()
+                    .filter(|b| b.kind == crate::pci_bar::PciBarKind::Mem64)
+                    .count();
+                let above_4g = vdev.bars.iter().any(|b| b.is_mmio() && b.above_4g);
                 serial_println!(
-                    "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x}",
+                    "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x} bar64={} above4g={} msi={:#x} msix={:#x}({})",
                     label,
                     vdev.bus,
                     vdev.dev,
@@ -174,12 +201,17 @@ pub fn init_pci_devices() -> bool {
                     vdev.info.notify_off,
                     vdev.info.notify_mult,
                     vdev.info.device_off,
+                    bar64_cnt,
+                    above_4g as u8,
+                    vdev.msi_cap_off,
+                    vdev.msix_cap_off,
+                    vdev.msix_table_len,
                 );
             }
         }
     }
     if found == 0 {
-        serial_println!("[DRY-PCI] No VirtIO PCI controllers attached");
+        serial_println!("[DRY-PCI] No managed PCI controllers attached");
     }
     found > 0
 }
@@ -219,7 +251,7 @@ pub fn mint_root_pci_blk_cap(
     mint_root_pci_dev_cap(cspace_id, root_subj, PCI_OBJ_VIRTIO_BLK)
 }
 
-fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
+pub(crate) fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
     if dev_idx >= PCI_DEV_COUNT || !PCI_DEVS[dev_idx].present.load(Ordering::Acquire) {
         return None;
     }
@@ -227,18 +259,119 @@ fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
     Some(unsafe { *PCI_DEVS[dev_idx].dev_inner.get() })
 }
 
+#[inline]
+pub(super) fn is_iommu_enforcing_for_pci() -> bool {
+    crate::iommu::status() == VtdStatus::Enforcing
+}
+
+/// Enumerate supervisor-owned MMIO shadow pages (MSI-X tables and VirtIO `common_cfg`) to map in
+/// `KERNEL_VSPACE` (`PML4[385]`) before CR3 handover.
+pub(crate) fn for_each_kernel_shadow_mmio_page(mut f: impl FnMut(u64, u64)) {
+    for slot_idx in 0..PCI_DEV_COUNT {
+        let Some(vdev) = validated_pci_slot(slot_idx) else {
+            continue;
+        };
+        if vdev.msix_cap_off != 0 {
+            let bar = vdev.bars[vdev.msix_table_bir as usize];
+            if bar.is_mmio() {
+                let start_pa = (bar.base_phys + vdev.msix_table_off as u64) & !((PAGE_SIZE as u64) - 1);
+                let span = ((vdev.msix_table_off as usize) & (PAGE_SIZE - 1))
+                    + (vdev.msix_table_len as usize) * 16;
+                let pages = span.div_ceil(PAGE_SIZE).clamp(1, KERNEL_MSIX_MAX_PAGES);
+                let va_base = pci_msix_table_vaddr(slot_idx);
+                for p in 0..pages {
+                    f(
+                        va_base + (p as u64) * (PAGE_SIZE as u64),
+                        start_pa + (p as u64) * (PAGE_SIZE as u64),
+                    );
+                }
+            }
+        }
+        if vdev.is_virtio {
+            let c_pa = (vdev.phys_base + vdev.info.common_off as u64) & !((PAGE_SIZE as u64) - 1);
+            f(pci_virtio_common_vaddr(slot_idx), c_pa);
+        }
+    }
+}
+
+pub(super) fn claim_pci_slot(
+    dev_idx: usize,
+    cspace_id: CSpaceId,
+    vdev: &ValidatedVirtioPci,
+) -> Result<bool, CapError> {
+    if matches!(
+        crate::iommu::status(),
+        VtdStatus::Uninitialized | VtdStatus::FailedClosed
+    ) {
+        return Err(CapError::InsufficientRights);
+    }
+    let slot = &PCI_DEVS[dev_idx];
+    let claimed_new = match slot.owner_cspace.compare_exchange(
+        0,
+        cspace_id,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => true,
+        Err(cur) if cur == cspace_id => false,
+        Err(_) => return Err(CapError::BusyActiveObject),
+    };
+    if claimed_new && attach_device_domain(dev_idx, vdev.bus, vdev.dev, vdev.func).is_err() {
+        slot.owner_cspace.store(0, Ordering::Release);
+        return Err(CapError::InsufficientRights);
+    }
+    Ok(claimed_new)
+}
+
+pub(crate) fn claim_pci_slot_for_irq(
+    dev_idx: usize,
+    cspace_id: CSpaceId,
+    vdev: &ValidatedVirtioPci,
+) -> Result<(), CapError> {
+    claim_pci_slot(dev_idx, cspace_id, vdev).map(|_| ())
+}
+
+pub(super) fn release_claimed_pci_slot(dev_idx: usize, claimed_new: bool) {
+    if claimed_new {
+        detach_and_scrub_domain(dev_idx);
+        PCI_DEVS[dev_idx].owner_cspace.store(0, Ordering::Release);
+    }
+}
+
+pub(super) fn enable_pci_bme(vdev: &ValidatedVirtioPci) {
+    let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
+    pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, cmd | 0x0406);
+}
+
 fn quiesce_slot_for_cspace(dev_idx: usize, cspace_id: CSpaceId) {
     let slot = &PCI_DEVS[dev_idx];
     if cspace_id == 0 || slot.owner_cspace.load(Ordering::Acquire) != cspace_id {
         return;
     }
+    crate::irq::msi::quiesce_pci_msi_for_dev(dev_idx);
     if let Some(vdev) = validated_pci_slot(dev_idx) {
+        if vdev.is_virtio && ((vdev.info.common_off as usize) & 0xfff) <= 0xfec {
+            let common_va =
+                pci_virtio_common_vaddr(dev_idx) + ((vdev.info.common_off as u64) & 0xfff);
+            // SAFETY: `common_va + 0x14` is `common_cfg.device_status` on the pre-mapped `UC` shadow page (`PML4[385]`).
+            unsafe {
+                core::ptr::write_volatile((common_va + 0x14) as *mut u8, 0);
+                for _ in 0..1024 {
+                    if core::ptr::read_volatile((common_va + 0x14) as *const u8) == 0 {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+        }
         let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
         // Clear Bus Master Enable (`bit 2 = 0`) and keep legacy INTx masked (`bit 10 = 1`).
         pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, (cmd & !0x0004) | 0x0402);
+        let _ = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
     }
     with_dma_lock(dev_idx, |slot, pins| {
         if slot.owner_cspace.load(Ordering::Acquire) == cspace_id {
+            detach_and_scrub_domain(dev_idx);
             for pin in pins.iter_mut() {
                 if let Some(fh) = pin.take() {
                     let _ = adjust_frame_iommu_pin(fh, -1);
@@ -290,15 +423,16 @@ fn unmap_and_destroy_dma_frame(
     let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
 }
 
-/// `SYS_DEV_MAP` (`29`): Map the authorized VirtIO MMIO BAR (`VmProt::USER_MMIO_UC`), enable PCI Bus
-/// Master, and copy sanitized `UserVirtioPciInfo` offsets to `user_info_out_ptr`.
+/// `SYS_DEV_MAP` (`29`): Map the authorized VirtIO MMIO BAR (`op=0`), query sanitized BAR metadata
+/// (`op=1`), or map a bounded MMIO window at `page_offset` (`op=2`, `UC` or prefetchable `WC`).
+#[inline(never)]
 pub fn sys_dev_map(
     cspace_id: CSpaceId,
     subj_label: SecLabel,
     vspace_id: VSpaceId,
     pci_cap_raw: u64,
-    user_vaddr: u64,
-    user_info_out_ptr: u64,
+    user_vaddr_or_op: u64,
+    arg2: u64,
 ) -> Result<isize, SysError> {
     if subj_label.domain != SecDomain::RootSystem
         || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
@@ -306,12 +440,9 @@ pub fn sys_dev_map(
         record_pci_denied_first_or(None);
         return Err(SysError::Perm);
     }
-    if (user_vaddr & ((PAGE_SIZE as u64) - 1)) != 0
-        || user_vaddr < (PAGE_SIZE as u64)
-        || user_info_out_ptr == 0
-        || (user_info_out_ptr & 3) != 0
-    {
-        return Err(SysError::Inval);
+    let op = user_vaddr_or_op & DEV_MAP_OP_MASK;
+    if user_vaddr_or_op == DEV_MAP_OP_QUERY_BARS {
+        return pci_window::sys_dev_query_bars(cspace_id, subj_label, pci_cap_raw, arg2);
     }
     let Some((vs_gen, _, _)) = inspect_vspace_live(vspace_id) else {
         return Err(SysError::Inval);
@@ -320,6 +451,28 @@ pub fn sys_dev_map(
         id: vspace_id,
         generation: vs_gen,
     };
+    if op == DEV_MAP_OP_MAP_WINDOW {
+        return pci_window::sys_dev_map_window(
+            cspace_id,
+            subj_label,
+            vs_h,
+            pci_cap_raw,
+            user_vaddr_or_op & !DEV_MAP_OP_MASK,
+            arg2,
+        );
+    }
+    if op != DEV_MAP_OP_LEGACY_VIRTIO {
+        return Err(SysError::Inval);
+    }
+
+    let user_vaddr = user_vaddr_or_op;
+    let user_info_out_ptr = arg2;
+    if user_vaddr < (PAGE_SIZE as u64)
+        || user_info_out_ptr == 0
+        || (user_info_out_ptr & 3) != 0
+    {
+        return Err(SysError::Inval);
+    }
 
     let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
     let now_epoch = current_lease_epoch();
@@ -345,18 +498,21 @@ pub fn sys_dev_map(
             return Err(CapError::PagingError);
         }
 
-        let slot = &PCI_DEVS[dev_idx];
-        let claimed_new = match slot.owner_cspace.compare_exchange(
-            0,
-            cspace_id,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => true,
-            Err(cur) if cur == cspace_id => false,
-            Err(_) => return Err(CapError::BusyActiveObject),
-        };
-
+        if vdev.msix_cap_off != 0 && vdev.msix_table_bir == vdev.bar_idx {
+            let tbl_bar = vdev.bars[vdev.msix_table_bir as usize];
+            if tbl_bar.is_mmio() {
+                let tbl_start_pa =
+                    (tbl_bar.base_phys + vdev.msix_table_off as u64) & !((PAGE_SIZE as u64) - 1);
+                let tbl_end_pa = tbl_bar.base_phys
+                    + (vdev.msix_table_off as u64)
+                    + (vdev.msix_table_len as u64) * 16;
+                let dev_end_pa = vdev.phys_base + (vdev.num_pages as u64) * (PAGE_SIZE as u64);
+                if vdev.phys_base < tbl_end_pa && dev_end_pa > tbl_start_pa {
+                    return Err(CapError::InsufficientRights);
+                }
+            }
+        }
+        let claimed_new = claim_pci_slot(dev_idx, cspace_id, &vdev)?;
         let pages = vdev.num_pages as usize;
         for p in 0..pages {
             let va = user_vaddr + (p as u64) * (PAGE_SIZE as u64);
@@ -365,9 +521,7 @@ pub fn sys_dev_map(
                 for rb in 0..p {
                     let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
                 }
-                if claimed_new {
-                    slot.owner_cspace.store(0, Ordering::Release);
-                }
+                release_claimed_pci_slot(dev_idx, claimed_new);
                 return Err(CapError::PagingError);
             }
         }
@@ -383,14 +537,11 @@ pub fn sys_dev_map(
             for rb in 0..pages {
                 let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
             }
-            if claimed_new {
-                slot.owner_cspace.store(0, Ordering::Release);
-            }
+            release_claimed_pci_slot(dev_idx, claimed_new);
             return Err(e);
         }
 
-    let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
-        pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, cmd | 0x0406);
+        enable_pci_bme(&vdev);
         mapped_info = Some((dev_idx, vdev));
         Ok(())
     });
@@ -492,30 +643,35 @@ pub fn sys_dma_alloc(
         return Err(map_cap_err_to_sys(e));
     }
 
-    let pinned_ok = with_dma_lock(dev_idx, |slot, pins| {
-        let claimed_new = match slot.owner_cspace.compare_exchange(
-            0,
-            cspace_id,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => true,
-            Err(cur) if cur == cspace_id => false,
-            Err(_) => return Err(SysError::Busy),
-        };
+    let len_bytes = if is_2m {
+        (HUGE_2M_FRAMES as u64) * (PAGE_SIZE as u64)
+    } else {
+        PAGE_SIZE as u64
+    };
+    let dma_paddr: u64 = fh.phys_addr();
+    let Some(vdev) = validated_pci_slot(dev_idx) else {
+        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
+        return Err(SysError::Inval);
+    };
+
+    let mut rollback_claimed = false;
+    let pinned_ok = with_dma_lock(dev_idx, |_slot, pins| {
+        let claimed_new = claim_pci_slot(dev_idx, cspace_id, &vdev).map_err(map_cap_err_to_sys)?;
         let Some(free_slot) = pins.iter_mut().find(|s| s.is_none()) else {
-            if claimed_new {
-                slot.owner_cspace.store(0, Ordering::Release);
-            }
+            release_claimed_pci_slot(dev_idx, claimed_new);
             return Err(SysError::NoMem);
         };
         if adjust_frame_iommu_pin(fh, 1).is_err() {
-            if claimed_new {
-                slot.owner_cspace.store(0, Ordering::Release);
-            }
+            release_claimed_pci_slot(dev_idx, claimed_new);
+            return Err(SysError::NoMem);
+        }
+        if map_dma_range(dev_idx, dma_paddr, len_bytes).is_err() {
+            let _ = adjust_frame_iommu_pin(fh, -1);
+            release_claimed_pci_slot(dev_idx, claimed_new);
             return Err(SysError::NoMem);
         }
         *free_slot = Some(fh);
+        rollback_claimed = claimed_new;
         Ok(())
     });
     if let Err(e) = pinned_ok {
@@ -523,16 +679,19 @@ pub fn sys_dma_alloc(
         return Err(e);
     }
 
-    let dma_paddr: u64 = fh.phys_addr();
     let pa_bytes = dma_paddr.to_le_bytes();
     if let Err(fault) = copy_to_user(paddr_out_ptr, &pa_bytes) {
         with_dma_lock(dev_idx, |_slot, pins| {
+            unmap_dma_range(dev_idx, dma_paddr, len_bytes);
             for pin in pins.iter_mut() {
                 if *pin == Some(fh) {
                     *pin = None;
                     let _ = adjust_frame_iommu_pin(fh, -1);
                     break;
                 }
+            }
+            if rollback_claimed && pins.iter().all(|p| p.is_none()) {
+                release_claimed_pci_slot(dev_idx, true);
             }
         });
         unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);

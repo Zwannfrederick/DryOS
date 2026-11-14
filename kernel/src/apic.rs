@@ -26,6 +26,9 @@ pub const VEC_PIC_SPURIOUS_SLAVE: u8 = 0x2f;
 pub const VEC_EXT_IRQ_BASE: u8 = 0x30;
 pub const EXT_IRQ_VECTOR_COUNT: usize = 16;
 pub const VEC_EXT_IRQ_LAST: u8 = VEC_EXT_IRQ_BASE + (EXT_IRQ_VECTOR_COUNT as u8) - 1;
+pub const VEC_PCI_MSI_BASE: u8 = 0x40;
+pub const PCI_MSI_VECTOR_COUNT: usize = 32;
+pub const VEC_PCI_MSI_LAST: u8 = VEC_PCI_MSI_BASE + (PCI_MSI_VECTOR_COUNT as u8) - 1;
 pub const VEC_RESCHED_WAKE: u8 = 0xed;
 pub const VEC_TLB_SHOOTDOWN: u8 = 0xee;
 pub const VEC_LAPIC_TIMER: u8 = 0xef;
@@ -345,6 +348,11 @@ pub fn init_cpu_lapic(cpu_idx: usize) {
 #[inline]
 pub fn lapic_eoi() {
     apic_write(MSR_X2APIC_EOI, MMIO_APIC_EOI, 0);
+}
+
+#[inline]
+pub fn bsp_apic_msi_dest_id() -> u32 {
+    get_percpu_by_idx(0).lapic_id
 }
 
 #[inline]

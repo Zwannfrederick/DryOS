@@ -37,11 +37,12 @@ use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_derive, sys_cap_query,
     sys_cap_revoke, sys_ep_create, sys_exit, sys_ipc_call_inline, sys_ipc_call_with_grant,
     sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_reply_with_grant, sys_ipc_send_inline,
-    sys_notify_create, sys_notify_signal, sys_proc_spawn, sys_proc_spawn_with_fault_ep,
-    sys_proc_wait, UserCapInfo, UserIpcRecvExt, BADGE_SUPERVISOR, EBADCAP, EINVAL, EPERM, EPIPE,
-    EREVOKED, FAULT_MSG_LABEL, FAULT_REPLY_KILL, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL,
-    IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, RIGHT_CALL, RIGHT_MAP, RIGHT_READ, RIGHT_RECV,
-    RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WAIT, RIGHT_WRITE,
+    sys_notify_create, sys_notify_signal, sys_proc_kill, sys_proc_spawn,
+    sys_proc_spawn_with_fault_ep, sys_proc_wait, sys_sysinfo, UserCapInfo, UserIpcRecvExt,
+    UserSysInfo, BADGE_SUPERVISOR, EBADCAP, EINVAL, EPERM, EPIPE, EREVOKED, FAULT_MSG_LABEL,
+    FAULT_REPLY_KILL, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN,
+    IPC_OP_PONG, RIGHT_CALL, RIGHT_MAP, RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND,
+    RIGHT_SIGNAL, RIGHT_WAIT, RIGHT_WRITE,
 };
 
 #[inline]
@@ -95,120 +96,180 @@ impl IslandInstance {
         island_mod_cap: u64,
         generation: u64,
         pci_cfg: Option<(u64, u64, u16)>,
+        ipc_timeout_tsc: u64,
     ) -> Result<Self, isize> {
         let comp_id = pci_cfg.map_or(COMP_ID_MOCK_ISLAND, |c| c.2);
         let island_spec = domain_spec(0, comp_id);
         let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
         let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
 
-        let drv_ep = sys_ep_create(island_spec)?;
-        let sq_notif = match sys_notify_create(island_spec) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = sys_cap_revoke(drv_ep, 2);
-                return Err(e);
-            }
-        };
-        let cq_notif = match sys_notify_create(island_spec) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = sys_cap_revoke(sq_notif, 2);
-                let _ = sys_cap_revoke(drv_ep, 2);
-                return Err(e);
-            }
-        };
-        let drv_broker_cap = sys_cap_derive(drv_ep, cli_rights, 0, BADGE_ISLAND_BROKER)?;
-        let drv_sup_cap = sys_cap_derive(drv_ep, cli_rights, 0, BADGE_SUPERVISOR)?;
-
-        let (proc_handle, island_pid, fault_send_cap) = if let Some((fault_ep, _, _)) = pci_cfg {
-            let fsend = sys_cap_derive(fault_ep, cli_rights, 0, lx_fault_badge(generation))?;
-            let (ph, pid) = sys_proc_spawn_with_fault_ep(
-                island_mod_cap,
-                1, // `SecDomain::RootSystem` isolated compartment (`0x0210`) for PCI MMIO/DMA
-                comp_id,
-                (drv_ep, srv_rights, 0x151d),
-                fsend,
-            )?;
-            (ph, pid, fsend)
-        } else {
-            let (ph, pid) = sys_proc_spawn(
-                island_mod_cap,
-                0, // `SecDomain::Userspace` isolated compartment (`0x0209`)
-                COMP_ID_MOCK_ISLAND,
-                (drv_ep, srv_rights, 0x151d),
-                (0, 0),
-            )?;
-            (ph, pid, 0)
-        };
-
         let mut inst = Self {
-            state: ISLAND_STATE_RUNNING,
-            proc_handle,
-            island_pid,
+            state: ISLAND_STATE_FAULTED,
+            proc_handle: 0,
+            island_pid: 0,
             generation,
             mac_isolated: false,
             pci_dev_id: 0,
-            drv_ep,
-            drv_broker_cap,
-            drv_sup_cap,
-            sq_notif,
-            cq_notif,
+            drv_ep: 0,
+            drv_broker_cap: 0,
+            drv_sup_cap: 0,
+            sq_notif: 0,
+            cq_notif: 0,
             ring_cap: 0,
-            fault_send_cap,
+            fault_send_cap: 0,
             park_mode: 0,
         };
 
-        let (b0, _, _) = sys_ipc_call_with_grant(
-            drv_broker_cap,
+        inst.drv_ep = sys_ep_create(island_spec)?;
+        inst.sq_notif = match sys_notify_create(island_spec) {
+            Ok(c) => c,
+            Err(e) => {
+                inst.revoke_generation_caps();
+                return Err(e);
+            }
+        };
+        inst.cq_notif = match sys_notify_create(island_spec) {
+            Ok(c) => c,
+            Err(e) => {
+                inst.revoke_generation_caps();
+                return Err(e);
+            }
+        };
+        inst.drv_broker_cap = match sys_cap_derive(inst.drv_ep, cli_rights, 0, BADGE_ISLAND_BROKER) {
+            Ok(c) => c,
+            Err(e) => {
+                inst.revoke_generation_caps();
+                return Err(e);
+            }
+        };
+        inst.drv_sup_cap = match sys_cap_derive(inst.drv_ep, cli_rights, 0, BADGE_SUPERVISOR) {
+            Ok(c) => c,
+            Err(e) => {
+                inst.revoke_generation_caps();
+                return Err(e);
+            }
+        };
+
+        if let Some((fault_ep, _, _)) = pci_cfg {
+            inst.fault_send_cap =
+                match sys_cap_derive(fault_ep, cli_rights, 0, lx_fault_badge(generation)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        inst.revoke_generation_caps();
+                        return Err(e);
+                    }
+                };
+            match sys_proc_spawn_with_fault_ep(
+                island_mod_cap,
+                1, // `SecDomain::RootSystem` isolated compartment (`0x0210`) for PCI MMIO/DMA
+                comp_id,
+                (inst.drv_ep, srv_rights, 0x151d),
+                inst.fault_send_cap,
+            ) {
+                Ok((ph, pid)) => {
+                    inst.proc_handle = ph;
+                    inst.island_pid = pid;
+                }
+                Err(e) => {
+                    inst.revoke_generation_caps();
+                    return Err(e);
+                }
+            }
+        } else {
+            match sys_proc_spawn(
+                island_mod_cap,
+                0, // `SecDomain::Userspace` isolated compartment (`0x0209`)
+                COMP_ID_MOCK_ISLAND,
+                (inst.drv_ep, srv_rights, 0x151d),
+                (0, 0),
+            ) {
+                Ok((ph, pid)) => {
+                    inst.proc_handle = ph;
+                    inst.island_pid = pid;
+                }
+                Err(e) => {
+                    inst.revoke_generation_caps();
+                    return Err(e);
+                }
+            }
+        }
+        inst.state = ISLAND_STATE_RUNNING;
+
+        let b0 = match sys_ipc_call_with_grant(
+            inst.drv_broker_cap,
             MOCK_OP_BIND_NOTIF,
             [0, 0, 0, 0],
-            sq_notif,
+            inst.sq_notif,
             RIGHT_READ | RIGHT_WAIT,
             0,
-            0,
-        )?;
-        let (b1, _, _) = sys_ipc_call_with_grant(
-            drv_broker_cap,
+            ipc_timeout_tsc,
+        ) {
+            Ok((tag, _, _)) => tag,
+            Err(e) => {
+                inst.force_reap_and_revoke(ipc_timeout_tsc);
+                return Err(e);
+            }
+        };
+        let b1 = match sys_ipc_call_with_grant(
+            inst.drv_broker_cap,
             MOCK_OP_BIND_NOTIF,
             [1, 0, 0, 0],
-            cq_notif,
+            inst.cq_notif,
             RIGHT_READ | RIGHT_SIGNAL,
             0,
-            0,
-        )?;
+            ipc_timeout_tsc,
+        ) {
+            Ok((tag, _, _)) => tag,
+            Err(e) => {
+                inst.force_reap_and_revoke(ipc_timeout_tsc);
+                return Err(e);
+            }
+        };
         if msg_tag_label(b0) != IPC_OP_PONG || msg_tag_label(b1) != IPC_OP_PONG {
-            inst.force_reap_and_revoke();
+            inst.force_reap_and_revoke(ipc_timeout_tsc);
             return Err(EBADCAP);
         }
 
         if let Some((_, pci_dev_cap, _)) = pci_cfg {
-            let (ptag, _, pmrs) = sys_ipc_call_with_grant(
-                drv_broker_cap,
+            let (ptag, _, pmrs) = match sys_ipc_call_with_grant(
+                inst.drv_broker_cap,
                 LX_OP_BIND_PCI,
                 [0; 4],
                 pci_dev_cap,
                 RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
                 0,
-                0,
-            )?;
+                ipc_timeout_tsc,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    inst.force_reap_and_revoke(ipc_timeout_tsc);
+                    return Err(e);
+                }
+            };
             if msg_tag_label(ptag) != IPC_OP_PONG || pmrs[0] == 0 {
-                inst.force_reap_and_revoke();
+                inst.force_reap_and_revoke(ipc_timeout_tsc);
                 return Err(EBADCAP);
             }
             inst.pci_dev_id = pmrs[0];
         }
 
-        let (itag, granted_ring, imrs) = sys_ipc_call_with_grant(
-            drv_broker_cap,
+        let (itag, granted_ring, imrs) = match sys_ipc_call_with_grant(
+            inst.drv_broker_cap,
             MOCK_OP_INIT_ISLAND,
             [generation, 0, 0, 0],
             0,
             0,
             0,
-            0,
-        )?;
+            ipc_timeout_tsc,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                inst.force_reap_and_revoke(ipc_timeout_tsc);
+                return Err(e);
+            }
+        };
         if msg_tag_label(itag) != IPC_OP_PONG || granted_ring == 0 || imrs[0] != generation {
-            inst.force_reap_and_revoke();
+            inst.force_reap_and_revoke(ipc_timeout_tsc);
             return Err(EBADCAP);
         }
         inst.ring_cap = granted_ring;
@@ -256,9 +317,12 @@ impl IslandInstance {
         self.park_mode = 0;
     }
 
-    fn force_reap_and_revoke(&mut self) {
+    fn force_reap_and_revoke(&mut self, ipc_timeout_tsc: u64) {
         if self.proc_handle != 0 {
-            let _ = sys_proc_wait(self.proc_handle, 1, 0);
+            if sys_proc_wait(self.proc_handle, 1, 0).is_err() {
+                let _ = sys_proc_kill(self.proc_handle);
+                let _ = sys_proc_wait(self.proc_handle, 0, ipc_timeout_tsc);
+            }
             self.proc_handle = 0;
         }
         self.revoke_generation_caps();
@@ -270,7 +334,15 @@ impl IslandInstance {
         island_mod_cap: u64,
         pci_cfg: Option<(u64, u64, u16)>,
         restarts: &mut u64,
+        ipc_timeout_tsc: u64,
     ) -> Result<(), isize> {
+        if self.state == ISLAND_STATE_FAULTED {
+            self.revoke_generation_caps();
+            let next_gen = self.generation.wrapping_add(1);
+            *self = Self::spawn(island_mod_cap, next_gen, pci_cfg, ipc_timeout_tsc)?;
+            *restarts = restarts.wrapping_add(1);
+            return Ok(());
+        }
         if self.state != ISLAND_STATE_RUNNING || self.proc_handle == 0 {
             return Ok(());
         }
@@ -279,22 +351,25 @@ impl IslandInstance {
             self.state = ISLAND_STATE_FAULTED;
             self.revoke_generation_caps();
             let next_gen = self.generation.wrapping_add(1);
-            *self = Self::spawn(island_mod_cap, next_gen, pci_cfg)?;
+            *self = Self::spawn(island_mod_cap, next_gen, pci_cfg, ipc_timeout_tsc)?;
             *restarts = restarts.wrapping_add(1);
         }
         Ok(())
     }
 
-    fn shutdown_clean(&mut self) {
+    fn shutdown_clean(&mut self, ipc_timeout_tsc: u64) {
         if self.state == ISLAND_STATE_RUNNING && self.drv_sup_cap != 0 && self.proc_handle != 0 {
             self.wake_if_ring_parked();
             let _ = sys_ipc_call_inline(
                 self.drv_sup_cap,
                 pack_msg_tag(IPC_OP_EXIT_CLEAN, 0, 1, 0),
                 [0; 4],
-                0,
+                ipc_timeout_tsc,
             );
-            let _ = sys_proc_wait(self.proc_handle, 0, 0);
+            if sys_proc_wait(self.proc_handle, 0, ipc_timeout_tsc).is_err() {
+                let _ = sys_proc_kill(self.proc_handle);
+                let _ = sys_proc_wait(self.proc_handle, 0, ipc_timeout_tsc);
+            }
             self.proc_handle = 0;
         }
         self.revoke_generation_caps();
@@ -308,6 +383,9 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
     if (cs & 3) != 3 || (ss & 3) != 3 || broker_ep == 0 || mock_drv_mod_cap == 0 {
         sys_exit(185);
     }
+    let mut sys = UserSysInfo::default();
+    let _ = sys_sysinfo(&mut sys);
+    let ipc_timeout_tsc = 2_000_000u64.saturating_mul(sys.tsc_mhz.max(1000));
 
     let mut cinfo = UserCapInfo::default();
     let lx_mode = sys_cap_query(broker_ep, &mut cinfo) == 0 && cinfo.badge == BADGE_BROKER_LX_MODE;
@@ -328,7 +406,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
         log_line(&lb);
         IslandInstance::EMPTY
     } else {
-        let inst = match IslandInstance::spawn(mock_drv_mod_cap, 1, None) {
+        let inst = match IslandInstance::spawn(mock_drv_mod_cap, 1, None, ipc_timeout_tsc) {
             Ok(i) => i,
             Err(_) => sys_exit(186),
         };
@@ -370,7 +448,12 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
         } else {
             None
         };
-        let _ = island.check_async_crash_and_recover(mock_drv_mod_cap, active_pci, &mut restarts);
+        let _ = island.check_async_crash_and_recover(
+            mock_drv_mod_cap,
+            active_pci,
+            &mut restarts,
+            ipc_timeout_tsc,
+        );
 
         match op {
             BROKER_OP_BIND_PCI_DEV => {
@@ -397,11 +480,12 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                 } else {
                     COMP_ID_LX_RNG_ISLAND
                 };
-                island.force_reap_and_revoke();
+                island.force_reap_and_revoke(ipc_timeout_tsc);
                 island = match IslandInstance::spawn(
                     mock_drv_mod_cap,
                     1,
                     Some((fault_ep, saved_pci_cap, saved_comp_id)),
+                    ipc_timeout_tsc,
                 ) {
                     Ok(i) => i,
                     Err(e) => {
@@ -463,14 +547,14 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                         island.drv_broker_cap,
                         pack_msg_tag(LX_OP_READ_ENTROPY, 0, 4, 0),
                         [24, 0, 0, island.generation],
-                        0,
+                        ipc_timeout_tsc,
                     )
                 } else {
                     sys_ipc_call_inline(
                         island.drv_broker_cap,
                         pack_msg_tag(MOCK_OP_TRANSFORM, 0, 4, 0),
                         [mrs[0], mrs[1], mrs[2], island.generation],
-                        0,
+                        ipc_timeout_tsc,
                     )
                 };
                 match fwd_res {
@@ -490,6 +574,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                             mock_drv_mod_cap,
                             active_pci,
                             &mut restarts,
+                            ipc_timeout_tsc,
                         );
                         reply_err(broker_ep, tok, IPC_OP_ERR_STALE_GEN, EPIPE, island.generation);
                     }
@@ -554,7 +639,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     island.drv_broker_cap,
                     pack_msg_tag(MOCK_OP_SET_PARK_MODE, 0, 1, 0),
                     [target_mode, 0, 0, 0],
-                    0,
+                    ipc_timeout_tsc,
                 ) {
                     Ok((rtag, _, rmrs)) if msg_tag_label(rtag) == IPC_OP_PONG => {
                         island.park_mode = rmrs[0];
@@ -582,12 +667,20 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     island.drv_sup_cap,
                     pack_msg_tag(IPC_OP_CRASH_UD2, 0, 0, 0),
                     [0; 4],
-                    0,
+                    ipc_timeout_tsc,
                 );
                 let fault_vec_from_ep = if fault_ep != 0 && island.fault_send_cap != 0 {
                     let mut fext = UserIpcRecvExt::default();
-                    let (ftag, ftok, fmrs) = sys_ipc_recv_ext(fault_ep, 0, 0, &mut fext)
-                        .unwrap_or_else(|_| sys_exit(187));
+                    let (ftag, ftok, fmrs) =
+                        match sys_ipc_recv_ext(fault_ep, 0, ipc_timeout_tsc, &mut fext) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                island.force_reap_and_revoke(ipc_timeout_tsc);
+                                island.state = ISLAND_STATE_FAULTED;
+                                reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, e, 0);
+                                continue;
+                            }
+                        };
                     let fvec = if msg_tag_label(ftag) == FAULT_MSG_LABEL
                         && fext.sender_badge == lx_fault_badge(island.generation)
                     {
@@ -607,13 +700,16 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                 } else {
                     None
                 };
-                let (w_kind, w_detail) = match sys_proc_wait(island.proc_handle, 0, 0) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, e, 0);
-                        continue;
-                    }
-                };
+                let (w_kind, w_detail) =
+                    match sys_proc_wait(island.proc_handle, 0, ipc_timeout_tsc) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            island.force_reap_and_revoke(ipc_timeout_tsc);
+                            island.state = ISLAND_STATE_FAULTED;
+                            reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, e, 0);
+                            continue;
+                        }
+                    };
                 island.proc_handle = 0;
                 island.state = ISLAND_STATE_FAULTED;
                 let fault_vec = fault_vec_from_ep.unwrap_or(if w_kind == 1 {
@@ -624,9 +720,19 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
 
                 island.revoke_generation_caps();
                 let next_gen = island.generation.wrapping_add(1);
-                island = match IslandInstance::spawn(mock_drv_mod_cap, next_gen, active_pci) {
+                island = match IslandInstance::spawn(
+                    mock_drv_mod_cap,
+                    next_gen,
+                    active_pci,
+                    ipc_timeout_tsc,
+                ) {
                     Ok(i) => i,
-                    Err(_) => sys_exit(187),
+                    Err(e) => {
+                        island.generation = next_gen;
+                        island.state = ISLAND_STATE_FAULTED;
+                        reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, e, next_gen);
+                        continue;
+                    }
                 };
                 // Readiness probe on freshly restarted generation before declaring recovery complete.
                 let probe_ok = if lx_mode && saved_pci_cap != 0 {
@@ -634,7 +740,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                         island.drv_broker_cap,
                         pack_msg_tag(LX_OP_READ_ENTROPY, 0, 4, 0),
                         [16, 0, 0, island.generation],
-                        0,
+                        ipc_timeout_tsc,
                     )
                     .is_ok_and(|(rt, _, _)| msg_tag_label(rt) == IPC_OP_PONG)
                 } else {
@@ -642,12 +748,15 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                         island.drv_broker_cap,
                         pack_msg_tag(MOCK_OP_TRANSFORM, 0, 4, 0),
                         [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, island.generation],
-                        0,
+                        ipc_timeout_tsc,
                     )
                     .is_ok_and(|(rt, _, _)| msg_tag_label(rt) == IPC_OP_PONG)
                 };
                 if !probe_ok {
-                    sys_exit(188);
+                    island.force_reap_and_revoke(ipc_timeout_tsc);
+                    island.state = ISLAND_STATE_FAULTED;
+                    reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, EPIPE, island.generation);
+                    continue;
                 }
                 let dt_cyc = rdtsc_user().saturating_sub(t0);
                 restarts = restarts.wrapping_add(1);
@@ -667,7 +776,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     reply_err(broker_ep, tok, IPC_OP_ERR_PERM, EPERM, denied_ops);
                     continue;
                 }
-                island.shutdown_clean();
+                island.shutdown_clean(ipc_timeout_tsc);
                 if saved_pci_cap != 0 {
                     let _ = sys_cap_revoke(saved_pci_cap, 1);
                 }
@@ -703,6 +812,6 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
             }
         }
     }
-    island.shutdown_clean();
+    island.shutdown_clean(ipc_timeout_tsc);
     sys_exit(0);
 }

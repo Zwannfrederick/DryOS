@@ -11,6 +11,7 @@ pub const QEMU_EXIT_SUCCESS: u32 = 0x10;
 /// Host exit status `(0x11 << 1) | 1 == 35`.
 pub const QEMU_EXIT_PANIC: u32 = 0x11;
 
+pub const MSR_IA32_PAT: u32 = 0x0000_0277;
 pub const MSR_IA32_EFER: u32 = 0xc000_0080;
 pub const MSR_IA32_STAR: u32 = 0xc000_0081;
 pub const MSR_IA32_LSTAR: u32 = 0xc000_0082;

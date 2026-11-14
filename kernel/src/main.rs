@@ -13,11 +13,14 @@ mod display;
 mod fpu;
 mod gdt_tss;
 mod idt;
+mod iommu;
 mod ipc;
 mod irq;
 mod limine;
 mod mem_verify;
 mod pci;
+mod pci_bar;
+mod pci_hw_test;
 mod percpu;
 mod pmm;
 mod power;
@@ -272,6 +275,8 @@ extern "C" fn bsp_kmain() -> ! {
         pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
+        iommu::init_vtd_units();
+        iommu::run_dmar_unit_tests();
         let _ioapic_ok = irq::init_ioapic_and_irq_subsystem(mem.hhdm_offset, bsp_lapic_id);
         if cmdline.contains("irq_fault=") {
             syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
@@ -287,6 +292,16 @@ extern "C" fn bsp_kmain() -> ! {
         }
         if cmdline.contains("cspace_fault=") {
             cspace::tests::verify_cspace_and_security(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        }
+        if cmdline.contains("hw_test=1") {
+            syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
+            pci_hw_test::verify_hw_foundations(smp.cpu_count);
+            sched::shutdown_ap_scheduler_service();
+            serial_println!(
+                "[DRY-BOOT-OK] Milestone 2C-2 (Hardware Foundations: VT-d, MSI/MSI-X, BAR64 & Bound Notif) {}-vCPU suite verified cleanly.",
+                smp.cpu_count
+            );
+            qemu_exit(QEMU_EXIT_SUCCESS);
         }
         if cmdline.contains("interactive=1")
             || cmdline.contains("desktop=1")

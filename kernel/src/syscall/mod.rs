@@ -26,6 +26,7 @@ use crate::ipc::notif::{notif_signal, notif_wait};
 use crate::ipc::{
     MsgTag, SharedPayloadDesc, UserIpcRecvExt, UserIpcSendExt, MAX_IPC_EXTRA_BYTES,
     MSG_FLAG_EXTRA_BUF, MSG_FLAG_GRANT_CAP, MSG_FLAG_NON_BLOCKING, MSG_FLAG_SHARED_DESC,
+    NOTIFY_FLAG_BIND_TCB, NOTIFY_FLAG_UNBIND_TCB,
 };
 use crate::percpu::current_percpu;
 use crate::sched::state::ThreadId;
@@ -730,10 +731,27 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NOTIFY_WAIT => {
             let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            let non_block = (a1 as u8 & MSG_FLAG_NON_BLOCKING) != 0;
-            match notif_wait(cs_id, subj, CapPtr(a0), non_block, a2) {
-                Ok(bits) => (0, bits),
-                Err(e) => (e.as_raw(), 0),
+            let allowed = (MSG_FLAG_NON_BLOCKING as u64)
+                | NOTIFY_FLAG_BIND_TCB
+                | NOTIFY_FLAG_UNBIND_TCB;
+            if (a1 & !allowed) != 0 {
+                (SysError::Inval.as_raw(), 0)
+            } else if (a1 & (NOTIFY_FLAG_BIND_TCB | NOTIFY_FLAG_UNBIND_TCB)) != 0 {
+                match crate::ipc::bound_notif::sys_notify_bind_or_unbind(
+                    cs_id,
+                    subj,
+                    CapPtr(a0),
+                    a1,
+                ) {
+                    Ok(v) => (0, v),
+                    Err(e) => (e.as_raw(), 0),
+                }
+            } else {
+                let non_block = (a1 as u8 & MSG_FLAG_NON_BLOCKING) != 0;
+                match notif_wait(cs_id, subj, CapPtr(a0), non_block, a2) {
+                    Ok(bits) => (0, bits),
+                    Err(e) => (e.as_raw(), 0),
+                }
             }
         }
         _ => sys_cold_dispatch(nr, pid, cur_slot, a0, a1, a2, a3, a4, a5),
