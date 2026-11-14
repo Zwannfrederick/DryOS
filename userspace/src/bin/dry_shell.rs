@@ -13,6 +13,10 @@
 use core::cell::UnsafeCell;
 
 use dry_userspace::action::{AppId, DesktopAction, APP_COUNT};
+use dry_userspace::apps::shell_ui::{
+    render_shell_pixel, viewport_rows, ShellBackend, SHELL_PIXEL_VADDR, SHELL_WIN_H, SHELL_WIN_W,
+};
+use dry_userspace::apps::PixelAppWindow;
 use dry_userspace::input::{InputEvent, InputEventKind, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use dry_userspace::keymap::{
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_PAGEDOWN,
@@ -33,7 +37,8 @@ use dry_userspace::{
     IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_APPS,
     IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE,
     IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT,
-    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW,
+    VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SHELL_SURF_VADDR: u64 = 0x1800_0000;
@@ -55,21 +60,6 @@ fn debug_line(lb: &LineBuilder) {
     out[..n].copy_from_slice(&s[..n]);
     out[n] = b'\n';
     let _ = sys_write_debug(&out[..=n]);
-}
-
-fn present_surface(disp_ep_cap: u64, win_id: u32) -> (u64, u64) {
-    if disp_ep_cap == 0 {
-        return (0, 0);
-    }
-    match sys_ipc_call_inline(
-        disp_ep_cap,
-        pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
-        [win_id as u64, 0, 0, 0],
-        0,
-    ) {
-        Ok((_, _, mrs)) => (mrs[0], mrs[1]),
-        Err(_) => (0, 0),
-    }
 }
 
 fn move_floating_window(disp_ep_cap: u64, win_id: u32, dx: i64, dy: i64) {
@@ -110,16 +100,51 @@ fn call_sup_action(sup_ep_cap: u64, act: DesktopAction) -> Result<[u64; 4], u32>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn vis_rows_backend(backend: &ShellBackend) -> usize {
+    match backend {
+        ShellBackend::Legacy4K { rows, .. } => *rows,
+        ShellBackend::Pixel2M { win } => viewport_rows(win.theme(), win.h as usize),
+    }
+}
+
+fn render_and_present_backend(
+    backend: &mut ShellBackend,
+    engine: &mut ShellEngine,
+    disp_ep_cap: u64,
+    win_id: u32,
+    sys: Option<&UserSysInfo>,
+) -> (u64, u64) {
+    match backend {
+        ShellBackend::Legacy4K { surf, cols, rows, .. } => {
+            engine.project_to_surface(surf, *cols, *rows, sys);
+            if disp_ep_cap == 0 {
+                return (0, 0);
+            }
+            match sys_ipc_call_inline(
+                disp_ep_cap,
+                pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
+                [win_id as u64, 0, 0, 0],
+                0,
+            ) {
+                Ok((_, _, mrs)) => (mrs[0], mrs[1]),
+                Err(_) => (0, 0),
+            }
+        }
+        ShellBackend::Pixel2M { win } => {
+            render_shell_pixel(win, engine, sys);
+            let (_, d_px, d_cyc) = win.present_full(disp_ep_cap);
+            (d_px, d_cyc)
+        }
+    }
+}
+
 fn reconnect_input_service(
     sup_ep_cap: u64,
     disp_ep_cap: u64,
     win_id: u32,
     input_ep_cap: &mut u64,
     engine: &mut ShellEngine,
-    surf: &SharedWindowSurface,
-    win_cols: usize,
-    win_rows: usize,
+    backend: &mut ShellBackend,
     sys: &mut UserSysInfo,
 ) -> bool {
     match sys_ipc_call_with_grant(sup_ep_cap, IPC_OP_SUP_RECONNECT_INPUT, [0; 4], 0, 0, 0, 0) {
@@ -132,8 +157,7 @@ fn reconnect_input_service(
             lb.push_bytes(b"), stale cap revoked, IRQ1 re-bound");
             engine.push_line(lb.as_bytes(), STYLE_OK);
             let _ = sys_sysinfo(sys);
-            engine.project_to_surface(surf, win_cols, win_rows, Some(sys));
-            let _ = present_surface(disp_ep_cap, win_id);
+            let _ = render_and_present_backend(backend, engine, disp_ep_cap, win_id, Some(sys));
             let _ = sys_write_debug(b"[DRY-SHELL] INPUT_RECOVERED ok=true\n");
             true
         }
@@ -175,51 +199,86 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
         TERM_ROWS as u16
     };
 
-    // 2. Allocate & initialize atomic 4 KiB `SharedWindowSurface` (`USER_RW`).
-    let surf_cap = match sys_frame_alloc(0) {
-        Ok(c) => c,
-        Err(_) => sys_exit(132),
-    };
-    if sys_vspace_map(surf_cap, SHELL_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
-        sys_exit(133);
-    }
-    // SAFETY: `SHELL_SURF_VADDR` is mapped `USER_RW` in `dry-shell`'s `VSpace`; `init_at` uses atomics only.
-    let surf = unsafe { SharedWindowSurface::init_at(SHELL_SURF_VADDR, win_cols, win_rows, true) };
-
     // SAFETY: Single-threaded process owns `ENGINE`.
     let engine = unsafe { &mut *ENGINE.0.get() };
     engine.init_banner();
 
     let mut sys = UserSysInfo::default();
     let _ = sys_sysinfo(&mut sys);
-    engine.project_to_surface(surf, win_cols as usize, win_rows as usize, Some(&sys));
 
-    let mut win_id: u32 = 0;
-    if disp_ep_cap != 0 {
-        let attach_mrs = if desktop_wm_mode {
-            [
-                (win_cols as u64) | ((win_rows as u64) << 16),
-                DESKTOP_WIN_X | (DESKTOP_WIN_Y << 32),
-                (WindowRole::Normal as u64) | ((TITLE_KIND_TERMINAL as u64) << 8),
-                0,
-            ]
-        } else {
-            [0; 4]
-        };
-        if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
+    // 2. Allocate & initialize window surface (`Frame2M` pixel surface in Glass 2.0 mode, `Frame4K` legacy).
+    let (mut backend, mut win_id) = if p3_mode && desktop_wm_mode {
+        let flags = PixelAppWindow::query_theme_flags(sup_ep_cap);
+        let mut win = PixelAppWindow::alloc_and_map(
+            SHELL_PIXEL_VADDR,
+            SHELL_WIN_W,
+            SHELL_WIN_H,
+            flags,
+        )
+        .unwrap_or_else(|_| sys_exit(132));
+        render_shell_pixel(&mut win, engine, Some(&sys));
+        win.publish_initial();
+        let wid = win.attach(
             disp_ep_cap,
-            IPC_OP_SURFACE_ATTACH,
-            attach_mrs,
-            surf_cap,
-            RIGHT_READ | RIGHT_MAP,
             0,
+            DESKTOP_WIN_X,
+            DESKTOP_WIN_Y,
+            WindowRole::Normal,
+            TITLE_KIND_TERMINAL,
             0,
-        ) {
-            if msg_tag_label(rtag) == IPC_OP_PONG {
-                win_id = rmrs[0] as u32;
+        );
+        (ShellBackend::Pixel2M { win }, wid)
+    } else {
+        let surf_cap = match sys_frame_alloc(0) {
+            Ok(c) => c,
+            Err(_) => sys_exit(132),
+        };
+        if sys_vspace_map(surf_cap, SHELL_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
+            sys_exit(133);
+        }
+        // SAFETY: `SHELL_SURF_VADDR` is mapped `USER_RW` in `dry-shell`'s `VSpace`; `init_at` uses atomics only.
+        let surf =
+            unsafe { SharedWindowSurface::init_at(SHELL_SURF_VADDR, win_cols, win_rows, true) };
+        engine.project_to_surface(surf, win_cols as usize, win_rows as usize, Some(&sys));
+
+        let mut wid: u32 = 0;
+        if disp_ep_cap != 0 {
+            let attach_mrs = if desktop_wm_mode {
+                [
+                    (win_cols as u64) | ((win_rows as u64) << 16),
+                    DESKTOP_WIN_X | (DESKTOP_WIN_Y << 32),
+                    (WindowRole::Normal as u64) | ((TITLE_KIND_TERMINAL as u64) << 8),
+                    0,
+                ]
+            } else {
+                [0; 4]
+            };
+            if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
+                disp_ep_cap,
+                IPC_OP_SURFACE_ATTACH,
+                attach_mrs,
+                surf_cap,
+                RIGHT_READ | RIGHT_MAP,
+                0,
+                0,
+            ) {
+                if msg_tag_label(rtag) == IPC_OP_PONG {
+                    wid = rmrs[0] as u32;
+                }
             }
         }
-    }
+        (
+            ShellBackend::Legacy4K {
+                vaddr: SHELL_SURF_VADDR,
+                cap: surf_cap,
+                surf,
+                cols: win_cols as usize,
+                rows: win_rows as usize,
+            },
+            wid,
+        )
+    };
+    let _ = &mut win_id;
 
     let mut input_ep_cap = init_input_ep_cap;
     let mut cached_vfs_cap: u64 = 0;
@@ -253,9 +312,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     win_id,
                     &mut input_ep_cap,
                     engine,
-                    surf,
-                    win_cols as usize,
-                    win_rows as usize,
+                    &mut backend,
                     &mut sys,
                 ) {
                     continue;
@@ -294,14 +351,28 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
             continue;
         }
 
-        let wcols = win_cols as usize;
-        let wrows = win_rows as usize;
         let (ev, _) = InputEvent::from_ipc_mrs(mrs);
+        if ev.kind == InputEventKind::WindowConfig {
+            if let ShellBackend::Pixel2M { ref mut win } = backend {
+                if win.handle_window_config(ev) {
+                    let _ = sys_sysinfo(&mut sys);
+                    let _ = render_and_present_backend(
+                        &mut backend,
+                        engine,
+                        disp_ep_cap,
+                        win_id,
+                        Some(&sys),
+                    );
+                }
+            }
+            continue;
+        }
+
+        let vrows = vis_rows_backend(&backend);
 
         if ev.kind == InputEventKind::MouseScroll {
-            if ev.wheel != 0 && engine.scroll_history_rows((ev.wheel as isize) * 3, wrows) {
-                engine.project_to_surface(surf, wcols, wrows, None);
-                let _ = present_surface(disp_ep_cap, win_id);
+            if ev.wheel != 0 && engine.scroll_history_rows((ev.wheel as isize) * 3, vrows) {
+                let _ = render_and_present_backend(&mut backend, engine, disp_ep_cap, win_id, None);
             }
             continue;
         }
@@ -322,9 +393,8 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
 
         if (ev.modifiers & MOD_SHIFT) != 0 && (ev.keycode == KEY_UP || ev.keycode == KEY_DOWN) {
             let delta = if ev.keycode == KEY_UP { 3 } else { -3 };
-            if engine.scroll_history_rows(delta, wrows) {
-                engine.project_to_surface(surf, wcols, wrows, None);
-                let _ = present_surface(disp_ep_cap, win_id);
+            if engine.scroll_history_rows(delta, vrows) {
+                let _ = render_and_present_backend(&mut backend, engine, disp_ep_cap, win_id, None);
             }
             continue;
         }
@@ -349,73 +419,22 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 _ => false,
             };
             if changed {
-                engine.project_to_surface(surf, wcols, wrows, None);
-                let _ = present_surface(disp_ep_cap, win_id);
+                let _ = render_and_present_backend(&mut backend, engine, disp_ep_cap, win_id, None);
             }
             continue;
         }
 
-        match ev.keycode {
-            KEY_PAGEUP => {
-                if engine.scroll_history_rows(8, wrows) {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_PAGEDOWN => {
-                if engine.scroll_history_rows(-8, wrows) {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_UP => {
-                if engine.history_prev() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_DOWN => {
-                if engine.history_next() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_BACKSPACE => {
-                if engine.editor.backspace() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_DELETE => {
-                if engine.editor.delete_at_cursor() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_LEFT => {
-                if engine.editor.move_left() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_RIGHT => {
-                if engine.editor.move_right() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_HOME => {
-                if engine.editor.move_home() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
-            KEY_END => {
-                if engine.editor.move_end() {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let _ = present_surface(disp_ep_cap, win_id);
-                }
-            }
+        let redraw = match ev.keycode {
+            KEY_PAGEUP => engine.scroll_history_rows(8, vrows),
+            KEY_PAGEDOWN => engine.scroll_history_rows(-8, vrows),
+            KEY_UP => engine.history_prev(),
+            KEY_DOWN => engine.history_next(),
+            KEY_BACKSPACE => engine.editor.backspace(),
+            KEY_DELETE => engine.editor.delete_at_cursor(),
+            KEY_LEFT => engine.editor.move_left(),
+            KEY_RIGHT => engine.editor.move_right(),
+            KEY_HOME => engine.editor.move_home(),
+            KEY_END => engine.editor.move_end(),
             KEY_ENTER => {
                 let mut line_copy = [0u8; MAX_INPUT_LEN];
                 let line_len = engine.editor.as_bytes().len();
@@ -809,12 +828,17 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 }
 
                 let _ = sys_sysinfo(&mut sys);
-                engine.project_to_surface(surf, wcols, wrows, Some(&sys));
-                let (d_px, d_cyc) = present_surface(disp_ep_cap, win_id);
+                let (d_px, d_cyc) = render_and_present_backend(
+                    &mut backend,
+                    engine,
+                    disp_ep_cap,
+                    win_id,
+                    Some(&sys),
+                );
                 if disp_ep_cap != 0 {
                     let mut plb = LineBuilder::new();
                     plb.push_bytes(b"[DRY-SHELL] PRESENT seq=");
-                    plb.push_u64(surf.current_seq() as u64);
+                    plb.push_u64(backend.current_seq() as u64);
                     plb.push_bytes(b" dirty_px=");
                     plb.push_u64(d_px);
                     plb.push_bytes(b" blit_cyc=");
@@ -839,9 +863,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                             win_id,
                             &mut input_ep_cap,
                             engine,
-                            surf,
-                            wcols,
-                            wrows,
+                            &mut backend,
                             &mut sys,
                         )
                     {
@@ -876,16 +898,17 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     );
                     break;
                 }
+                false
             }
             _ => {
                 if ev.ascii != 0 && engine.editor.insert_ascii(ev.ascii) {
-                    engine.project_to_surface(surf, wcols, wrows, None);
-                    let (d_px, d_cyc) = present_surface(disp_ep_cap, win_id);
+                    let (d_px, d_cyc) =
+                        render_and_present_backend(&mut backend, engine, disp_ep_cap, win_id, None);
                     if !logged_single_row && disp_ep_cap != 0 {
                         logged_single_row = true;
                         let mut rlb = LineBuilder::new();
                         rlb.push_bytes(b"[DRY-SHELL] ROW_PRESENT seq=");
-                        rlb.push_u64(surf.current_seq() as u64);
+                        rlb.push_u64(backend.current_seq() as u64);
                         rlb.push_bytes(b" dirty_px=");
                         rlb.push_u64(d_px);
                         rlb.push_bytes(b" blit_cyc=");
@@ -893,7 +916,11 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         debug_line(&rlb);
                     }
                 }
+                false
             }
+        };
+        if redraw {
+            let _ = render_and_present_backend(&mut backend, engine, disp_ep_cap, win_id, None);
         }
     }
 
@@ -903,7 +930,15 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
     if cached_vault_cap != 0 {
         let _ = sys_cap_revoke(cached_vault_cap, 1);
     }
-    let _ = sys_vspace_map(surf_cap, SHELL_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
-    let _ = sys_cap_revoke(surf_cap, 2);
+    match backend {
+        ShellBackend::Legacy4K { vaddr, cap, .. } => {
+            let _ = sys_vspace_map(cap, vaddr, VSPACE_MAP_OP_UNMAP_4K);
+            let _ = sys_cap_revoke(cap, 2);
+        }
+        ShellBackend::Pixel2M { win } => {
+            let _ = sys_vspace_map(win.surf_cap, win.vaddr, VSPACE_MAP_OP_UNMAP_2M);
+            let _ = sys_cap_revoke(win.surf_cap, 2);
+        }
+    }
     sys_exit(0);
 }

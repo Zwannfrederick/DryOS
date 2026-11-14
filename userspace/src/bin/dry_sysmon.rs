@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! `dry-sysmon` (`Life Station`) — Isolated Ring 3 (`CPL=3`, `SecDomain::Userspace`, `0x0103`)
-//! Live System & Compartment Monitor (`Milestone 2A-2` Window B & `Milestone 2A-3` Life Station).
-//!
-//! Architectural & Security Properties:
-//! - Runs in a separate `Userspace` compartment (`0x0103`) with its own `VSpace` and `CSpace`.
-//! - Holds ZERO hardware capabilities (`0` `IrqCap`, `0` `IoPortCap`, `0` `Framebuffer` cap).
-//! - Renders live `SYS_SYSINFO` + `SYS_PROC_LIST` kernel telemetry into an atomic
-//!   `SharedWindowSurface` and sleeps via `sys_notify_wait` (`~250 ms` H1 timer deadline + instant
-//!   wakeup on input/close; `0` busy-polling, `0` fabricated/unmeasured metrics).
+//! Live DRY Glass 2.0 System & Compartment Monitor (`Milestone 2A-2` Window B & DRY Glass 2.0).
 
 #![no_std]
 #![no_main]
@@ -15,15 +8,20 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 
-use dry_userspace::action::{compartment_short_name, DesktopAction, APP_COUNT};
+use dry_userspace::action::{DesktopAction, APP_COUNT};
+use dry_userspace::apps::sysmon_ui::{
+    render_sysmon_pixel, SysmonView, SYSMON_PIXEL_VADDR, SYSMON_WIN_H, SYSMON_WIN_W,
+};
+use dry_userspace::apps::{app_log_line, PixelAppWindow};
 use dry_userspace::gfx::BOX_HORIZ;
 use dry_userspace::input::{InputEvent, InputEventKind};
+use dry_userspace::keymap::KEY_ESC;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::surface::{
     SharedWindowSurface, SurfaceCell, STYLE_ACCENT, STYLE_DEFAULT, STYLE_HEADER, STYLE_MUTED,
     STYLE_OK, STYLE_WARN,
 };
-use dry_userspace::wm::{WindowRole, TITLE_KIND_SYSMON};
+use dry_userspace::wm_types::{WindowRole, TITLE_KIND_SYSMON};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait,
@@ -32,7 +30,7 @@ use dry_userspace::{
     IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_APPS,
     IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE,
     IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
-    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SYSMON_SURF_VADDR: u64 = 0x1800_0000;
@@ -41,21 +39,19 @@ const LEGACY_ROWS: usize = 20;
 const LEGACY_INIT_X: u64 = 636;
 const LEGACY_INIT_Y: u64 = 52;
 
-const LIFE_COLS: usize = 56;
-const LIFE_ROWS: usize = 22;
 const LIFE_INIT_X: u64 = 620;
 const LIFE_INIT_Y: u64 = 52;
-const MAX_COLS: usize = 56;
-
+const SPARK_CAP: usize = 32;
 const NOTIF_SHUTDOWN_BIT: u64 = 1 << 1;
 
-fn log_line(lb: &LineBuilder) {
-    let mut out = [0u8; 120];
-    let s = lb.as_bytes();
-    let n = s.len().min(out.len() - 1);
-    out[..n].copy_from_slice(&s[..n]);
-    out[n] = b'\n';
-    let _ = sys_write_debug(&out[..=n]);
+enum SysmonBackend {
+    Legacy4K {
+        cap: u64,
+        surf: &'static SharedWindowSurface,
+    },
+    Pixel2M {
+        win: PixelAppWindow,
+    },
 }
 
 fn query_running_apps(sup_ep_cap: u64) -> u64 {
@@ -81,42 +77,11 @@ fn query_running_apps(sup_ep_cap: u64) -> u64 {
 }
 
 fn write_row_cols(surf: &SharedWindowSurface, cols: usize, row: usize, text: &[u8], style: u8) {
-    let mut cells = [SurfaceCell::BLANK; MAX_COLS];
+    let mut cells = [SurfaceCell::BLANK; LEGACY_COLS];
     for (i, &ch) in text.iter().take(cols).enumerate() {
         cells[i] = SurfaceCell { ch, style };
     }
     surf.store_row_slice(cols, row, &cells[..cols]);
-}
-
-fn push_padded(lb: &mut LineBuilder, s: &[u8], width: usize) {
-    let take = s.len().min(width);
-    lb.push_bytes(&s[..take]);
-    for _ in take..width {
-        lb.push_byte(b' ');
-    }
-}
-
-fn push_u64_rjust(lb: &mut LineBuilder, val: u64, width: usize) {
-    let mut digits = [0u8; 20];
-    let mut v = val;
-    let mut len = 0usize;
-    if v == 0 {
-        digits[0] = b'0';
-        len = 1;
-    } else {
-        while v > 0 && len < digits.len() {
-            digits[len] = b'0' + (v % 10) as u8;
-            v /= 10;
-            len += 1;
-        }
-    }
-    for _ in len..width {
-        lb.push_byte(b' ');
-    }
-    while len > 0 {
-        len -= 1;
-        lb.push_byte(digits[len]);
-    }
 }
 
 fn render_legacy_telemetry_frame(
@@ -127,75 +92,59 @@ fn render_legacy_telemetry_frame(
     last_ascii: u8,
 ) {
     let odd = surf.begin_write();
-
-    write_row_cols(
-        surf,
-        LEGACY_COLS,
-        0,
-        b"DRY SYSTEM MONITOR // CPL=3 COMPARTMENT 0x0103",
-        STYLE_HEADER,
-    );
     let div = [BOX_HORIZ; LEGACY_COLS];
+
+    write_row_cols(surf, LEGACY_COLS, 0, b"DRY SYSMON // KERNEL TELEMETRY", STYLE_HEADER);
     write_row_cols(surf, LEGACY_COLS, 1, &div, STYLE_MUTED);
-    write_row_cols(surf, LEGACY_COLS, 2, b"CPU & INTERRUPT FABRIC", STYLE_ACCENT);
+
+    let mut l2 = LineBuilder::new();
+    l2.push_bytes(b"Status : ACTIVE  Window B (CPL=3)  Refresh #");
+    l2.push_u64(refresh_seq);
+    write_row_cols(surf, LEGACY_COLS, 2, l2.as_bytes(), STYLE_OK);
 
     let apic_str: &[u8] = match sys.apic_mode {
-        1 => b"x2APIC-MSR",
-        2 => b"xAPIC-MMIO",
+        1 => b"x2APIC",
+        2 => b"xAPIC",
         _ => b"Disabled",
     };
     let mut l3 = LineBuilder::new();
-    l3.push_bytes(b"  Online vCPUs : ");
-    l3.push_u64(sys.online_cpus as u64);
-    l3.push_bytes(b"       APIC : ");
+    l3.push_bytes(b"APIC   : ");
     l3.push_bytes(apic_str);
-    write_row_cols(surf, LEGACY_COLS, 3, l3.as_bytes(), STYLE_OK);
+    l3.push_bytes(b"    Online vCPUs : ");
+    l3.push_u64(sys.online_cpus as u64);
+    write_row_cols(surf, LEGACY_COLS, 3, l3.as_bytes(), STYLE_DEFAULT);
 
     let mut l4 = LineBuilder::new();
-    l4.push_bytes(b"  IOAPIC Route : ");
-    l4.push_bytes(if sys.ioapic_present != 0 {
-        b"ACTIVE"
-    } else {
-        b"OFF   "
-    });
-    l4.push_bytes(b"   TSC  : ");
+    l4.push_bytes(b"TSC    : ");
     l4.push_u64(sys.tsc_mhz);
-    l4.push_bytes(b" MHz");
+    l4.push_bytes(b" MHz  Uptime : ");
+    l4.push_u64(sys.uptime_ms / 1000);
+    l4.push_byte(b'.');
+    l4.push_u64_pad3(sys.uptime_ms % 1000);
+    l4.push_bytes(b" s");
     write_row_cols(surf, LEGACY_COLS, 4, l4.as_bytes(), STYLE_DEFAULT);
+    write_row_cols(surf, LEGACY_COLS, 5, b"", STYLE_DEFAULT);
 
-    let mut l5 = LineBuilder::new();
-    l5.push_bytes(b"  Uptime       : ");
-    l5.push_u64(sys.uptime_ms / 1000);
-    l5.push_byte(b'.');
-    l5.push_u64_pad3(sys.uptime_ms % 1000);
-    l5.push_bytes(b" s   Frame: #");
-    l5.push_u64(refresh_seq);
-    write_row_cols(surf, LEGACY_COLS, 5, l5.as_bytes(), STYLE_OK);
-
-    write_row_cols(surf, LEGACY_COLS, 6, b"", STYLE_DEFAULT);
-    write_row_cols(
-        surf,
-        LEGACY_COLS,
-        7,
-        b"PHYSICAL MEMORY (4K BUDDY PMM)",
-        STYLE_ACCENT,
-    );
-
+    write_row_cols(surf, LEGACY_COLS, 6, b"PHYSICAL MEMORY MANAGER (4 KiB FRAMES)", STYLE_ACCENT);
     let usable = sys.usable_frames_4k.max(1) as u64;
     let free = (sys.free_frames_4k as u64).min(usable);
     let used = usable.saturating_sub(free);
     let used_pct = (used * 100) / usable;
-    let free_mib = (free * 4) / 1024;
-    let usable_mib = (usable * 4) / 1024;
+
+    let mut l7 = LineBuilder::new();
+    l7.push_bytes(b"  Usable : ");
+    l7.push_u64(usable);
+    l7.push_bytes(b" frames (");
+    l7.push_u64((usable * 4) / 1024);
+    l7.push_bytes(b" MiB)");
+    write_row_cols(surf, LEGACY_COLS, 7, l7.as_bytes(), STYLE_DEFAULT);
 
     let mut l8 = LineBuilder::new();
-    l8.push_bytes(b"  Free / Usable: ");
-    l8.push_u64(free_mib);
-    l8.push_bytes(b" / ");
-    l8.push_u64(usable_mib);
-    l8.push_bytes(b" MiB (");
+    l8.push_bytes(b"  Free   : ");
     l8.push_u64(free);
-    l8.push_bytes(b" 4K)");
+    l8.push_bytes(b" frames (");
+    l8.push_u64((free * 4) / 1024);
+    l8.push_bytes(b" MiB)");
     write_row_cols(surf, LEGACY_COLS, 8, l8.as_bytes(), STYLE_DEFAULT);
 
     let filled = ((used * 20) / usable).min(20) as usize;
@@ -210,13 +159,7 @@ fn render_legacy_telemetry_frame(
     write_row_cols(surf, LEGACY_COLS, 9, l9.as_bytes(), STYLE_OK);
 
     write_row_cols(surf, LEGACY_COLS, 10, b"", STYLE_DEFAULT);
-    write_row_cols(
-        surf,
-        LEGACY_COLS,
-        11,
-        b"MICROKERNEL & HARDWARE COUNTERS",
-        STYLE_ACCENT,
-    );
+    write_row_cols(surf, LEGACY_COLS, 11, b"MICROKERNEL & HARDWARE COUNTERS", STYLE_ACCENT);
 
     let mut l12 = LineBuilder::new();
     l12.push_bytes(b"  Syscalls     : ");
@@ -275,208 +218,31 @@ fn render_legacy_telemetry_frame(
     );
 
     surf.dirty_row_min.store(0, Ordering::Relaxed);
-    surf.dirty_row_max
-        .store((LEGACY_ROWS - 1) as u16, Ordering::Relaxed);
-    surf.uptime_sec_snap.store(
-        (sys.uptime_ms / 1000).min(u32::MAX as u64) as u32,
-        Ordering::Relaxed,
-    );
-    surf.ext_irqs_snap.store(
-        sys.total_ext_irqs.min(u32::MAX as u64) as u32,
-        Ordering::Relaxed,
-    );
+    surf.dirty_row_max.store((LEGACY_ROWS - 1) as u16, Ordering::Relaxed);
+    surf.uptime_sec_snap.store((sys.uptime_ms / 1000).min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    surf.ext_irqs_snap.store(sys.total_ext_irqs.min(u32::MAX as u64) as u32, Ordering::Relaxed);
     surf.end_write(odd);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_life_station_frame(
-    surf: &SharedWindowSurface,
-    sys: &UserSysInfo,
-    prev_sys: &UserSysInfo,
-    pwr: &UserPowerInfo,
-    procs: &[UserProcInfo],
-    running_apps: u64,
-    refresh_seq: u64,
-    keys_rcvd: u64,
-    last_ascii: u8,
-) {
-    let odd = surf.begin_write();
-    let div = [BOX_HORIZ; LIFE_COLS];
-
-    write_row_cols(
-        surf,
-        LIFE_COLS,
-        0,
-        b"DRY LIFE STATION // GLASS KERNEL & ISLAND TELEMETRY",
-        STYLE_HEADER,
-    );
-    write_row_cols(surf, LIFE_COLS, 1, &div, STYLE_MUTED);
-
-    let apic_str: &[u8] = match sys.apic_mode {
-        1 => b"x2APIC",
-        2 => b"xAPIC ",
-        _ => b"Off   ",
-    };
-    let mut r2 = LineBuilder::new();
-    r2.push_bytes(b"vCPUs: ");
-    r2.push_u64(sys.online_cpus as u64);
-    r2.push_bytes(b"  APIC: ");
-    r2.push_bytes(apic_str);
-    r2.push_bytes(b"  TSC: ");
-    r2.push_u64(sys.tsc_mhz);
-    r2.push_bytes(b"MHz  Up: ");
-    r2.push_u64(sys.uptime_ms / 1000);
-    r2.push_byte(b'.');
-    r2.push_u64_pad3(sys.uptime_ms % 1000);
-    r2.push_byte(b's');
-    write_row_cols(surf, LIFE_COLS, 2, r2.as_bytes(), STYLE_OK);
-
-    let usable = sys.usable_frames_4k.max(1) as u64;
-    let free = (sys.free_frames_4k as u64).min(usable);
-    let used = usable.saturating_sub(free);
-    let used_pct = (used * 100) / usable;
-    let used_mib = (used * 4) / 1024;
-    let usable_mib = (usable * 4) / 1024;
-    let filled = ((used * 16) / usable).min(16) as usize;
-
-    let mut r3 = LineBuilder::new();
-    r3.push_bytes(b"PMM  : [");
-    for i in 0..16 {
-        r3.push_byte(if i < filled { b'#' } else { b'.' });
+fn push_spark_sample(ring: &mut [u16; SPARK_CAP], len: &mut usize, d_sys: u64) -> u16 {
+    let val = d_sys.min(u16::MAX as u64) as u16;
+    if *len < SPARK_CAP {
+        ring[*len] = val;
+        *len += 1;
+    } else {
+        for i in 1..SPARK_CAP {
+            ring[i - 1] = ring[i];
+        }
+        ring[SPARK_CAP - 1] = val;
     }
-    r3.push_bytes(b"] ");
-    r3.push_u64(used_pct);
-    r3.push_bytes(b"%  ");
-    r3.push_u64(used_mib);
-    r3.push_byte(b'/');
-    r3.push_u64(usable_mib);
-    r3.push_bytes(b" MiB (");
-    r3.push_u64(free);
-    r3.push_bytes(b" free)");
-    write_row_cols(surf, LIFE_COLS, 3, r3.as_bytes(), STYLE_DEFAULT);
-
-    let d_sys = sys.total_syscalls.saturating_sub(prev_sys.total_syscalls);
-    let d_ipc = sys.total_ipc_msgs.saturating_sub(prev_sys.total_ipc_msgs);
-    let mut r4 = LineBuilder::new();
-    r4.push_bytes(b"Sys  : ");
-    r4.push_u64(sys.total_syscalls);
-    r4.push_bytes(b" (+");
-    r4.push_u64(d_sys);
-    r4.push_bytes(b")  IPC: ");
-    r4.push_u64(sys.total_ipc_msgs);
-    r4.push_bytes(b" (+");
-    r4.push_u64(d_ipc);
-    r4.push_bytes(b")");
-    write_row_cols(surf, LIFE_COLS, 4, r4.as_bytes(), STYLE_OK);
-
-    let mut r5 = LineBuilder::new();
-    r5.push_bytes(b"CtxSw: ");
-    r5.push_u64(sys.total_ctx_switches);
-    r5.push_bytes(b"  HLT: ");
-    r5.push_u64(pwr.idle_hlt_calls);
-    r5.push_bytes(b"  IRQ1/12: ");
-    r5.push_u64(sys.irq1_delivered);
-    r5.push_byte(b'/');
-    r5.push_u64(sys.irq12_delivered);
-    write_row_cols(surf, LIFE_COLS, 5, r5.as_bytes(), STYLE_ACCENT);
-
-    write_row_cols(surf, LIFE_COLS, 6, &div, STYLE_MUTED);
-
-    let mut r7 = LineBuilder::new();
-    r7.push_bytes(b"ACTIVE COMPARTMENTS (");
-    r7.push_u64(procs.len() as u64);
-    r7.push_bytes(b" LIVE, ");
-    r7.push_u64(running_apps);
-    r7.push_byte(b'/');
-    r7.push_u64(APP_COUNT as u64);
-    r7.push_bytes(b" APPS) // SYS_PROC_LIST");
-    write_row_cols(surf, LIFE_COLS, 7, r7.as_bytes(), STYLE_ACCENT);
-
-    write_row_cols(
-        surf,
-        LIFE_COLS,
-        8,
-        b" PID DOM  COMPARTMENT   ST    4K_PG     SYSCALLS",
-        STYLE_MUTED,
-    );
-
-    for slot in 0..10usize {
-        let row = 9 + slot;
-        if slot < procs.len() {
-            let p = &procs[slot];
-            let dom = if p.domain == 1 { b"ROOT" } else { b"USER" };
-            let (st_lbl, st_style): (&[u8], u8) = match p.state {
-                2 => (b"RUN ", if p.domain == 1 { STYLE_ACCENT } else { STYLE_OK }),
-                3 => (b"EXIT", STYLE_WARN),
-                4 => (b"FLT!", STYLE_WARN),
-                5 => (b"KILL", STYLE_WARN),
-                _ => (b"INIT", STYLE_MUTED),
-            };
-            let cname = compartment_short_name(p.compartment_id, p.domain);
-            let mut pl = LineBuilder::new();
-            push_u64_rjust(&mut pl, p.pid as u64, 4);
-            pl.push_byte(b' ');
-            pl.push_bytes(dom);
-            pl.push_byte(b' ');
-            push_padded(&mut pl, cname, 13);
-            pl.push_byte(b' ');
-            pl.push_bytes(st_lbl);
-            pl.push_byte(b' ');
-            push_u64_rjust(&mut pl, (p.mapped_pages_4k + p.pt_frames_4k) as u64, 6);
-            pl.push_byte(b' ');
-            push_u64_rjust(&mut pl, p.syscall_entries, 12);
-            write_row_cols(surf, LIFE_COLS, row, pl.as_bytes(), st_style);
-        } else {
-            write_row_cols(surf, LIFE_COLS, row, b"", STYLE_DEFAULT);
+    let mut mx = 1u16;
+    for &s in &ring[..*len] {
+        if s > mx {
+            mx = s;
         }
     }
-
-    write_row_cols(surf, LIFE_COLS, 19, &div, STYLE_MUTED);
-
-    let lease_epoch = sys_vault_query_epoch().unwrap_or(1);
-    let mut r20 = LineBuilder::new();
-    r20.push_bytes(b"Seq #");
-    r20.push_u64(refresh_seq);
-    r20.push_bytes(b"  Epoch: ");
-    r20.push_u64(lease_epoch as u64);
-    r20.push_bytes(b"  Keys: ");
-    r20.push_u64(keys_rcvd);
-    r20.push_bytes(b"  Last: ");
-    if (0x21..=0x7E).contains(&last_ascii) {
-        r20.push_byte(b'\'');
-        r20.push_byte(last_ascii);
-        r20.push_byte(b'\'');
-    } else {
-        r20.push_bytes(b"none");
-    }
-    write_row_cols(
-        surf,
-        LIFE_COLS,
-        20,
-        r20.as_bytes(),
-        if keys_rcvd > 0 { STYLE_WARN } else { STYLE_MUTED },
-    );
-
-    write_row_cols(
-        surf,
-        LIFE_COLS,
-        21,
-        b"[R] Refresh  [T] Tile  [Q] Close  [X] #UD Fault Test",
-        STYLE_MUTED,
-    );
-
-    surf.dirty_row_min.store(0, Ordering::Relaxed);
-    surf.dirty_row_max
-        .store((LIFE_ROWS - 1) as u16, Ordering::Relaxed);
-    surf.uptime_sec_snap.store(
-        (sys.uptime_ms / 1000).min(u32::MAX as u64) as u32,
-        Ordering::Relaxed,
-    );
-    surf.ext_irqs_snap.store(
-        sys.total_ext_irqs.min(u32::MAX as u64) as u32,
-        Ordering::Relaxed,
-    );
-    surf.end_write(odd);
+    mx
 }
 
 #[no_mangle]
@@ -506,26 +272,11 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     };
 
     let p3_mode = session_mode >= 10;
-    let cols = if p3_mode { LIFE_COLS } else { LEGACY_COLS };
-    let rows = if p3_mode { LIFE_ROWS } else { LEGACY_ROWS };
-    let init_x = if p3_mode { LIFE_INIT_X } else { LEGACY_INIT_X };
-    let init_y = if p3_mode { LIFE_INIT_Y } else { LEGACY_INIT_Y };
-
-    let surf_cap = match sys_frame_alloc(0) {
-        Ok(c) => c,
-        Err(_) => sys_exit(163),
-    };
-    if sys_vspace_map(surf_cap, SYSMON_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
-        sys_exit(164);
-    }
-    // SAFETY: `SYSMON_SURF_VADDR` is mapped `USER_RW` in `dry-sysmon`'s isolated `VSpace`.
-    let surf = unsafe {
-        SharedWindowSurface::init_at(SYSMON_SURF_VADDR, cols as u16, rows as u16, false)
-    };
+    let no_focus_flag = if launches <= 1 { 1u64 << 16 } else { 0 };
 
     let mut sys = UserSysInfo::default();
     let _ = sys_sysinfo(&mut sys);
-    let mut prev_sys = sys;
+    let mut prev_sys;
     let mut pwr = UserPowerInfo::default();
     if p3_mode {
         let _ = sys_power_query(&mut pwr);
@@ -539,59 +290,94 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     let mut refresh_seq: u64 = 1;
     let mut keys_rcvd: u64 = 0;
     let mut last_ascii: u8 = 0;
+    let mut spark_ring = [0u16; SPARK_CAP];
+    let mut spark_len = 0usize;
 
-    if p3_mode {
+    let (mut backend, win_id) = if p3_mode {
+        let init_flags = PixelAppWindow::query_theme_flags(sup_ep_cap);
+        let mut win = PixelAppWindow::alloc_and_map(
+            SYSMON_PIXEL_VADDR,
+            SYSMON_WIN_W,
+            SYSMON_WIN_H,
+            init_flags,
+        )
+        .unwrap_or_else(|_| sys_exit(163));
         let running_apps = query_running_apps(sup_ep_cap);
-        render_life_station_frame(
-            surf,
-            &sys,
-            &prev_sys,
-            &pwr,
-            &procs[..proc_count.min(procs.len())],
+        let spark_max = push_spark_sample(&mut spark_ring, &mut spark_len, 0);
+        let view = SysmonView {
+            sys: &sys,
+            d_sys: 0,
+            d_ipc: 0,
+            pwr: &pwr,
+            procs: &procs[..proc_count.min(procs.len())],
             running_apps,
             refresh_seq,
+            lease_epoch: sys_vault_query_epoch().unwrap_or(1) as u64,
             keys_rcvd,
             last_ascii,
-        );
-    } else {
-        render_legacy_telemetry_frame(surf, &sys, refresh_seq, keys_rcvd, last_ascii);
-    }
-
-    let mut win_id: u32 = 0;
-    if disp_ep_cap != 0 {
-        // Set `NO_FOCUS_ON_OPEN` (`1 << 16`) only on initial boot (`launches <= 1`) so Terminal keeps initial focus.
-        let no_focus_flag = if launches <= 1 { 1u64 << 16 } else { 0 };
-        let attach_mrs = [
-            (cols as u64) | ((rows as u64) << 16),
-            init_x | (init_y << 32),
-            (WindowRole::Normal as u64) | ((TITLE_KIND_SYSMON as u64) << 8) | no_focus_flag,
-            0,
-        ];
-        if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
+            spark_samples: &spark_ring[..spark_len],
+            spark_max,
+        };
+        render_sysmon_pixel(&mut win, &view);
+        win.publish_initial();
+        let wid = win.attach(
             disp_ep_cap,
-            IPC_OP_SURFACE_ATTACH,
-            attach_mrs,
-            surf_cap,
-            RIGHT_READ | RIGHT_MAP,
-            0,
-            0,
-        ) {
-            if msg_tag_label(rtag) == IPC_OP_PONG {
-                win_id = rmrs[0] as u32;
+            notif_cap,
+            LIFE_INIT_X,
+            LIFE_INIT_Y,
+            WindowRole::Normal,
+            TITLE_KIND_SYSMON,
+            no_focus_flag,
+        );
+        (SysmonBackend::Pixel2M { win }, wid)
+    } else {
+        let surf_cap = match sys_frame_alloc(0) {
+            Ok(c) => c,
+            Err(_) => sys_exit(163),
+        };
+        if sys_vspace_map(surf_cap, SYSMON_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
+            sys_exit(164);
+        }
+        // SAFETY: `SYSMON_SURF_VADDR` is mapped `USER_RW` in `dry-sysmon`'s isolated `VSpace`.
+        let surf = unsafe {
+            SharedWindowSurface::init_at(SYSMON_SURF_VADDR, LEGACY_COLS as u16, LEGACY_ROWS as u16, false)
+        };
+        render_legacy_telemetry_frame(surf, &sys, refresh_seq, keys_rcvd, last_ascii);
+        let mut wid: u32 = 0;
+        if disp_ep_cap != 0 {
+            let attach_mrs = [
+                (LEGACY_COLS as u64) | ((LEGACY_ROWS as u64) << 16),
+                LEGACY_INIT_X | (LEGACY_INIT_Y << 32),
+                (WindowRole::Normal as u64) | ((TITLE_KIND_SYSMON as u64) << 8) | no_focus_flag,
+                0,
+            ];
+            if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
+                disp_ep_cap,
+                IPC_OP_SURFACE_ATTACH,
+                attach_mrs,
+                surf_cap,
+                RIGHT_READ | RIGHT_MAP,
+                0,
+                0,
+            ) {
+                if msg_tag_label(rtag) == IPC_OP_PONG {
+                    wid = rmrs[0] as u32;
+                }
+            }
+            if wid != 0 {
+                let _ = sys_ipc_call_with_grant(
+                    disp_ep_cap,
+                    IPC_OP_WIN_BIND_NOTIF,
+                    [wid as u64, 0, 0, 0],
+                    notif_cap,
+                    RIGHT_READ | RIGHT_SIGNAL,
+                    0,
+                    0,
+                );
             }
         }
-        if win_id != 0 {
-            let _ = sys_ipc_call_with_grant(
-                disp_ep_cap,
-                IPC_OP_WIN_BIND_NOTIF,
-                [win_id as u64, 0, 0, 0],
-                notif_cap,
-                RIGHT_READ | RIGHT_SIGNAL,
-                0,
-                0,
-            );
-        }
-    }
+        (SysmonBackend::Legacy4K { cap: surf_cap, surf }, wid)
+    };
 
     let mut rlb = LineBuilder::new();
     rlb.push_bytes(b"[DRY-SYSMON] Ready in CPL3 Userspace win_id=");
@@ -600,7 +386,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         rlb.push_bytes(b" mode=life_station procs=");
         rlb.push_u64(proc_count as u64);
     }
-    log_line(&rlb);
+    app_log_line(&rlb);
 
     let refresh_tsc = 250_000u64.saturating_mul(sys.tsc_mhz.max(1000));
     let mut should_exit_clean = false;
@@ -622,6 +408,11 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                 }
                 if plbl == IPC_OP_INPUT_EVENT {
                     let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
+                    if let SysmonBackend::Pixel2M { ref mut win } = backend {
+                        if win.handle_window_config(ev) {
+                            continue;
+                        }
+                    }
                     if ev.kind == InputEventKind::KeyPress {
                         keys_rcvd = keys_rcvd.wrapping_add(1);
                         last_ascii = ev.ascii;
@@ -632,9 +423,9 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                         klb.push_hex_u64(ev.ascii as u64);
                         klb.push_bytes(b" count=");
                         klb.push_u64(keys_rcvd);
-                        log_line(&klb);
+                        app_log_line(&klb);
 
-                        if ev.ascii == b'q' || ev.ascii == b'Q' {
+                        if ev.keycode == KEY_ESC || ev.ascii == b'q' || ev.ascii == b'Q' {
                             should_exit_clean = true;
                             break;
                         }
@@ -684,31 +475,45 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
 
         prev_sys = sys;
         let _ = sys_sysinfo(&mut sys);
-        if p3_mode {
-            let _ = sys_power_query(&mut pwr);
-            proc_count = sys_proc_list(&mut procs).unwrap_or((0, 0)).0;
-            let running_apps = query_running_apps(sup_ep_cap);
-            render_life_station_frame(
-                surf,
-                &sys,
-                &prev_sys,
-                &pwr,
-                &procs[..proc_count.min(procs.len())],
-                running_apps,
-                refresh_seq,
-                keys_rcvd,
-                last_ascii,
-            );
-        } else {
-            render_legacy_telemetry_frame(surf, &sys, refresh_seq, keys_rcvd, last_ascii);
-        }
-        if disp_ep_cap != 0 && win_id != 0 {
-            let _ = sys_ipc_call_inline(
-                disp_ep_cap,
-                pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
-                [win_id as u64, 0, 0, 0],
-                0,
-            );
+        match backend {
+            SysmonBackend::Pixel2M { ref mut win } => {
+                let _ = win.sync_prefs(sup_ep_cap);
+                let _ = sys_power_query(&mut pwr);
+                proc_count = sys_proc_list(&mut procs).unwrap_or((0, 0)).0;
+                let running_apps = query_running_apps(sup_ep_cap);
+                let d_sys = sys.total_syscalls.saturating_sub(prev_sys.total_syscalls);
+                let d_ipc = sys.total_ipc_msgs.saturating_sub(prev_sys.total_ipc_msgs);
+                let spark_max = push_spark_sample(&mut spark_ring, &mut spark_len, d_sys);
+                let view = SysmonView {
+                    sys: &sys,
+                    d_sys,
+                    d_ipc,
+                    pwr: &pwr,
+                    procs: &procs[..proc_count.min(procs.len())],
+                    running_apps,
+                    refresh_seq,
+                    lease_epoch: sys_vault_query_epoch().unwrap_or(1) as u64,
+                    keys_rcvd,
+                    last_ascii,
+                    spark_samples: &spark_ring[..spark_len],
+                    spark_max,
+                };
+                render_sysmon_pixel(win, &view);
+                if disp_ep_cap != 0 && win_id != 0 {
+                    let _ = win.present_full(disp_ep_cap);
+                }
+            }
+            SysmonBackend::Legacy4K { surf, .. } => {
+                render_legacy_telemetry_frame(surf, &sys, refresh_seq, keys_rcvd, last_ascii);
+                if disp_ep_cap != 0 && win_id != 0 {
+                    let _ = sys_ipc_call_inline(
+                        disp_ep_cap,
+                        pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 1, 0),
+                        [win_id as u64, 0, 0, 0],
+                        0,
+                    );
+                }
+            }
         }
 
         if force_log {
@@ -729,7 +534,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                 slb.push_bytes(b" procs=");
                 slb.push_u64(proc_count as u64);
             }
-            log_line(&slb);
+            app_log_line(&slb);
         }
         refresh_seq = refresh_seq.wrapping_add(1);
 
@@ -748,8 +553,16 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         }
     }
 
-    let _ = sys_vspace_map(surf_cap, SYSMON_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
-    let _ = sys_cap_revoke(surf_cap, 2);
+    match backend {
+        SysmonBackend::Legacy4K { cap, .. } => {
+            let _ = sys_vspace_map(cap, SYSMON_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+            let _ = sys_cap_revoke(cap, 2);
+        }
+        SysmonBackend::Pixel2M { win } => {
+            let _ = sys_vspace_map(win.surf_cap, win.vaddr, VSPACE_MAP_OP_UNMAP_2M);
+            let _ = sys_cap_revoke(win.surf_cap, 2);
+        }
+    }
     let _ = sys_cap_revoke(notif_cap, 2);
     sys_exit(0);
 }

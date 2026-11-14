@@ -404,6 +404,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
 
                 comp.scene_dirty.mark(wm.windows[slot_idx].outer_rect());
                 let (_, cyc) = comp.flush_all(wm);
+                wake_pending_pixel_clients(disp_ep_cap, wm);
                 let wid = wm.windows[slot_idx].id;
                 let wx = wm.windows[slot_idx].rect.x;
                 let wy = wm.windows[slot_idx].rect.y;
@@ -577,6 +578,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     let _ = sys_cap_revoke(wm.windows[slot_idx].notif_cap, 1);
                 }
                 wm.windows[slot_idx].notif_cap = ext.transferred_cap;
+                wake_window_client(disp_ep_cap, wm, slot_idx);
                 if reply_tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         disp_ep_cap,
@@ -653,6 +655,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 let wid = wm.windows[slot_idx].id;
                 teardown_window_slot(wm, comp, disp_ep_cap, slot_idx);
                 let (_, cyc) = comp.flush_all(wm);
+                wake_pending_pixel_clients(disp_ep_cap, wm);
                 let mut lb = LineBuilder::new();
                 lb.push_bytes(b"[DRY-WM] WIN_CLOSED id=");
                 lb.push_u64(wid as u64);
@@ -683,6 +686,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     }
                 }
                 let (_, cyc) = comp.flush_all(wm);
+                wake_pending_pixel_clients(disp_ep_cap, wm);
                 if reaped > 0 {
                     let mut lb = LineBuilder::new();
                     lb.push_bytes(b"[DRY-WM] OWNER_REAPED badge=0x");

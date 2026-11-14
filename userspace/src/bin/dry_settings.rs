@@ -1,143 +1,70 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
-//! `dry-settings` (`Settings`) — Isolated Ring 3 (`CPL=3`, `SecDomain::Userspace`, `0x0105`)
-//! Live Runtime System Preferences & `DialogTransient` Helper (`Milestone 2A-3`).
-//!
-//! Categories (100% live runtime-applied via `IPC_OP_SUP_ACTION`):
-//! 1. Window Mode (`Floating`, `Side-by-Side Tiling`, `Stacked`, `Tabbed`)
-//! 2. Input Preferences (`US QWERTY` / `Turkish Q`, Pointer Speed `1x` / `2x`)
-//! 3. Display Preferences (`Standard Dark` / `High Contrast`, Cursor Size `1x` / `2x`)
-//! 4. Power & Idle Policy (`Off` / `5s` / `30s` / `60s` DPMS blank timeout)
-//! 5. Session Preferences (`Lock Session` + honest notice: volatile RAM only, no disk persistence)
-//!
-//! Plus `[H]` toggles an auto-floating `WindowRole::DialogTransient` Quick-Help dialog window.
+//! `dry-settings` — Isolated Ring 3 (`CPL=3`, `SecDomain::Userspace`, `0x0105`)
+//! Native DRY Glass 2.0 Settings (`PixelAppWindow` + `ui/` toolkit + lazy `DialogTransient`).
 
 #![no_std]
 #![no_main]
 
 use dry_userspace::action::DesktopAction;
-use dry_userspace::gfx::BOX_HORIZ;
+use dry_userspace::apps::settings_ui::{
+    first_row_for_category, render_help_dialog, render_settings, settings_vis_rows, SettingsAction,
+    SettingsView, DLG_PIXEL_VADDR, DLG_WIN_H, DLG_WIN_W, ROW_COUNT, SET_PIXEL_VADDR, SET_WIN_H,
+    SET_WIN_W,
+};
+use dry_userspace::apps::{app_log_line, app_poll_tsc, PixelAppWindow, PointerStep};
 use dry_userspace::input::{InputEvent, InputEventKind};
 use dry_userspace::keymap::{KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::sup_services::SupervisorPrefs;
-use dry_userspace::surface::{
-    SharedWindowSurface, SurfaceCell, STYLE_ACCENT, STYLE_DEFAULT, STYLE_HEADER, STYLE_MUTED,
-    STYLE_OK, STYLE_WARN,
-};
-use dry_userspace::wm::{WindowRole, TITLE_KIND_DIALOG, TITLE_KIND_SETTINGS};
+use dry_userspace::wm_types::{WindowRole, TITLE_KIND_DIALOG, TITLE_KIND_SETTINGS};
 use dry_userspace::{
-    msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
-    sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait,
-    sys_vspace_map, sys_write_debug, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SUP_ACTION,
-    IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_PREFS, IPC_OP_SURFACE_ATTACH,
-    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED,
-    IPC_OP_WIN_POLL_EVENT, MSG_FLAG_NON_BLOCKING, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
-    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_ipc_call_inline,
+    sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait, IPC_OP_INPUT_EVENT, IPC_OP_PONG,
+    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_PREFS,
+    IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, MSG_FLAG_NON_BLOCKING, RIGHT_READ, RIGHT_SIGNAL,
 };
 
-const SET_SURF_VADDR: u64 = 0x1a00_0000;
-const DLG_SURF_VADDR: u64 = 0x1a00_1000;
-const SET_COLS: usize = 62;
-const SET_ROWS: usize = 22;
-const DLG_COLS: usize = 42;
-const DLG_ROWS: usize = 9;
-
-const INIT_WIN_X: u64 = 590;
-const INIT_WIN_Y: u64 = 84;
-const INIT_DLG_X: u64 = 430;
-const INIT_DLG_Y: u64 = 240;
-
+const INIT_X: u64 = 590;
+const INIT_Y: u64 = 84;
+const DLG_X: u64 = 430;
+const DLG_Y: u64 = 240;
 const ALLOW_MULTI_FLAG: u64 = 1 << 17;
 const NOTIF_SHUTDOWN_BIT: u64 = 1 << 1;
-const ROW_COUNT: usize = 9;
-
 const BLANK_PRESETS: [u16; 4] = [0, 5, 30, 60];
 
-fn log_line(lb: &LineBuilder) {
-    let mut out = [0u8; 160];
-    let s = lb.as_bytes();
-    let n = s.len().min(out.len() - 1);
-    out[..n].copy_from_slice(&s[..n]);
-    out[n] = b'\n';
-    let _ = sys_write_debug(&out[..=n]);
-}
-
-fn write_row_cols(surf: &SharedWindowSurface, cols: usize, row: usize, text: &[u8], style: u8) {
-    let mut cells = [SurfaceCell::BLANK; SET_COLS];
-    for (i, &ch) in text.iter().take(cols).enumerate() {
-        cells[i] = SurfaceCell { ch, style };
-    }
-    surf.store_row_slice(cols, row, &cells[..cols]);
-}
-
-fn render_dialog_surface(surf: &SharedWindowSurface) {
-    let odd = surf.begin_write();
-    let div = [BOX_HORIZ; DLG_COLS];
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        0,
-        b"QUICK HELP // TRANSIENT DIALOG ROLE",
-        STYLE_HEADER,
-    );
-    write_row_cols(surf, DLG_COLS, 1, &div, STYLE_MUTED);
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        2,
-        b" WindowRole::DialogTransient stays",
-        STYLE_OK,
-    );
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        3,
-        b" auto-floating above Tiling, Stacked,",
-        STYLE_OK,
-    );
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        4,
-        b" and Tabbed workspace layouts.",
-        STYLE_OK,
-    );
-    write_row_cols(surf, DLG_COLS, 5, b"", STYLE_DEFAULT);
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        6,
-        b" Shortcuts: Alt+1..6 Apps  Alt+Space Search",
-        STYLE_ACCENT,
-    );
-    write_row_cols(surf, DLG_COLS, 7, &div, STYLE_MUTED);
-    write_row_cols(
-        surf,
-        DLG_COLS,
-        8,
-        b" Press [H] or [Esc] to close dialog",
-        STYLE_WARN,
-    );
-    surf.end_write(odd);
-}
-
-struct SettingsUi {
+struct SettingsApp {
     sup_ep: u64,
     disp_ep: u64,
     notif_cap: u64,
-    dlg_surf_cap: u64,
-    dlg_win_id: u32,
+    main_win: PixelAppWindow,
+    dlg_win: Option<PixelAppWindow>,
     prefs: SupervisorPrefs,
     sel_row: usize,
-    status: [u8; SET_COLS],
+    list_scroll: usize,
+    status: [u8; 64],
     status_len: usize,
 }
 
-impl SettingsUi {
+impl SettingsApp {
     fn set_status(&mut self, msg: &[u8]) {
-        let n = msg.len().min(SET_COLS);
+        let n = msg.len().min(self.status.len());
         self.status[..n].copy_from_slice(&msg[..n]);
         self.status_len = n;
+    }
+
+    fn ensure_visible(&mut self) {
+        let vis = settings_vis_rows(
+            self.main_win.theme(),
+            self.main_win.w as usize,
+            self.main_win.h as usize,
+        );
+        if self.sel_row < self.list_scroll {
+            self.list_scroll = self.sel_row;
+        } else if self.sel_row >= self.list_scroll + vis {
+            self.list_scroll = self.sel_row + 1 - vis;
+        }
+        let max_scroll = ROW_COUNT.saturating_sub(vis);
+        self.list_scroll = self.list_scroll.min(max_scroll);
     }
 
     fn query_live_prefs(&mut self) {
@@ -153,6 +80,14 @@ impl SettingsUi {
         }
     }
 
+    fn sync_window_themes(&mut self) {
+        let tf = self.prefs.theme_flags & 0x3f;
+        self.main_win.theme_flags = tf;
+        if let Some(ref mut dlg) = self.dlg_win {
+            dlg.theme_flags = tf;
+        }
+    }
+
     fn send_action(&mut self, act: DesktopAction) -> bool {
         let [w0, w1] = act.to_words();
         if let Ok((rtag, _, _)) = sys_ipc_call_inline(
@@ -161,373 +96,367 @@ impl SettingsUi {
             [w0, w1, 0, 0],
             0,
         ) {
-            if msg_tag_label(rtag) == IPC_OP_PONG {
-                self.query_live_prefs();
-                return true;
-            }
-        }
-        false
-    }
-
-    fn toggle_dialog(&mut self, dlg_surf: &SharedWindowSurface) {
-        if self.disp_ep == 0 {
-            return;
-        }
-        if self.dlg_win_id != 0 {
-            let old = self.dlg_win_id;
-            let _ = sys_ipc_call_inline(
-                self.disp_ep,
-                pack_msg_tag(IPC_OP_WIN_CLOSE, 0, 1, 0),
-                [old as u64, 0, 0, 0],
-                0,
-            );
-            self.dlg_win_id = 0;
-            self.set_status(b"Closed DialogTransient helper window");
-            let mut lb = LineBuilder::new();
-            lb.push_bytes(b"[DRY-SETTINGS] DIALOG open=0 win_id=");
-            lb.push_u64(old as u64);
-            log_line(&lb);
-            return;
-        }
-
-        render_dialog_surface(dlg_surf);
-        let attach_mrs = [
-            (DLG_COLS as u64) | ((DLG_ROWS as u64) << 16),
-            INIT_DLG_X | (INIT_DLG_Y << 32),
-            (WindowRole::DialogTransient as u64)
-                | ((TITLE_KIND_DIALOG as u64) << 8)
-                | ALLOW_MULTI_FLAG,
-            0,
-        ];
-        if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
-            self.disp_ep,
-            IPC_OP_SURFACE_ATTACH,
-            attach_mrs,
-            self.dlg_surf_cap,
-            RIGHT_READ | RIGHT_MAP,
-            0,
-            0,
-        ) {
-            if msg_tag_label(rtag) == IPC_OP_PONG {
-                self.dlg_win_id = rmrs[0] as u32;
-                let _ = sys_ipc_call_with_grant(
-                    self.disp_ep,
-                    IPC_OP_WIN_BIND_NOTIF,
-                    [self.dlg_win_id as u64, 0, 0, 0],
-                    self.notif_cap,
-                    RIGHT_READ | RIGHT_SIGNAL,
-                    0,
-                    0,
-                );
-                self.set_status(b"Opened auto-floating DialogTransient helper window");
-                let mut lb = LineBuilder::new();
-                lb.push_bytes(b"[DRY-SETTINGS] DIALOG open=1 win_id=");
-                lb.push_u64(self.dlg_win_id as u64);
-                log_line(&lb);
-            }
+            msg_tag_label(rtag) == IPC_OP_PONG
+        } else {
+            false
         }
     }
 
-    fn adjust_row(&mut self, row: usize, step: isize) {
+    fn log_apply_u64(key: &[u8], val: u64) {
+        let mut lb = LineBuilder::new();
+        lb.push_bytes(b"[DRY-SETTINGS] APPLY ");
+        lb.push_bytes(key);
+        lb.push_byte(b'=');
+        lb.push_u64(val);
+        app_log_line(&lb);
+    }
+
+    fn apply_scale_bits(&mut self, bits: u8) -> bool {
+        let next_bits = bits.min(2);
+        let next_flags = (self.prefs.theme_flags & 0x0f) | (next_bits << 4);
+        if self.send_action(DesktopAction::SetThemeContrast(next_flags)) {
+            self.prefs.theme_flags = next_flags;
+            self.sync_window_themes();
+            let pct: u64 = match next_bits {
+                1 => 125,
+                2 => 150,
+                _ => 100,
+            };
+            Self::log_apply_u64(b"dpi_pct", pct);
+            match next_bits {
+                1 => self.set_status(b"Display Scale -> 125% HiDPI"),
+                2 => self.set_status(b"Display Scale -> 150% HiDPI"),
+                _ => self.set_status(b"Display Scale -> 100% Standard"),
+            }
+            true
+        } else {
+            self.set_status(b"Display Scale rejected by supervisor");
+            false
+        }
+    }
+
+    fn adjust_row(&mut self, row: usize, step: i32) -> bool {
         match row {
             0 => {
-                let cur = self.prefs.layout_mode as isize;
-                let next = (cur + step).rem_euclid(4) as u8;
+                let next = ((self.prefs.layout_mode as i32 + step).rem_euclid(4)) as u8;
                 if self.send_action(DesktopAction::SetLayoutMode(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY layout=");
-                    lb.push_u64(self.prefs.layout_mode as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied Window Manager layout mode");
+                    self.prefs.layout_mode = next;
+                    Self::log_apply_u64(b"layout", next as u64);
+                    self.set_status(b"Updated workspace window layout");
+                    return true;
                 }
             }
             1 => {
-                let next = if self.prefs.keymap == 0 { 1 } else { 0 };
+                let next = if self.prefs.keymap == 1 { 0 } else { 1 };
                 if self.send_action(DesktopAction::SetKeymap(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY keymap=");
-                    lb.push_u64(self.prefs.keymap as u64);
-                    log_line(&lb);
-                    self.set_status(if next == 1 {
-                        b"Applied Turkish Q keyboard layout live"
-                    } else {
-                        b"Applied US QWERTY keyboard layout live"
-                    });
+                    self.prefs.keymap = next;
+                    Self::log_apply_u64(b"keymap", next as u64);
+                    self.set_status(if next == 1 { b"Keymap -> Turkish-Q" } else { b"Keymap -> US QWERTY" });
+                    return true;
                 }
             }
             2 => {
-                let next = if self.prefs.pointer_speed <= 1 { 2 } else { 1 };
+                let next = if self.prefs.pointer_speed >= 2 { 1 } else { 2 };
                 if self.send_action(DesktopAction::SetPointerSpeed(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY ptr_speed=");
-                    lb.push_u64(self.prefs.pointer_speed as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied PS/2 pointer speed multiplier");
+                    self.prefs.pointer_speed = next;
+                    Self::log_apply_u64(b"ptr_speed", next as u64);
+                    self.set_status(if next >= 2 { b"Pointer Speed -> Fast 2x" } else { b"Pointer Speed -> Normal 1x" });
+                    return true;
                 }
             }
             3 => {
                 let next = self.prefs.theme_flags ^ 1;
                 if self.send_action(DesktopAction::SetThemeContrast(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY contrast=");
-                    lb.push_u64((self.prefs.theme_flags & 1) as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied compositor display contrast theme");
+                    self.prefs.theme_flags = next;
+                    self.sync_window_themes();
+                    let v = (next & 1) as u64;
+                    Self::log_apply_u64(b"contrast", v);
+                    self.set_status(if v != 0 { b"High Contrast enabled" } else { b"Standard Contrast restored" });
+                    return true;
                 }
             }
             4 => {
                 let next = self.prefs.theme_flags ^ 2;
                 if self.send_action(DesktopAction::SetThemeContrast(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY cursor_large=");
-                    lb.push_u64(((self.prefs.theme_flags >> 1) & 1) as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied software cursor size preference");
+                    self.prefs.theme_flags = next;
+                    self.sync_window_themes();
+                    let v = ((next >> 1) & 1) as u64;
+                    Self::log_apply_u64(b"cursor_large", v);
+                    self.set_status(if v != 0 { b"Large Cursor 2x enabled" } else { b"Cursor 1x restored" });
+                    return true;
                 }
             }
             5 => {
-                let cur_i = BLANK_PRESETS
+                let cur_idx = BLANK_PRESETS
                     .iter()
-                    .position(|&s| s == self.prefs.blank_timeout_sec)
-                    .unwrap_or(0) as isize;
-                let next_s = BLANK_PRESETS[(cur_i + step).rem_euclid(4) as usize];
-                if self.send_action(DesktopAction::SetBlankTimeoutSec(next_s)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY blank_s=");
-                    lb.push_u64(self.prefs.blank_timeout_sec as u64);
-                    log_line(&lb);
-                    self.set_status(b"Updated Display Idle DPMS blank policy");
+                    .position(|&v| v == self.prefs.blank_timeout_sec)
+                    .unwrap_or(0) as i32;
+                let next_idx = (cur_idx + step).rem_euclid(BLANK_PRESETS.len() as i32) as usize;
+                let sec = BLANK_PRESETS[next_idx];
+                if self.send_action(DesktopAction::SetBlankTimeoutSec(sec)) {
+                    self.prefs.blank_timeout_sec = sec;
+                    Self::log_apply_u64(b"blank_s", sec as u64);
+                    self.set_status(b"Updated DPMS blank timeout");
+                    return true;
                 }
             }
             6 => {
-                let _ = self.send_action(DesktopAction::LockSession);
-                let _ = sys_write_debug(b"[DRY-SETTINGS] APPLY lock_session=1\n");
-                self.set_status(b"Requested Session Lock shield");
+                if self.send_action(DesktopAction::LockSession) {
+                    Self::log_apply_u64(b"lock_session", 1);
+                    self.set_status(b"Session locked via DRY Vault");
+                    return true;
+                }
             }
             7 => {
                 let next = self.prefs.theme_flags ^ 4;
                 if self.send_action(DesktopAction::SetThemeContrast(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY light_mode=");
-                    lb.push_u64(((self.prefs.theme_flags >> 2) & 1) as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied DRY Glass Obsidian Dark / Frosted Daylight theme");
+                    self.prefs.theme_flags = next;
+                    self.sync_window_themes();
+                    let v = ((next >> 2) & 1) as u64;
+                    Self::log_apply_u64(b"light_mode", v);
+                    self.set_status(if v != 0 { b"Theme -> Frosted Daylight" } else { b"Theme -> Obsidian Night" });
+                    return true;
                 }
             }
             8 => {
                 let next = self.prefs.theme_flags ^ 8;
                 if self.send_action(DesktopAction::SetThemeContrast(next)) {
-                    let mut lb = LineBuilder::new();
-                    lb.push_bytes(b"[DRY-SETTINGS] APPLY low_overhead_glass=");
-                    lb.push_u64(((self.prefs.theme_flags >> 3) & 1) as u64);
-                    log_line(&lb);
-                    self.set_status(b"Applied DRY Glass frosted blur / low-overhead material");
+                    self.prefs.theme_flags = next;
+                    self.sync_window_themes();
+                    let v = ((next >> 3) & 1) as u64;
+                    Self::log_apply_u64(b"low_overhead_glass", v);
+                    self.set_status(if v != 0 { b"Glass Blur -> Low-Overhead" } else { b"Glass Blur -> Full Frosted" });
+                    return true;
                 }
             }
-            _ => {}
-        }
-    }
-
-    fn handle_event(&mut self, ev: InputEvent, dlg_surf: &SharedWindowSurface) -> bool {
-        if ev.kind == InputEventKind::MouseScroll {
-            if ev.wheel > 0 {
-                self.sel_row = self.sel_row.saturating_sub(1);
-            } else if ev.wheel < 0 && self.sel_row + 1 < ROW_COUNT {
-                self.sel_row += 1;
+            _ => {
+                let cur = ((self.prefs.theme_flags >> 4) & 3).min(2) as i32;
+                let next = (cur + step).rem_euclid(3) as u8;
+                return self.apply_scale_bits(next);
             }
-            return false;
         }
-        if ev.kind != InputEventKind::KeyPress {
-            return false;
-        }
-        if ev.keycode == KEY_ESC && self.dlg_win_id != 0 {
-            self.toggle_dialog(dlg_surf);
-            return false;
-        }
-        if ev.ascii == b'q' || ev.ascii == b'Q' {
-            return true;
-        }
-        if ev.ascii == b'h' || ev.ascii == b'H' {
-            self.toggle_dialog(dlg_surf);
-            return false;
-        }
-        if ev.ascii == b'l' || ev.ascii == b'L' {
-            self.adjust_row(6, 1);
-            return false;
-        }
-        if ev.ascii == b'c' || ev.ascii == b'C' {
-            self.adjust_row(4, 1);
-            return false;
-        }
-        if ev.ascii == b't' || ev.ascii == b'T' {
-            self.sel_row = 7;
-            self.adjust_row(7, 1);
-            return false;
-        }
-        if ev.ascii == b'b' || ev.ascii == b'B' {
-            self.sel_row = 8;
-            self.adjust_row(8, 1);
-            return false;
-        }
-        if ev.ascii == b'g' || ev.ascii == b'G' {
-            if self.send_action(DesktopAction::TriggerGpuFaultTest) {
-                let _ = sys_write_debug(b"[DRY-SETTINGS] APPLY gpu_fault_test=1\n");
-                self.set_status(b"Triggered live VirtIO-GPU fault & recovery test");
-            }
-            return false;
-        }
-        if (b'1'..=b'9').contains(&ev.ascii) {
-            self.sel_row = (ev.ascii - b'1') as usize;
-            self.adjust_row(self.sel_row, 1);
-            return false;
-        }
-        match ev.keycode {
-            KEY_UP => self.sel_row = self.sel_row.saturating_sub(1),
-            KEY_DOWN => {
-                if self.sel_row + 1 < ROW_COUNT {
-                    self.sel_row += 1;
-                }
-            }
-            KEY_LEFT => self.adjust_row(self.sel_row, -1),
-            KEY_RIGHT | KEY_ENTER => self.adjust_row(self.sel_row, 1),
-            _ => {}
-        }
+        self.set_status(b"Supervisor rejected action (-EACCES)");
         false
     }
 
-    fn render(&self, surf: &SharedWindowSurface) {
-        let odd = surf.begin_write();
-        let div = [BOX_HORIZ; SET_COLS];
-
-        write_row_cols(
-            surf,
-            SET_COLS,
-            0,
-            b"DRY SETTINGS // LIVE SYSTEM PREFERENCES [CPL=3 0x0105]",
-            STYLE_HEADER,
-        );
-        write_row_cols(surf, SET_COLS, 1, &div, STYLE_MUTED);
-        if self.prefs.persist_backed {
-            write_row_cols(
-                surf,
-                SET_COLS,
-                2,
-                b" STORAGE: /persist/desktop.cfg [PERSISTENT CoW + VirtIO FLUSH]",
-                STYLE_OK,
-            );
+    fn trigger_gpu_test(&mut self) {
+        if self.send_action(DesktopAction::TriggerGpuFaultTest) {
+            Self::log_apply_u64(b"gpu_fault_test", 1);
+            self.set_status(b"Triggered VirtIO-GPU live #UD recovery test");
         } else {
-            write_row_cols(
-                surf,
-                SET_COLS,
-                2,
-                b" NOTICE: Volatile RAM session -- resets on reboot (no disk)",
-                STYLE_WARN,
-            );
+            self.set_status(b"GPU recovery test unavailable");
         }
-        write_row_cols(surf, SET_COLS, 3, &div, STYLE_MUTED);
+    }
 
-        let layout_str: &[u8] = match self.prefs.layout_mode {
-            1 => b"< Side-by-Side Tiling >",
-            2 => b"< Stacked Cascade >",
-            3 => b"< Tabbed Workspace >",
-            _ => b"< Floating (Default) >",
+    fn open_help_dialog(&mut self) {
+        if self.dlg_win.is_some() {
+            return;
+        }
+        let tf = self.prefs.theme_flags & 0x3f;
+        let Ok(mut dlg) = PixelAppWindow::alloc_and_map(DLG_PIXEL_VADDR, DLG_WIN_W, DLG_WIN_H, tf)
+        else {
+            self.set_status(b"Dialog surface alloc failed");
+            return;
         };
-        let km_str: &[u8] = if self.prefs.keymap == 1 {
-            b"< Turkish Q >"
-        } else {
-            b"< US QWERTY >"
-        };
-        let spd_str: &[u8] = if self.prefs.pointer_speed >= 2 {
-            b"< 2x Fast >"
-        } else {
-            b"< 1x Standard >"
-        };
-        let theme_str: &[u8] = if (self.prefs.theme_flags & 1) != 0 {
-            b"< High Contrast >"
-        } else {
-            b"< Standard Dark >"
-        };
-        let cur_str: &[u8] = if (self.prefs.theme_flags & 2) != 0 {
-            b"< 2x Large (24x36) >"
-        } else {
-            b"< 1x Normal (12x18) >"
-        };
-        let blank_str: &[u8] = match self.prefs.blank_timeout_sec {
-            5 => b"< 5 Seconds >",
-            30 => b"< 30 Seconds >",
-            60 => b"< 60 Seconds >",
-            _ => b"< Off (Never Blank) >",
-        };
+        let _ = render_help_dialog(&mut dlg, PointerStep::default());
+        dlg.publish_initial();
+        let dlg_wid = dlg.attach(
+            self.disp_ep,
+            self.notif_cap,
+            DLG_X,
+            DLG_Y,
+            WindowRole::DialogTransient,
+            TITLE_KIND_DIALOG,
+            ALLOW_MULTI_FLAG,
+        );
+        if dlg_wid == 0 {
+            dlg.teardown(self.disp_ep);
+            self.set_status(b"Dialog attach failed");
+            return;
+        }
+        let mut lb = LineBuilder::new();
+        lb.push_bytes(b"[DRY-SETTINGS] DIALOG open=1 win_id=");
+        lb.push_u64(dlg_wid as u64);
+        app_log_line(&lb);
+        self.dlg_win = Some(dlg);
+        self.set_status(b"Help dialog opened");
+    }
 
-        let shield_str: &[u8] = if self.prefs.persist_backed {
-            b"[Enter/L] Lock + DRY Vault Auth"
-        } else {
-            b"[Enter/L] Lock Session (No Auth)"
-        };
-        let glass_theme_str: &[u8] = if (self.prefs.theme_flags & 4) != 0 {
-            b"< Frosted Daylight >"
-        } else {
-            b"< Obsidian Dark >"
-        };
-        let glass_blur_str: &[u8] = if (self.prefs.theme_flags & 8) != 0 {
-            b"< Low-Overhead >"
-        } else {
-            b"< Frosted Blur >"
-        };
-
-        let rows_spec: [(&[u8], &[u8]); ROW_COUNT] = [
-            (b"[1] Window Layout   : ", layout_str),
-            (b"[2] Keyboard Layout : ", km_str),
-            (b"[3] Pointer Speed   : ", spd_str),
-            (b"[4] Display Theme   : ", theme_str),
-            (b"[5] Cursor Size [C] : ", cur_str),
-            (b"[6] Idle DPMS Blank : ", blank_str),
-            (b"[7] Session Shield  : ", shield_str),
-            (b"[8] Glass Theme [T] : ", glass_theme_str),
-            (b"[9] Glass Blur  [B] : ", glass_blur_str),
-        ];
-
-        for (i, (label, val)) in rows_spec.iter().enumerate() {
-            let r = 5 + i;
-            let selected = i == self.sel_row;
+    fn close_help_dialog(&mut self) {
+        if let Some(dlg) = self.dlg_win.take() {
+            let wid = dlg.win_id;
+            dlg.teardown(self.disp_ep);
             let mut lb = LineBuilder::new();
-            lb.push_bytes(if selected { b" > " } else { b"   " });
-            lb.push_bytes(label);
-            lb.push_bytes(val);
-            write_row_cols(
-                surf,
-                SET_COLS,
-                r,
-                lb.as_bytes(),
-                if selected { STYLE_OK } else { STYLE_DEFAULT },
-            );
+            lb.push_bytes(b"[DRY-SETTINGS] DIALOG open=0 win_id=");
+            lb.push_u64(wid as u64);
+            app_log_line(&lb);
+            self.set_status(b"Help dialog closed");
         }
-        for r in (5 + ROW_COUNT)..18 {
-            write_row_cols(surf, SET_COLS, r, b"", STYLE_DEFAULT);
-        }
+    }
 
-        write_row_cols(surf, SET_COLS, 18, &div, STYLE_MUTED);
-        let dlg_hint: &[u8] = if self.dlg_win_id != 0 {
-            b" [Up/Dn] Row  [L/R/Enter] Change  [H] Close Help Dialog  [Q]"
+    fn toggle_help_dialog(&mut self) {
+        if self.dlg_win.is_some() {
+            self.close_help_dialog();
         } else {
-            b" [Up/Dn] Row  [L/R/Enter] Change  [H] Open Help Dialog   [Q]"
-        };
-        write_row_cols(surf, SET_COLS, 19, dlg_hint, STYLE_ACCENT);
-        write_row_cols(
-            surf,
-            SET_COLS,
-            20,
-            &self.status[..self.status_len],
-            STYLE_OK,
-        );
-        write_row_cols(
-            surf,
-            SET_COLS,
-            21,
-            b" DRY Glass: [T] Theme  [B] Blur  [G] GPU Recovery  [H] Help",
-            STYLE_MUTED,
-        );
-        surf.end_write(odd);
+            self.open_help_dialog();
+        }
+    }
+
+    fn apply_ui_action(&mut self, act: SettingsAction) -> (bool, bool) {
+        let mut dirty_main = false;
+        let mut dirty_dlg = false;
+        match act {
+            SettingsAction::None => {}
+            SettingsAction::SelectCategory(cat) => {
+                self.sel_row = first_row_for_category(cat).min(ROW_COUNT - 1);
+                self.ensure_visible();
+                dirty_main = true;
+            }
+            SettingsAction::SelectRow(row) => {
+                self.sel_row = row.min(ROW_COUNT - 1);
+                self.ensure_visible();
+                dirty_main = true;
+            }
+            SettingsAction::AdjustRow(row, step) => {
+                self.sel_row = row.min(ROW_COUNT - 1);
+                self.ensure_visible();
+                let _ = self.adjust_row(self.sel_row, step);
+                dirty_main = true;
+                dirty_dlg = self.dlg_win.is_some();
+            }
+            SettingsAction::SetKeymap(km) => {
+                self.sel_row = 1;
+                self.ensure_visible();
+                if self.send_action(DesktopAction::SetKeymap(km)) {
+                    self.prefs.keymap = km;
+                    Self::log_apply_u64(b"keymap", km as u64);
+                    self.set_status(if km == 1 { b"Keymap -> Turkish-Q" } else { b"Keymap -> US QWERTY" });
+                }
+                dirty_main = true;
+            }
+            SettingsAction::SetPointerSpeed(spd) => {
+                self.sel_row = 2;
+                self.ensure_visible();
+                if self.send_action(DesktopAction::SetPointerSpeed(spd)) {
+                    self.prefs.pointer_speed = spd;
+                    Self::log_apply_u64(b"ptr_speed", spd as u64);
+                    self.set_status(if spd >= 2 { b"Pointer Speed -> Fast 2x" } else { b"Pointer Speed -> Normal 1x" });
+                }
+                dirty_main = true;
+            }
+            SettingsAction::SetScaleBits(bits) => {
+                self.sel_row = 9;
+                self.ensure_visible();
+                let _ = self.apply_scale_bits(bits);
+                dirty_main = true;
+                dirty_dlg = self.dlg_win.is_some();
+            }
+            SettingsAction::ToggleHelp => {
+                self.toggle_help_dialog();
+                dirty_main = true;
+            }
+            SettingsAction::TriggerGpuTest => {
+                self.trigger_gpu_test();
+                dirty_main = true;
+            }
+        }
+        (dirty_main, dirty_dlg)
+    }
+
+    fn handle_key(&mut self, ev: InputEvent) -> (bool, bool, bool) {
+        if ev.kind != InputEventKind::KeyPress {
+            return (false, false, false);
+        }
+        if ev.keycode == KEY_ESC && self.dlg_win.is_some() {
+            self.close_help_dialog();
+            return (true, false, false);
+        }
+        match ev.ascii {
+            b'q' | b'Q' => return (false, false, true),
+            b'h' | b'H' => {
+                self.toggle_help_dialog();
+                return (true, false, false);
+            }
+            b'l' | b'L' => {
+                let _ = self.adjust_row(6, 1);
+                return (true, false, false);
+            }
+            b'c' | b'C' => {
+                let _ = self.adjust_row(4, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            b't' | b'T' => {
+                self.sel_row = 7;
+                self.ensure_visible();
+                let _ = self.adjust_row(7, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            b'b' | b'B' => {
+                self.sel_row = 8;
+                self.ensure_visible();
+                let _ = self.adjust_row(8, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            b'g' | b'G' => {
+                self.trigger_gpu_test();
+                return (true, false, false);
+            }
+            b'1'..=b'9' => {
+                self.sel_row = (ev.ascii - b'1') as usize;
+                self.ensure_visible();
+                let _ = self.adjust_row(self.sel_row, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            b'0' | b's' | b'S' => {
+                self.sel_row = 9;
+                self.ensure_visible();
+                let _ = self.adjust_row(9, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            _ => {}
+        }
+        match ev.keycode {
+            KEY_UP => {
+                self.sel_row = if self.sel_row == 0 { ROW_COUNT - 1 } else { self.sel_row - 1 };
+                self.ensure_visible();
+                (true, false, false)
+            }
+            KEY_DOWN => {
+                self.sel_row = (self.sel_row + 1) % ROW_COUNT;
+                self.ensure_visible();
+                (true, false, false)
+            }
+            KEY_LEFT => {
+                let _ = self.adjust_row(self.sel_row, -1);
+                (true, self.dlg_win.is_some(), false)
+            }
+            KEY_RIGHT | KEY_ENTER => {
+                let _ = self.adjust_row(self.sel_row, 1);
+                (true, self.dlg_win.is_some(), false)
+            }
+            _ => (false, false, false),
+        }
+    }
+
+    fn redraw_main(&mut self) {
+        if self.main_win.win_id != 0 {
+            let v = SettingsView {
+                prefs: self.prefs,
+                sel_row: self.sel_row,
+                list_scroll: self.list_scroll,
+                dlg_open: self.dlg_win.is_some(),
+                status_msg: &self.status[..self.status_len],
+            };
+            let _ = render_settings(&mut self.main_win, &v, PointerStep::default());
+            let _ = self.main_win.present_full(self.disp_ep);
+        }
+    }
+
+    fn redraw_dlg(&mut self) {
+        if let Some(ref mut dlg) = self.dlg_win {
+            let _ = render_help_dialog(dlg, PointerStep::default());
+            let _ = dlg.present_full(self.disp_ep);
+        }
     }
 }
 
@@ -535,16 +464,10 @@ impl SettingsUi {
 pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     let (cs, _) = read_cs_ss();
     if (cs & 3) != 3 || sup_ep_cap == 0 {
-        sys_exit(221);
+        sys_exit(191);
     }
-
-    let notif_cap = match sys_notify_create(0) {
-        Ok(c) => c,
-        Err(_) => sys_exit(222),
-    };
-
-    let mut disp_ep_cap: u64 = 0;
-    if let Ok((tag, cap, _)) = sys_ipc_call_with_grant(
+    let notif_cap = sys_notify_create(0).unwrap_or_else(|_| sys_exit(192));
+    let disp_ep = match sys_ipc_call_with_grant(
         sup_ep_cap,
         IPC_OP_SUP_HELLO,
         [0; 4],
@@ -553,194 +476,210 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         0,
         0,
     ) {
-        if msg_tag_label(tag) == IPC_OP_PONG && cap != 0 {
-            disp_ep_cap = cap;
-        }
-    }
-
-    let surf_cap = match sys_frame_alloc(0) {
-        Ok(c) => c,
-        Err(_) => sys_exit(223),
-    };
-    let dlg_surf_cap = match sys_frame_alloc(0) {
-        Ok(c) => c,
-        Err(_) => sys_exit(223),
-    };
-    if sys_vspace_map(surf_cap, SET_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err()
-        || sys_vspace_map(dlg_surf_cap, DLG_SURF_VADDR, VSPACE_MAP_OP_4K_RW).is_err()
-    {
-        sys_exit(224);
-    }
-
-    // SAFETY: Both `SET_SURF_VADDR` and `DLG_SURF_VADDR` are exclusively mapped `USER_RW`.
-    let surf = unsafe {
-        SharedWindowSurface::init_at(SET_SURF_VADDR, SET_COLS as u16, SET_ROWS as u16, false)
-    };
-    let dlg_surf = unsafe {
-        SharedWindowSurface::init_at(DLG_SURF_VADDR, DLG_COLS as u16, DLG_ROWS as u16, false)
+        Ok((tag, cap, _)) if msg_tag_label(tag) == IPC_OP_PONG && cap != 0 => cap,
+        _ => sys_exit(193),
     };
 
-    let mut ui = SettingsUi {
+    let init_flags = PixelAppWindow::query_theme_flags(sup_ep_cap);
+    let main_win = PixelAppWindow::alloc_and_map(SET_PIXEL_VADDR, SET_WIN_W, SET_WIN_H, init_flags)
+        .unwrap_or_else(|_| sys_exit(194));
+
+    let mut app = SettingsApp {
         sup_ep: sup_ep_cap,
-        disp_ep: disp_ep_cap,
+        disp_ep,
         notif_cap,
-        dlg_surf_cap,
-        dlg_win_id: 0,
+        main_win,
+        dlg_win: None,
         prefs: SupervisorPrefs::new(),
         sel_row: 0,
-        status: [0; SET_COLS],
+        list_scroll: 0,
+        status: [0; 64],
         status_len: 0,
     };
-    ui.query_live_prefs();
-    ui.set_status(b"Ready: changes take effect immediately across Ring 3 services");
-    ui.render(surf);
+    app.query_live_prefs();
+    app.sync_window_themes();
+    app.set_status(b"Live DRY Glass 2.0 Settings");
 
-    let mut main_win_id: u32 = 0;
-    if disp_ep_cap != 0 {
-        let attach_mrs = [
-            (SET_COLS as u64) | ((SET_ROWS as u64) << 16),
-            INIT_WIN_X | (INIT_WIN_Y << 32),
-            (WindowRole::Normal as u64) | ((TITLE_KIND_SETTINGS as u64) << 8) | ALLOW_MULTI_FLAG,
-            0,
-        ];
-        if let Ok((rtag, _, rmrs)) = sys_ipc_call_with_grant(
-            disp_ep_cap,
-            IPC_OP_SURFACE_ATTACH,
-            attach_mrs,
-            surf_cap,
-            RIGHT_READ | RIGHT_MAP,
-            0,
-            0,
-        ) {
-            if msg_tag_label(rtag) == IPC_OP_PONG {
-                main_win_id = rmrs[0] as u32;
-            }
-        }
-        if main_win_id != 0 {
-            let _ = sys_ipc_call_with_grant(
-                disp_ep_cap,
-                IPC_OP_WIN_BIND_NOTIF,
-                [main_win_id as u64, 0, 0, 0],
-                notif_cap,
-                RIGHT_READ | RIGHT_SIGNAL,
-                0,
-                0,
-            );
-        }
-    }
+    let init_v = SettingsView {
+        prefs: app.prefs,
+        sel_row: app.sel_row,
+        list_scroll: app.list_scroll,
+        dlg_open: false,
+        status_msg: &app.status[..app.status_len],
+    };
+    let _ = render_settings(&mut app.main_win, &init_v, PointerStep::default());
+    app.main_win.publish_initial();
+    let main_wid = app.main_win.attach(
+        disp_ep,
+        notif_cap,
+        INIT_X,
+        INIT_Y,
+        WindowRole::Normal,
+        TITLE_KIND_SETTINGS,
+        ALLOW_MULTI_FLAG,
+    );
 
     let mut rlb = LineBuilder::new();
     rlb.push_bytes(b"[DRY-SETTINGS] Ready in CPL3 Userspace win_id=");
-    rlb.push_u64(main_win_id as u64);
-    log_line(&rlb);
+    rlb.push_u64(main_wid as u64);
+    app_log_line(&rlb);
 
-    let mut should_exit = false;
+    let poll_tsc = app_poll_tsc(200_000);
+
     loop {
-        let mut dirty = false;
-        if disp_ep_cap != 0 && main_win_id != 0 {
+        let mut dirty_main = false;
+        let mut dirty_dlg = false;
+        let mut exit_now = false;
+
+        if app.main_win.win_id != 0 {
+            let wid = app.main_win.win_id;
             while let Ok((ptag, _, pmrs)) = sys_ipc_call_inline(
-                disp_ep_cap,
+                app.disp_ep,
                 pack_msg_tag(IPC_OP_WIN_POLL_EVENT, 0, 1, 0),
-                [main_win_id as u64, 0, 0, 0],
+                [wid as u64, 0, 0, 0],
                 0,
             ) {
                 let plbl = msg_tag_label(ptag);
                 if plbl == IPC_OP_WIN_CLOSED {
-                    should_exit = true;
+                    exit_now = true;
                     break;
                 }
-                if plbl == IPC_OP_INPUT_EVENT {
-                    let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
-                    if ui.handle_event(ev, dlg_surf) {
-                        should_exit = true;
+                if plbl != IPC_OP_INPUT_EVENT {
+                    break;
+                }
+                let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
+                if app.main_win.handle_window_config(ev) {
+                    app.ensure_visible();
+                    dirty_main = true;
+                } else if ev.kind == InputEventKind::KeyPress {
+                    let (dm, dd, q) = app.handle_key(ev);
+                    dirty_main |= dm;
+                    dirty_dlg |= dd;
+                    if q {
+                        exit_now = true;
                         break;
                     }
-                    dirty = true;
+                } else if ev.kind == InputEventKind::MouseScroll {
+                    let _ = app.main_win.ingest_pointer(ev);
+                    if ev.wheel > 0 {
+                        app.sel_row = app.sel_row.saturating_sub(1);
+                    } else if ev.wheel < 0 {
+                        app.sel_row = (app.sel_row + 1).min(ROW_COUNT - 1);
+                    }
+                    app.ensure_visible();
+                    dirty_main = true;
                 } else {
-                    break;
+                    let step = app.main_win.ingest_pointer(ev);
+                    if step.clicked {
+                        let v = SettingsView {
+                            prefs: app.prefs,
+                            sel_row: app.sel_row,
+                            list_scroll: app.list_scroll,
+                            dlg_open: app.dlg_win.is_some(),
+                            status_msg: &app.status[..app.status_len],
+                        };
+                        let act = render_settings(&mut app.main_win, &v, step);
+                        let (dm, dd) = app.apply_ui_action(act);
+                        dirty_main |= dm || step.redraw;
+                        dirty_dlg |= dd;
+                    } else if step.redraw {
+                        dirty_main = true;
+                    }
                 }
             }
         }
 
-        if disp_ep_cap != 0 && ui.dlg_win_id != 0 && !should_exit {
-            let dwid = ui.dlg_win_id;
+        if let Some(dlg_wid) = app.dlg_win.as_ref().map(|d| d.win_id) {
+            let mut close_dlg = false;
             while let Ok((ptag, _, pmrs)) = sys_ipc_call_inline(
-                disp_ep_cap,
+                app.disp_ep,
                 pack_msg_tag(IPC_OP_WIN_POLL_EVENT, 0, 1, 0),
-                [dwid as u64, 0, 0, 0],
+                [dlg_wid as u64, 0, 0, 0],
                 0,
             ) {
                 let plbl = msg_tag_label(ptag);
                 if plbl == IPC_OP_WIN_CLOSED {
-                    ui.toggle_dialog(dlg_surf);
-                    dirty = true;
+                    close_dlg = true;
                     break;
                 }
-                if plbl == IPC_OP_INPUT_EVENT {
-                    let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
-                    if ui.handle_event(ev, dlg_surf) {
-                        should_exit = true;
+                if plbl != IPC_OP_INPUT_EVENT {
+                    break;
+                }
+                let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
+                if let Some(ref mut dlg) = app.dlg_win {
+                    if dlg.handle_window_config(ev) {
+                        dirty_dlg = true;
+                        continue;
+                    }
+                }
+                if ev.kind == InputEventKind::KeyPress {
+                    if ev.keycode == KEY_ESC || ev.ascii == b'h' || ev.ascii == b'H' {
+                        close_dlg = true;
                         break;
                     }
-                    dirty = true;
-                    if ui.dlg_win_id == 0 {
+                    let (dm, dd, q) = app.handle_key(ev);
+                    dirty_main |= dm;
+                    dirty_dlg |= dd;
+                    if q {
+                        exit_now = true;
                         break;
                     }
                 } else {
-                    break;
+                    let step = if let Some(ref mut dlg) = app.dlg_win {
+                        dlg.ingest_pointer(ev)
+                    } else {
+                        PointerStep::default()
+                    };
+                    if step.clicked {
+                        if let Some(ref mut dlg) = app.dlg_win {
+                            if render_help_dialog(dlg, step) {
+                                close_dlg = true;
+                                break;
+                            }
+                        }
+                        dirty_dlg = true;
+                    } else if step.redraw {
+                        dirty_dlg = true;
+                    }
                 }
+            }
+            if close_dlg {
+                app.close_help_dialog();
+                dirty_main = true;
+                dirty_dlg = false;
             }
         }
 
-        if dirty && !should_exit {
-            ui.query_live_prefs();
-            ui.render(surf);
-            let _ = sys_ipc_call_inline(
-                disp_ep_cap,
-                pack_msg_tag(IPC_OP_SURFACE_PRESENT, 0, 2, 0),
-                [main_win_id as u64, ((SET_ROWS as u64) << 16), 0, 0],
-                0,
-            );
+        if app.main_win.sync_prefs(app.sup_ep) {
+            app.query_live_prefs();
+            app.sync_window_themes();
+            app.ensure_visible();
+            dirty_main = true;
+            dirty_dlg = app.dlg_win.is_some();
         }
 
-        if should_exit {
+        if exit_now {
             break;
         }
-        if let Ok(bits) = sys_notify_wait(notif_cap, 0, 0) {
+        if dirty_main {
+            app.redraw_main();
+        }
+        if dirty_dlg {
+            app.redraw_dlg();
+        }
+        if let Ok(bits) = sys_notify_wait(app.notif_cap, 0, poll_tsc) {
             if (bits & NOTIF_SHUTDOWN_BIT) != 0 {
                 break;
             }
         }
     }
 
-    if disp_ep_cap != 0 {
-        if ui.dlg_win_id != 0 {
-            let _ = sys_ipc_call_inline(
-                disp_ep_cap,
-                pack_msg_tag(IPC_OP_WIN_CLOSE, 0, 1, 0),
-                [ui.dlg_win_id as u64, 0, 0, 0],
-                0,
-            );
-        }
-        if main_win_id != 0 {
-            let _ = sys_ipc_call_inline(
-                disp_ep_cap,
-                pack_msg_tag(IPC_OP_WIN_CLOSE, 0, 1, 0),
-                [main_win_id as u64, 0, 0, 0],
-                0,
-            );
-        }
-    }
-    let _ = sys_vspace_map(dlg_surf_cap, DLG_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
-    let _ = sys_cap_revoke(dlg_surf_cap, 2);
-    let _ = sys_vspace_map(surf_cap, SET_SURF_VADDR, VSPACE_MAP_OP_UNMAP_4K);
-    let _ = sys_cap_revoke(surf_cap, 2);
-    if disp_ep_cap != 0 {
-        let _ = sys_cap_revoke(disp_ep_cap, 1);
-    }
-    let _ = sys_cap_revoke(notif_cap, 2);
+    app.close_help_dialog();
+    app.main_win.teardown(app.disp_ep);
+    let _ = sys_cap_revoke(app.disp_ep, 1);
+    let _ = sys_cap_revoke(app.notif_cap, 2);
     let _ = sys_ipc_call_inline(
-        sup_ep_cap,
+        app.sup_ep,
         pack_msg_tag(IPC_OP_SUP_APP_EXITED, MSG_FLAG_NON_BLOCKING, 1, 0),
         [0; 4],
         0,

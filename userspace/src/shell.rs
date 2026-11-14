@@ -736,6 +736,21 @@ impl ShellEngine {
         self.push_line(lb.as_bytes(), STYLE_WARN);
     }
 
+    #[inline]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    #[inline]
+    pub const fn scroll_up(&self) -> usize {
+        self.scroll_up
+    }
+
+    #[inline]
+    pub fn history_row(&self, logical_idx: usize) -> &[SurfaceCell; TERM_COLS] {
+        &self.lines[(self.head + logical_idx) % SCROLLBACK_CAP]
+    }
+
     /// Project visible scrollback + active prompt line into `surf` (`cols x rows`) using zero-UB
     /// atomic seqlock publication.
     pub fn project_to_surface(

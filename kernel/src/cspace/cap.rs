@@ -20,7 +20,7 @@ pub const CNODE_RADIX_BITS: u8 = 8;
 pub const CNODE_SLOTS: usize = 1 << (CNODE_RADIX_BITS as usize); // 256 slots / CNode
 pub const CDT_NONE: u32 = u32::MAX;
 pub const MAP_REC_NONE: u16 = u16::MAX;
-pub const MAX_CAP_MAPPINGS: usize = 512;
+pub const MAX_CAP_MAPPINGS: usize = 2048;
 
 /// `ADR-003` Radix-Upgradable 64-bit Capability Handle:
 /// `[63:56] guard: u8 | [55:48] radix_bits: u8 | [47:16] slot_gen: u32 | [15:0] slot_idx: u16`.

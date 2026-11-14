@@ -5,6 +5,7 @@
 
 pub mod abi_ext;
 pub mod action;
+pub mod apps;
 pub mod compositor;
 pub mod display_banner;
 pub mod gfx;
