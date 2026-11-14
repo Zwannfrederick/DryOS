@@ -549,8 +549,11 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                 }
                 let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
                 if app.main_win.handle_window_config(ev) {
+                    app.query_live_prefs();
+                    app.sync_window_themes();
                     app.ensure_visible();
                     dirty_main = true;
+                    dirty_dlg |= app.dlg_win.is_some();
                 } else if ev.kind == InputEventKind::KeyPress {
                     let (dm, dd, q) = app.handle_key(ev);
                     dirty_main |= dm;
@@ -608,6 +611,10 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                 let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
                 if let Some(ref mut dlg) = app.dlg_win {
                     if dlg.handle_window_config(ev) {
+                        app.query_live_prefs();
+                        app.sync_window_themes();
+                        app.ensure_visible();
+                        dirty_main = true;
                         dirty_dlg = true;
                         continue;
                     }
