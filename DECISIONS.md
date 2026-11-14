@@ -349,3 +349,33 @@
   4. **`INV-ISL-04 (AttenuatedNonDelegableLeases)`:** İstemciye kiralanan `Endpoint` (`READ|SEND|CALL`), `IoRing` (`READ|WRITE|MAP`), `sq_notif` (`READ|SIGNAL`) ve `cq_notif` (`READ|WAIT`) yetkileri `RIGHT_GRANT` ve `RIGHT_REVOKE` içermez; istemci kiraladığı sürücü kanalını başka bir kompartmana yeniden devredemez.
   5. **`INV-ISL-05 (ZeroLinuxAbiInKernel)`:** `dry-kernel` Linux ABI/POSIX/`LinuxKPI` sembolleriyle kirletilemez (`0` satır) ve mevcut çekirdek ilkelleri yeterli olduğunda yeni syscall eklenmez.
   6. **`INV-ISL-06 (HardwareQuiesceOnIslandDeath)`:** Fiziksel/PCIe cihaz tutan sürücü adası çöktüğünde DMA çerçeveleri serbest bırakılmadan önce donanımda `PCI Command.BME = 0` (+ PCIe `FLR` / `P5` IOMMU unmap) zorunlu olarak uygulanır (`INV-P4-01`).
+
+---
+
+## ADR-017: `Milestone 2A-4a` Çekirdek Önkoşulları ve `Milestone 2C-1` Gerçek Linux `v6.18` `virtio-rng.c` Driver Island Mimarisi
+
+- **Durum:** Kabul Edildi ve Uygulandı (`8572da3`, `b24adc7`, `ac340da` [`Milestone 2A-4a`] & `1345bcd` [`Milestone 2C-1`], 13–14 Kasım 2026)
+- **Bağlam:** `Mock Driver Island` (`2C-0`) sonrasında gerçek upstream Linux C sürücü kodunun DRY OS içinde donanım çalıştırabilmesi için (a) `16/16` dolan Limine boot modül tablosunun (`R-18`) açılması, (b) Ring 3 FPU/SIMD izolasyonunun eklenmesi, (c) capability-aracılı `FaultEndpoint` kurtarması ile kill-safe IPC beklemelerinin (`AUD-K15`) tamamlanması ve (d) lisans kirlenmesi veya `dry-kernel` içine Linux sembolü sokulmadan gerçek bir Linux sürücüsünün çalıştırılması gerekiyordu.
+- **Karar:**
+  1. **Syscall ABI Dondurma & `2A-4a` Çekirdek Önkoşulları (`0` Yeni Syscall, `32` Sabit Çağrı `0..=31`):**
+     - `MAX_LATCHED_MODULES` (`16 -> 32`) ve `MAX_BOOT_ENTRIES` (`20 -> 36`) yükseltilerek açık taşma reddi eklendi (`8572da3`).
+     - `kernel/src/fpu.rs` (`b24adc7`): Yumuşak-kayan-noktalı çekirdek korunarak iş parçacığı başına 64 B hizalı `1024 B` FPU alanı ayrıldı; ilk `#NM` tuzakta temiz `FCW=0x037f`/`MXCSR=0x1f80` + sıfır vektörler yüklenir; `CR4.OSXSAVE` mevcutsa `XSAVEOPT64`/`XRSTOR64` (`XCR0 = x87|SSE|AVX`), yoksa (`fpu_mode=fxsave`) `FXSAVE64` (`512 B`) çalışır (`dry-fpu-test.elf` ile `corrupt=0` kanıtlandı).
+     - `kernel/src/proc/fault.rs` (`ac340da`): `SPAWN_FLAG_FAULT_EP` (`1 << 48`) ile ata süreç kendi `CSpace`'indeki `SEND | CALL` `Endpoint`'i çocuk sürece bağlar; istisnada çekirdek damgalı `FAULT_MSG_LABEL` (`0x7fa1`) iletir (`FAULT_BUDGET = 16` fırtına tavanı; `FAULT_REPLY_RESUME` ile güvenli `RIP` devamı veya öldürme). Untimed `notif_wait`/`ep_recv` kapanma yarışı (`AUD-K15`) giderildi. `rust_syscall_dispatch = 248 B` korundu.
+  2. **İzole `GPL-2.0-only` Crate & Değiştirilmemiş Linux `v6.18` `virtio-rng.c` (`1345bcd`):**
+     - [`drivers/lx-virtio-rng-island/`](drivers/lx-virtio-rng-island/Cargo.toml) ayrı `GPL-2.0-only` Cargo çalışma alanı olarak konumlandırıldı; `kernel/` ve `userspace/` (`MIT OR GPL-2.0-only`) içinde `0` satır Linux başlığı/kodu vardır.
+     - Upstream Linux `v6.18` (`7d0a66e4bb90...`) `virtio-rng.c` (`sha256=720433a8...`, `0` yama) clang freestanding C11 ile minimal Ring 3 shim (`cshim/lx_virtio_shim.c`, 14 dar `<linux/*.h>` başlığı) ve tek `SYS_DMA_ALLOC` `4 KiB` sıfır-kopyalı `kzalloc` arenasıyla derlenip `dry-lx-rng.elf` (`0x0008`) olarak paketlendi.
+     - `kernel/src/pci.rs` + `pci_cfg.rs` 3 yuvaya genelleştirildi (`VIRTIO_BLK=0`, `VIRTIO_RNG=1`, `VIRTIO_GPU=2`), `owner_cspace` atomic CAS (`AUD-K13b`) ile kilitlendi ve `Device Broker` (`0x0008`) yalnızca kontrol düzleminde tutularak `IoRing` + doğrudan `Endpoint` üzerinden gerçek `1AF4:1044` entropi üretimi (`vq_irqs=35`, `1,792 B`, `restarts=1`, `quiesce=3`, `dma_denied=7`, `leaked_frames=0`) doğrulandı.
+
+---
+
+## ADR-018: İzole Ring 3 `VirtIO-GPU` 2D Scanout Sürücüsü, Canlı UEFI GOP Fallback ve Bare-Metal GPU `VT-d` Sınırı
+
+- **Durum:** Kabul Edildi ve Uygulandı (`1879128` [`Priority C`], 14 Kasım 2026)
+- **Bağlam:** Masaüstü tarama yolunu (`dry-display`) gerçek QEMU PCI GPU donanımına taşırken sürücü çökmelerinin ekranı kalıcı karartmamasını garanti etmek ve konaktaki hibrit `Intel Iris Xe` (`8086:9a49`) + `NVIDIA RTX 3050 Ti` (`10de:25a0`) GPU'ların mevcut DRY çekirdeğinde hangi donanım engellerine takıldığını kanıtlamak gerekmektedir.
+- **Karar:**
+  1. **Ring 3 `VirtIO-GPU` 1.0 (`1AF4:1050`) 2D Scanout (`dry-gpu.elf`, Kompartman `0x0009`):**
+     - `dry-gpu.elf` `PCI_OBJ_VIRTIO_GPU (2)` BAR'larını (`SYS_DEV_MAP`) ve `2 x 2 MiB` `DEVICE_DMA` scanout tamponu ile `controlq` sayfalarını (`SYS_DMA_ALLOC`) alır; [`dry-display`](userspace/src/bin/dry_display.rs) sahne tamponlarını `RIGHT_READ | RIGHT_MAP` izniyle (`VSPACE_MAP_OP_2M_RO`) salt-okunur okuyarak `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` çalıştırır.
+     - `#UD` (`vec=6`) çöküşünde çekirdek `BME=0` quiesce (`pci_quiesces=3`) uygular, [`dry-display`](userspace/src/wm_ipc.rs) `EREVOKED`/`EBADCAP` hatasında beklemeden canlı `[DRY-WM] GPU_FALLBACK_TO_GOP` ile UEFI GOP blitine düşer ve süpervizör `gen=2` sürücüyü yeniden bağlayarak (`8.727 ms`) kesintisiz taramayı geri alır.
+  2. **Bare-Metal `Iris Xe` / `NVIDIA` Uyarısı (`H3` Denetim Sınırı):**
+     - Konakta ölçülen `xe.ko` (`1,213` UND), `i915.ko` (`1,244` UND) ve `nvidia*.ko` (`1,189` UND + `162` `os_*` + `81.31 MiB` GSP firmware + `4 GiB` BAR1) yığınları donanım **`VT-d` (`DMAR`) DMA izolasyonu**, **APIC `MSI/MSI-X`** ve **64-bit `>4 GiB` BAR eşlemesi** olmadan Ring 3'e güvenli verilemez (`QEMU/KVM != bare-metal`). Bu nedenle fiziksel GPU sürücüleri `BLOCKED` olarak kayda geçirilip sonraki hedef olarak **`Milestone 2C-2` (`DMAR VT-d` + `MSI-X`)** kilitlenmiştir.
+     - İki GPU arasındaki kopyasız paylaşım modeli (`PRIME` `USER_RO` `2x2 MiB` Frame capability + `IoRing` atomic fence) kullanıcı-alanı prototipinde (`48` yineleme) **`18 ns` (`p50`)** vs `262,582 ns` tam CPU kopyası (`14,587.9x` hızlanma) ile doğrulanmıştır.

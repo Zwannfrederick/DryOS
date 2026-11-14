@@ -939,3 +939,22 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
 - **Özet Bulgular (`90/90` QEMU/KVM + `5/5` Matris Yeşil, `0` Yeni Syscall, `leaked_frames = 0`):**
   1. **Yaşam Döngüsü ve Bayat Capability Reddi (`p5a`):** `dry-broker.elf` (`0x0008`) yetkisiz çağrıları reddetti (`unauth_denied=3`); `dry-mock-drv.elf` (`0x0209`) `#UD` (`vec=6`) çöküşü sonrası CDT `sys_cap_revoke` + yeniden başlatma ile kurtarıldı (`restarts=1`), eski nesil `drv_ep`/`sq_notif`/`ring_cap`/nesil token'ları `4/4` reddedildi (`-EREVOKED` / `-EBADCAP`, `stale_revoked=4`), `/persist` ve `DRY Vault` etkilenmedi (`sv_ok=1`).
   2. **Performans, `HLT` Uyanışı ve `IoRing` Gruplama (`p5b`, `3.114 GHz` TSC):** Doğrudan kiralık `Endpoint` `p50 = 5.309 cyc` (`1.70 µs`) vs Broker RPC `p50 = 10.214 cyc` (`3.28 µs`, `1.92x`); `HLT`'den uyanış `w1_p50 = 16.056 cyc` (`5.16 µs`, RTT `26.537 cyc`); `#UD` kurtarma `p50 = 1.408 µs` (`1.41 ms`); `100 ms` boşta `brk_sys = 0`, `isl_sys = 0`, `%99.38` `HLT` ikameti; aktif bellek `31` çerçeve (`124 KiB`, `pmm_leak = 0`); `IoRing` `batch=1` `5.272 cyc/op` -> **`batch=32` `859 cyc/op` (`6.14x` hızlanma)**. Not: Saf CPU mock dönüşümü gerçek PCIe MMIO/DMA/IRQ sürücü gecikmesini temsil etmez.
+
+---
+
+## Bölüm Q — Ascension 2.0 (`Milestone 2A-4a`, `Milestone 2C-1` Linux Island & `Priority C` GPU): Özeti
+
+- **Tarih:** 14 Kasım 2026 (`ADR-017`, `ADR-018`) | **Satır Tavanı Koruması:** Ayrıntılı tablolar & ekosistem karşılaştırması için [`docs/EXPERIMENTS_ASCENSION_2_0.md`](docs/EXPERIMENTS_ASCENSION_2_0.md), [`docs/LINUX_DRIVER_ISLAND_2C1.md`](docs/LINUX_DRIVER_ISLAND_2C1.md) ve [`docs/GPU_COMPATIBILITY_REPORT.md`](docs/GPU_COMPATIBILITY_REPORT.md) dosyalarına bakınız.
+- **Tekrarlanabilir Komutlar:**
+  ```bash
+  python3 tools/h2-audit/fetch_virtio_rng_sources.py --verify   # Linux v6.18 virtio-rng.c SHA-256 doğrulama
+  python3 tools/qemu_boot_test.py --lx-island-only              # Milestone 2C-1 Linux Driver Island
+  python3 tools/qemu_boot_test.py --gpu-only                    # Priority C VirtIO-GPU 2D + GOP fallback
+  make -C experiments/h3-gpu-compat test                        # Konak Iris Xe / NVIDIA / PRIME fence denetimi
+  python3 tools/qemu_boot_test.py --p3-matrix                   # 5/5 SMP (1..20 vCPU) & RAM (256M..2G) matrisi
+  python3 tools/qemu_boot_test.py                               # 94/94 tam deterministik regresyon paketi
+  ```
+- **Özet Bulgular (`94/94` QEMU/KVM + `5/5` Matris Yeşil, `leaked_frames = 0`, `rust_syscall_dispatch = 248 B`):**
+  1. **`Milestone 2A-4a` (`ac340da`):** `MAX_LATCHED_MODULES = 32` (`20` etkin ELF64), `XSAVEOPT64`/`XRSTOR64` + `FXSAVE64` (`512 B` fallback, `corrupt=0`), `FaultEndpoint` (`delivered=20`, `resumed=17`, `storm_budget=16`) ve `AUD-K1..K15` / `AUD-U1..U9` düzeltmeleri (`cases=6/6`, `200.000` notif turu).
+  2. **`Milestone 2C-1` (`1345bcd`, `results_p6_lx_rng.json`):** Değiştirilmemiş Linux `v6.18` `virtio-rng.c` (`sha256=720433a8...`) Ring-3 adasında `1af4:1044` cihazından `35` `vq_irqs` ile `1,792 B` (`ones=49%`, `32/32` benzersiz `u64`) gerçek entropi üretti; doğrudan `p50 = 15,345 cyc` (`5.115 us`), Broker `p50 = 19,906 cyc` (`6.635 us`), `IoRing batch16 = 56,865.8 cyc/op`, `#UD` kurtarma `1.565 ms` (`quiesce=3`, `dma_denied=7`, `RSS=26` sayfa).
+  3. **`Priority C` (`1879128`, `results_p7_gpu.json` & `results_h3_gpu.json`):** `dry-gpu.elf` (`1af4:1050`) `1280x800` `B8G8R8X8_UNORM` taraması (`present p50 = 1.097 ms`), `#UD` (`vec=6`) sonrası canlı `GPU_FALLBACK_TO_GOP`, `gen=2` (`8.727 ms` kurtarma), [`docs/p7_virtio_gpu_scanout.png`](docs/p7_virtio_gpu_scanout.png) (`998,700` px) kanıtlandı; konak denetiminde `xe=1,213` / `i915=1,244` / `nvidia=1,189` UND + `VT-d` kapalı (`vtd_active=False`) ve `PRIME` fence (`18 ns` vs `262,582 ns`, `14,587.9x`) ölçüldü.

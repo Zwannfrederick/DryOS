@@ -74,9 +74,9 @@ Executed on QEMU/KVM (`smp=2`, `-device virtio-rng-pci-non-transitional`, `--lx-
 | Bound PCI Device | `1af4:1044` (`virtio-rng`) | Genuine VirtIO 1.0 device probe + `.scan` |
 | Hardware Virtqueue Completions (`vq_irqs`) | `35` (`>= 28` required) | Genuine device completions (`random_recv_done`) |
 | Entropy Delivered & Distribution | `1792` bytes, `ones=49%`, `32/32` unique `u64` | Non-mock, high-entropy stream |
-| Direct 1-Hop Latency (`p50 / p95 / p99`) | `15,019 / 76,414 / 213,439` cyc (`15.02 us` p50) | Fast client-to-island direct path |
-| Broker 2-Hop Latency (`p50 / p95 / p99`) | `20,106 / 72,183 / 72,183` cyc (`20.11 us` p50) | `~5,087` cyc control-plane hop overhead |
-| `IoRing` Batch-16 Throughput | `935,344` cyc total (`58,459.0` cyc/op) | Zero-broker-hop batched SQE/CQE |
-| `#UD` (`vec=6`) Recovery & DMA Quiesce | `8,831,637` cyc (`8.83 ms`), `pci_quiesce=3`, `restarts=1` | Hardware `BME=0` before DMA unpin |
+| Direct 1-Hop Latency (`p50 / p95 / p99`) | `15,345 / 145,755 / 279,669` cyc (`5.115 us` p50 @ `3000 MHz`) | Fast client-to-island direct path |
+| Broker 2-Hop Latency (`p50 / p95 / p99`) | `19,906 / 197,069 / 197,069` cyc (`6.635 us` p50) | `~4,561` cyc control-plane hop overhead |
+| `IoRing` Batch-16 Throughput | `909,853` cyc total (`56,865.8` cyc/op) | Zero-broker-hop batched SQE/CQE |
+| `#UD` (`vec=6`) Recovery & DMA Quiesce | `4,695,084` cyc (`1.565 ms`), `pci_quiesce=3`, `restarts=1` | Hardware `BME=0` before DMA unpin |
 | Unauthorized Access & Leaks | `dma_denied=7`, `leaked_frames=0` | `DEV_WORKSPACE` / rogue / stale cap rejection |
 | Island Working Set (`RSS`) | `26` x 4 KiB frames (`104 KiB`) | Minimal `GPL-2.0-only` Ring 3 footprint |

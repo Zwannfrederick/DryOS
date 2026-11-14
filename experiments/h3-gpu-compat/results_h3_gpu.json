@@ -271,11 +271,11 @@
   "prime_zero_copy_fence_probe": {
     "frame_bytes": 4096000,
     "iterations": 48,
-    "full_copy_p50_ns": 221056,
-    "full_copy_p95_ns": 391004,
+    "full_copy_p50_ns": 262582,
+    "full_copy_p95_ns": 353297,
     "zero_copy_fence_p50_ns": 18,
-    "zero_copy_fence_p95_ns": 18,
-    "speedup_x": 12280.9,
+    "zero_copy_fence_p95_ns": 19,
+    "speedup_x": 14587.9,
     "stale_gen_rejected": true,
     "checksum_ok": true
   }

@@ -29,8 +29,8 @@ dry-init Supervisor ◀── FaultEndpoint (vec=6 #UD) ── kernel BME=0 quie
 | Unauthorized Rejection (`kernel dma_denied` / `IPC unauth`) | `3` / `7` |
 | Kernel `PCI Command.BME=0` Quiesces | `3` |
 | Frame Leaks (`leaked_frames`) | `0` |
-| End-to-End `dry-gpu` Present Latency (`p50` / `p95` / `p99` @ `3114 MHz`) | `3,762,968` (`1208.40 us`) / `4,544,646` / `4,544,646` cyc (`1459.42 us`) |
-| Crash-to-Live-Scanout Recovery Time | `31,373,604` cyc (`10.075 ms`) |
+| End-to-End `dry-gpu` Present Latency (`p50` / `p95` / `p99` @ `3115 MHz`) | `3,416,216` (`1096.70 us`) / `4,184,298` / `4,184,298` cyc (`1343.27 us`) |
+| Crash-to-Live-Scanout Recovery Time | `27,184,357` cyc (`8.727 ms`) |
 | `dry-gpu` Resident Memory (`mapped_pages_4k + pt_frames_4k`) | `2,069` pages (`8.08 MiB`, includes `2x2M` DMA + `2x2M` RO backbuf) |
 | QMP `gpu0` Screendump (`docs/p7_virtio_gpu_scanout.png`) | `1280x800`, `998,700` non-bg pixels, `16` distinct colors |
 
@@ -54,8 +54,8 @@ All measurements below were captured read-only from the host via [`experiments/h
 | `nvidia*.ko.zst` (`4` modules) | `14.31 MB` / `37.90 MB` | `1,189` (`470`+`105`+`273`+`341`) | `os_*` C shim (`162` prototypes in `os-interface.h`, `3,147` LOC in `os-interface.c`) + `drm_kms_gem_ttm` (`151` in `nvidia-drm`) | `gsp_ga10x.bin` (`27,043,992 B`) + `ucodes_ga10x.bin` (`58,215,936 B`) |
 
 ### 3.3 Hybrid PRIME Zero-Copy Fence Benchmark (`prime_fence_probe.c`)
-- Full `1280x800x4` (`4,096,000 B`) CPU copy (`48` iterations): **`221,056 ns`** median (`391,004 ns` p95).
-- DRY OS `2 x 2 MiB` `USER_RO` Frame Capability + lockless `IoRing` atomic `dma_fence`: **`18 ns`** median (`18 ns` p95) — **`12,280.9x` faster** (`stale_gen_rejected = true`, `checksum_ok = true`).
+- Full `1280x800x4` (`4,096,000 B`) CPU copy (`48` iterations): **`262,582 ns`** median (`353,297 ns` p95).
+- DRY OS `2 x 2 MiB` `USER_RO` Frame Capability + lockless `IoRing` atomic `dma_fence`: **`18 ns`** median (`19 ns` p95) — **`14,587.9x` faster** (`stale_gen_rejected = true`, `checksum_ok = true`).
 
 ---
 
@@ -67,11 +67,11 @@ All measurements below were captured read-only from the host via [`experiments/h
 | 2 | Safe MMIO Mapping (`USER_MMIO_UC`) | **PASS** (`p7a`, `dma_denied=3`) | **NOT RUN** (no Ring-3 `i915`/`xe` island yet) | **NOT RUN** (`162` `os_*` functions unimplemented) | **PASS** (userspace `USER_RO` frame cap model verified in `p7a`/`h3`) |
 | 3 | IRQ / MSI / MSI-X Delivery | **BLOCKED** (polling `used_idx` passes; MSI-X kernel table absent) | **BLOCKED** (requires MSI + GTT/PPGTT IRQ routing) | **BLOCKED** (requires MSI-X vector allocator) | **PASS** (atomic `IoRing` notify/fence validated in `p6a`/`h3`) |
 | 4 | Firmware Loading (`GuC` / `GSP`) | **PASS** (none required for `2D` scanout) | **BLOCKED** (`tgl_guc_70.1.1` loader & HuC auth absent) | **BLOCKED** (`81.3 MiB` `gsp_ga10x` + `ucodes` RPC absent) | **NOT RUN** |
-| 5 | Memory Mgmt (`GEM` / `TTM` / `DEVICE_DMA`) | **PASS** (`DMA_ALLOC_FLAG_2M` `2x2 MiB`) | **BLOCKED** (`drm_kms_gem_ttm`: `592`/`509` UND symbols) | **BLOCKED** (`TTM` + `12 MiB..4 GiB` VRAM allocator absent) | **PASS** (`2x2 MiB` RO `Frame` cap + `18 ns` fence vs `221 us` copy) |
+| 5 | Memory Mgmt (`GEM` / `TTM` / `DEVICE_DMA`) | **PASS** (`DMA_ALLOC_FLAG_2M` `2x2 MiB`) | **BLOCKED** (`drm_kms_gem_ttm`: `592`/`509` UND symbols) | **BLOCKED** (`TTM` + `12 MiB..4 GiB` VRAM allocator absent) | **PASS** (`2x2 MiB` RO `Frame` cap + `18 ns` fence vs `262.6 us` copy) |
 | 6 | Modesetting / 2D Scanout | **PASS** (`1280x800` `p7_virtio_gpu_scanout.png`) | **BLOCKED** (`DRM` KMS CRTC/connector pipeline absent) | **BLOCKED** (`nvidia-modeset.ko` `105` UND symbols absent) | **PASS** (`dry-display` RO `back_caps` + GOP fallback live) |
 | 7 | Command Submission | **PASS** (`22` `controlq` DMA cmds verified) | **BLOCKED** (`GuC` CTB submission / `xe_exec_queue` absent) | **BLOCKED** (`GSP` channel pushbuffer + host1x/FIFO absent) | **NOT RUN** |
 | 8 | 3D / Compute Acceleration | **NOT RUN** (`Virgl` / `Venus` protocol out of 2D scope) | **NOT RUN** | **NOT RUN** (`nvidia-uvm.ko` `341` UND symbols) | **NOT RUN** |
-| 9 | Security Boundary (`VT-d` IOMMU DMA) | **PASS** (emulated `QEMU` + `BME=0` quiesce) | **BLOCKED** (bare-metal rogue GPU DMA requires `DMAR` `VT-d`) | **BLOCKED** (bare-metal `4 GiB` DMA requires `DMAR` `VT-d`) | **PASS** (`USER_RO` + generation-bound lease model; `12,280.9x` speedup in `h3`) |
+| 9 | Security Boundary (`VT-d` IOMMU DMA) | **PASS** (emulated `QEMU` + `BME=0` quiesce) | **BLOCKED** (bare-metal rogue GPU DMA requires `DMAR` `VT-d`) | **BLOCKED** (bare-metal `4 GiB` DMA requires `DMAR` `VT-d`) | **PASS** (`USER_RO` + generation-bound lease model; `14,587.9x` speedup in `h3`) |
 
 ---
 
