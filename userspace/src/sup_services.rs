@@ -283,7 +283,7 @@ pub fn mount_persist_and_load_prefs(
                 Some(saved.keymap.min(1)),
                 Some(saved.pointer_speed.clamp(1, 2)),
             );
-            let _ = apply_display_prefs(disp_sup_cap, prefs, saved.theme_flags & 0x3);
+            let _ = apply_display_prefs(disp_sup_cap, prefs, saved.theme_flags & 0x0f);
             if saved.blank_timeout_sec > 0 {
                 let _ = apply_blank_timeout(
                     disp_sup_cap,
@@ -683,7 +683,7 @@ pub fn apply_display_prefs(
     prefs: &mut SupervisorPrefs,
     flags: u8,
 ) -> Result<[u64; 4], u32> {
-    if (flags & !0x3) != 0 {
+    if (flags & !0x0f) != 0 {
         return Err(IPC_OP_ERR_INVAL);
     }
     let mut px = 0u64;

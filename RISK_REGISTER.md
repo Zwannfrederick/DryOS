@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 14 Kasım 2026 (`Milestone 2C-2` / `Hardware Foundations & P1 Audit Closure` — `95/95` QEMU + `5/5` Matris)  
+> **Son Güncelleme:** 14 Kasım 2026 (`Project Ascension 3.0`: `Milestone 2C-2` Donanım Temelleri + `Track B DRY Glass` Desktop Kapanışı)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -58,10 +58,10 @@
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-005`).
 - **Azaltma:** Çekirdek ve native servisler `MIT OR GPL-2.0-only`; Linux sürücü adaları ayrı süreç sınırında `GPL-2.0-only`; saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları yasak.
 
-### R-12: `DRY Desktop` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Yeni)
-- **Durum:** `OPEN / PLANNED` (`ADR-009`, `P2`).
-- **Teknik Mekanizma:** `liquid-glass` üst çubuk, bulanıklık/gölge efektleri ve `Floating + Tiling + Stacking/Tabbed` pencere geçişlerinin yazılımsal GOP veya giriş seviyesi iGPU'larda kare hızı düşüşü (*frame drop*) yaratması ya da UI mantığının çekirdeğe sızdırılması.
-- **Azaltma:** Tüm görsel/WM mantığı Ring 3 compositor içinde tutulur (`0` çekirdek UI kodu); `Milestone 2A-1` ile `Order2MiB` (`WB`) RAM arka tamponu + `DirtyRegion` 64-bit GOP aktarımı devreye alınarak tek-satır tuş vuruşunun yalnızca `~15.3k cyc` (`~5 µs`) sürdüğü doğrulandı; `P2`'de bulanıklık/animasyon maliyetini donanım yeteneğine göre otomatik kapatan *Low-End Fallback* katmanı ve `Floating` diyalogların `Tiling` ağacını bozmamasını garanti eden ayrık sahne grafı zorunludur (`docs/DRY_DESKTOP_SPEC.md`).
+### R-12: `DRY Glass` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Güncelleme — 14 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU — Ascension 3.0 Track B)` / `OPEN (Bare-Metal iGPU)` (`ADR-009`, `ADR-020`, `P2`).
+- **Teknik Mekanizma:** Buzlu cam arka plan bulanıklığı, yuvarlatılmış yarı saydam kartlar ve `Floating + Tiling + Stacking/Tabbed` geçişlerinin yazılımsal GOP veya düşük uç donanımda kare süresini uzatması ya da UI mantığının çekirdeğe sızması.
+- **Uygulanan Savunma:** Tüm görsel/cam/WM mantığı Ring 3 `dry-display` (`userspace/src/glass/*`, `compositor.rs`) içinde tutuldu (`0` çekirdek UI satırı); `1024x768`..`1920x1080` arası `DirtyRegion` + `expand_blur_damage` kırpma, canlı `Quick Settings` / `Settings [9]` **`low_overhead_glass` (`Solid Fallback`)** anahtarı ve donanım `VirtIO-GPU` `#UD` -> anlık `UEFI GOP` fallback (`--p9-only`) ile doğrulandı (`10` PNG kanıtı).
 
 ### R-13: `drypkg` Runtime Şişmesi ve Linux/Windows Uyumluluğunda Aşırı Vaat Riski (Yeni)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).

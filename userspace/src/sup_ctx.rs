@@ -19,8 +19,8 @@ use crate::vault_proto::{
 use crate::wm::SessionVisualState;
 use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_call_inline, sys_proc_kill,
-    sys_proc_spawn, sys_proc_wait, RootInitBootInfo, BADGE_SUP_FILES, BADGE_SUP_SETTINGS,
-    BADGE_SUP_SHELL, BADGE_SUP_SYSMON, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM,
+    sys_proc_spawn, sys_proc_wait, RootInitBootInfo, BADGE_SUP_CALC, BADGE_SUP_EDITOR,
+    BADGE_SUP_FILES, BADGE_SUP_SETTINGS, BADGE_SUP_SHELL, BADGE_SUP_SYSMON, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM,
     IPC_OP_PONG, IPC_OP_WIN_EMPTY, IPC_OP_WM_FOCUS_OWNER, IPC_OP_WM_OWNER_GONE,
     IPC_OP_WM_POLL_ACTION, IPC_OP_WM_SET_AUTH_LOCK, IPC_OP_WM_TAKE_LOCK_PIN,
     IPC_OP_WM_TOGGLE_TILING, RIGHT_CALL, RIGHT_READ, RIGHT_SEND,
@@ -98,6 +98,7 @@ pub struct SupervisorCtx {
     pub unauth_rejects: u64,
     pub inval_rejects: u64,
     pub boot_interactive_logged: bool,
+    pub gpu_fault_pending: bool,
 }
 
 impl SupervisorCtx {
@@ -121,6 +122,8 @@ impl SupervisorCtx {
                 AppSlot::new(AppId::LifeStation, boot.sysmon_mod_cap),
                 AppSlot::new(AppId::Files, boot.files_mod_cap),
                 AppSlot::new(AppId::Settings, boot.settings_mod_cap),
+                AppSlot::new(AppId::Editor, boot.editor_mod_cap),
+                AppSlot::new(AppId::Calculator, boot.calc_mod_cap),
             ],
             sup_ep,
             disp_sup_cap,
@@ -140,6 +143,7 @@ impl SupervisorCtx {
             unauth_rejects: 0,
             inval_rejects: 0,
             boot_interactive_logged: false,
+            gpu_fault_pending: false,
         }
     }
 
@@ -171,6 +175,8 @@ impl SupervisorCtx {
             BADGE_SUP_SYSMON => Some(AppId::LifeStation),
             BADGE_SUP_FILES => Some(AppId::Files),
             BADGE_SUP_SETTINGS => Some(AppId::Settings),
+            BADGE_SUP_EDITOR => Some(AppId::Editor),
+            BADGE_SUP_CALC => Some(AppId::Calculator),
             _ => None,
         }
     }
@@ -534,6 +540,10 @@ impl SupervisorCtx {
             }
             DesktopAction::RequestSuspendS3 => request_suspend_s3(self.pwr_sup_cap),
             DesktopAction::CloseWindow(_) | DesktopAction::CycleFocus => Ok([0; 4]),
+            DesktopAction::TriggerGpuFaultTest => {
+                self.gpu_fault_pending = true;
+                Ok([1, 0, 0, 0])
+            }
         }
     }
 

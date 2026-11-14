@@ -21,7 +21,10 @@ use dry_userspace::display_banner::run_legacy_banner_mode;
 use dry_userspace::gfx::Rect;
 use dry_userspace::input::InputEvent;
 use dry_userspace::shell::LineBuilder;
-use dry_userspace::surface::{TERM_COLS, TERM_ROWS};
+use dry_userspace::surface::{
+    capture_pixel_dirty_from_ro, PIXEL_SURF_MAX_H, PIXEL_SURF_MAX_PIXELS, PIXEL_SURF_MAX_W,
+    SURF_ATTACH_FLAG_PIXEL, TERM_COLS, TERM_ROWS,
+};
 use dry_userspace::wm::{
     SessionVisualState, WindowManager, WindowRole, WmInputAction, MAX_WINDOWS, SUP_BIT_WM_ACTION,
 };
@@ -35,12 +38,14 @@ use dry_userspace::{
     IPC_OP_SURFACE_FOCUS, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF,
     IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_EMPTY, IPC_OP_WIN_POLL_EVENT,
     IPC_OP_WIN_WAIT_EVENT, IPC_OP_WM_INPUT_EVENT, IPC_OP_WM_OWNER_GONE, IPC_OP_WM_POLL_ACTION,
-    MSG_FLAG_NON_BLOCKING, RIGHT_RECV, VSPACE_MAP_OP_2M_RW, VSPACE_MAP_OP_4K_RO,
-    VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
+    MSG_FLAG_NON_BLOCKING, RIGHT_RECV, VSPACE_MAP_OP_2M_RO, VSPACE_MAP_OP_2M_RW,
+    VSPACE_MAP_OP_4K_RO, VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const FB_MAP_VADDR: u64 = 0x1000_0000;
 const SURFACE_BASE_VADDR: u64 = 0x1800_0000;
+const PIXEL_SURF_BASE_VADDR: u64 = 0x1A00_0000;
+const PIXEL_SNAP_BASE_VADDR: u64 = 0x1B00_0000;
 const BACKBUF_VADDR: u64 = 0x2000_0000;
 const TWO_MIB: usize = 2 * 1024 * 1024;
 const MAX_BACKBUF_2M: usize = 8; // Supports up to 16 MiB (e.g., 2560x1600x32) with explicit bounds check.
@@ -100,24 +105,31 @@ fn teardown_window_slot(
     disp_ep: u64,
     slot_idx: usize,
 ) {
-    if let Some((surf_cap, surf_vaddr, notif_cap, waiter_tok)) =
-        wm.remove_window_slot(slot_idx, &mut comp.scene_dirty)
-    {
-        if waiter_tok != 0 {
+    if let Some(rm) = wm.remove_window_slot(slot_idx, &mut comp.scene_dirty) {
+        if rm.waiter_tok != 0 {
             let _ = sys_ipc_reply_inline(
                 disp_ep,
-                waiter_tok,
+                rm.waiter_tok,
                 pack_msg_tag(IPC_OP_WIN_CLOSED, 0, 1, 0),
                 [0; 4],
             );
         }
-        if notif_cap != 0 {
-            let _ = sys_notify_signal(notif_cap, 1);
-            let _ = sys_cap_revoke(notif_cap, 1);
+        if rm.notif_cap != 0 {
+            let _ = sys_notify_signal(rm.notif_cap, 1);
+            let _ = sys_cap_revoke(rm.notif_cap, 1);
         }
-        if surf_cap != 0 {
-            let _ = sys_vspace_map(surf_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_4K);
-            let _ = sys_cap_revoke(surf_cap, 1);
+        if rm.surf_cap != 0 {
+            let unmap_op = if rm.is_pixel {
+                VSPACE_MAP_OP_UNMAP_2M
+            } else {
+                VSPACE_MAP_OP_UNMAP_4K
+            };
+            let _ = sys_vspace_map(rm.surf_cap, rm.surf_vaddr, unmap_op);
+            let _ = sys_cap_revoke(rm.surf_cap, 1);
+        }
+        if rm.snap_cap != 0 {
+            let _ = sys_vspace_map(rm.snap_cap, rm.snap_vaddr, VSPACE_MAP_OP_UNMAP_2M);
+            let _ = sys_cap_revoke(rm.snap_cap, 1);
         }
     }
 }
@@ -245,21 +257,32 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
                     continue;
                 }
-                let cols = if mrs[0] == 0 {
+                let is_pixel = (mrs[2] & SURF_ATTACH_FLAG_PIXEL) != 0;
+                let w_or_cols = if mrs[0] == 0 && !is_pixel {
                     TERM_COLS as u16
                 } else {
                     (mrs[0] & 0xffff) as u16
                 };
-                let rows = if mrs[0] == 0 {
+                let h_or_rows = if mrs[0] == 0 && !is_pixel {
                     TERM_ROWS as u16
                 } else {
                     ((mrs[0] >> 16) & 0xffff) as u16
                 };
-                if cols == 0
-                    || rows == 0
-                    || (cols as usize) > TERM_COLS
-                    || (rows as usize) > TERM_ROWS
-                {
+                let geom_ok = if is_pixel {
+                    let pw = w_or_cols as usize;
+                    let ph = h_or_rows as usize;
+                    pw >= 160
+                        && ph >= 120
+                        && pw <= PIXEL_SURF_MAX_W
+                        && ph <= PIXEL_SURF_MAX_H
+                        && pw * ph <= PIXEL_SURF_MAX_PIXELS
+                } else {
+                    w_or_cols != 0
+                        && h_or_rows != 0
+                        && (w_or_cols as usize) <= TERM_COLS
+                        && (h_or_rows as usize) <= TERM_ROWS
+                };
+                if !geom_ok {
                     let _ = sys_cap_revoke(ext.transferred_cap, 1);
                     wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
                     reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
@@ -287,43 +310,102 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
                     continue;
                 };
-                let surf_vaddr = SURFACE_BASE_VADDR + (free_slot as u64) * 0x1000;
-                if sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_4K_RO).is_err() {
-                    let _ = sys_cap_revoke(ext.transferred_cap, 1);
-                    wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
-                    reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
-                    continue;
-                }
 
-                let Ok(slot_idx) = wm.register_window(
-                    ext.sender_badge,
-                    cols,
-                    rows,
-                    req_x,
-                    req_y,
-                    role,
-                    title_kind,
-                    ext.transferred_cap,
-                    surf_vaddr,
-                    focus_on_open,
-                    &mut comp.scene_dirty,
-                ) else {
-                    let _ = sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_4K);
-                    let _ = sys_cap_revoke(ext.transferred_cap, 1);
-                    reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
-                    continue;
-                };
-
-                // SAFETY: `surf_vaddr` was just mapped `USER_RO` in `dry-display`'s `VSpace`.
-                let snap_res = unsafe {
-                    wm.windows[slot_idx].snapshot.capture_from_ro(
+                let (slot_idx, snap_ok) = if is_pixel {
+                    let surf_vaddr = PIXEL_SURF_BASE_VADDR + (free_slot as u64) * (TWO_MIB as u64);
+                    let snap_vaddr = PIXEL_SNAP_BASE_VADDR + (free_slot as u64) * (TWO_MIB as u64);
+                    if sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_2M_RO).is_err() {
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                        continue;
+                    }
+                    let Ok(snap_cap) = sys_frame_alloc(1) else {
+                        let _ = sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_2M);
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                        continue;
+                    };
+                    if sys_vspace_map(snap_cap, snap_vaddr, VSPACE_MAP_OP_2M_RW).is_err() {
+                        let _ = sys_cap_revoke(snap_cap, 1);
+                        let _ = sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_2M);
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                        continue;
+                    }
+                    let Ok(si) = wm.register_pixel_window(
+                        ext.sender_badge,
+                        w_or_cols,
+                        h_or_rows,
+                        req_x,
+                        req_y,
+                        role,
+                        title_kind,
+                        ext.transferred_cap,
                         surf_vaddr,
-                        cols,
-                        rows,
-                        &mut comp.scratch_cells,
-                    )
+                        snap_cap,
+                        snap_vaddr,
+                        focus_on_open,
+                        &mut comp.scene_dirty,
+                    ) else {
+                        let _ = sys_vspace_map(snap_cap, snap_vaddr, VSPACE_MAP_OP_UNMAP_2M);
+                        let _ = sys_cap_revoke(snap_cap, 1);
+                        let _ = sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_2M);
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                        continue;
+                    };
+                    // SAFETY: `surf_vaddr` (`USER_RO`) & `snap_vaddr` (`USER_RW`) are mapped `2 MiB` frames.
+                    let ok = unsafe {
+                        capture_pixel_dirty_from_ro(
+                            surf_vaddr,
+                            snap_vaddr,
+                            w_or_cols as usize,
+                            h_or_rows as usize,
+                            true,
+                        )
+                        .is_ok_and(|opt| opt.is_some())
+                    };
+                    (si, ok)
+                } else {
+                    let surf_vaddr = SURFACE_BASE_VADDR + (free_slot as u64) * 0x1000;
+                    if sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_4K_RO).is_err() {
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                        continue;
+                    }
+                    let Ok(si) = wm.register_window(
+                        ext.sender_badge,
+                        w_or_cols,
+                        h_or_rows,
+                        req_x,
+                        req_y,
+                        role,
+                        title_kind,
+                        ext.transferred_cap,
+                        surf_vaddr,
+                        focus_on_open,
+                        &mut comp.scene_dirty,
+                    ) else {
+                        let _ = sys_vspace_map(ext.transferred_cap, surf_vaddr, VSPACE_MAP_OP_UNMAP_4K);
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                        continue;
+                    };
+                    // SAFETY: `surf_vaddr` was just mapped `USER_RO` in `dry-display`'s `VSpace`.
+                    let ok = unsafe {
+                        wm.windows[si].snapshot.capture_from_ro(
+                            surf_vaddr,
+                            w_or_cols,
+                            h_or_rows,
+                            &mut comp.scratch_cells,
+                        )
+                        .is_ok()
+                    };
+                    (si, ok)
                 };
-                if snap_res.is_err() {
+                if !snap_ok {
                     teardown_window_slot(wm, comp, disp_ep_cap, slot_idx);
                     wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
                     reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
@@ -335,6 +417,8 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 let wid = wm.windows[slot_idx].id;
                 let wx = wm.windows[slot_idx].rect.x;
                 let wy = wm.windows[slot_idx].rect.y;
+                let cols = w_or_cols;
+                let rows = h_or_rows;
 
                 let mut lb = LineBuilder::new();
                 lb.push_bytes(b"[DRY-WM] WIN_ATTACH id=");
@@ -368,47 +452,73 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                     continue;
                 };
                 let ro_va = wm.windows[slot_idx].surf_vaddr;
-                let cols = wm.windows[slot_idx].cols;
-                let rows = wm.windows[slot_idx].rows;
-                // SAFETY: `ro_va` is mapped `USER_RO` for the lifetime of `wm.windows[slot_idx]`.
-                let snap = unsafe {
-                    wm.windows[slot_idx]
-                        .snapshot
-                        .capture_from_ro(ro_va, cols, rows, &mut comp.scratch_cells)
-                };
-                match snap {
-                    Ok((rmin, rmax, changed)) => {
-                        if changed && wm.session_state == SessionVisualState::Active {
-                            let (gx, gy) = wm.windows[slot_idx].grid_origin();
-                            comp.scene_dirty.mark(Rect::new(
-                                gx,
-                                gy + rmin * 16,
-                                (cols as usize) * 8,
-                                (rmax - rmin + 1) * 16,
-                            ));
-                            comp.scene_dirty.mark(wm.windows[slot_idx].titlebar_rect());
-                        }
-                        let (px, cyc) = comp.flush_all(wm);
-                        if px > 0 {
-                            if wm.active_window_count() >= 2 {
-                                pres2w_lat.record(cyc);
-                            } else {
-                                pres1w_lat.record(cyc);
+                let ok = if wm.windows[slot_idx].is_pixel {
+                    let snap_va = wm.windows[slot_idx].snap_vaddr;
+                    let pw = wm.windows[slot_idx].pixel_w as usize;
+                    let ph = wm.windows[slot_idx].pixel_h as usize;
+                    // SAFETY: `ro_va` and `snap_va` remain mapped for the lifetime of `slot_idx`.
+                    let res = unsafe { capture_pixel_dirty_from_ro(ro_va, snap_va, pw, ph, false) };
+                    match res {
+                        Ok(Some((dx, dy, dw, dh))) => {
+                            if wm.session_state == SessionVisualState::Active && dw > 0 && dh > 0 {
+                                let (gx, gy) = wm.windows[slot_idx].grid_origin();
+                                comp.scene_dirty.mark(Rect::new(gx + dx, gy + dy, dw, dh));
+                                comp.scene_dirty.mark(wm.windows[slot_idx].titlebar_rect());
                             }
+                            true
                         }
-                        if reply_tok != 0 {
-                            let _ = sys_ipc_reply_inline(
-                                disp_ep_cap,
-                                reply_tok,
-                                pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
-                                [px, cyc, wm.windows[slot_idx].id as u64, 0],
-                            );
+                        Ok(None) => true,
+                        Err(_) => false,
+                    }
+                } else {
+                    let cols = wm.windows[slot_idx].cols;
+                    let rows = wm.windows[slot_idx].rows;
+                    // SAFETY: `ro_va` is mapped `USER_RO` for the lifetime of `wm.windows[slot_idx]`.
+                    let snap = unsafe {
+                        wm.windows[slot_idx].snapshot.capture_from_ro(
+                            ro_va,
+                            cols,
+                            rows,
+                            &mut comp.scratch_cells,
+                        )
+                    };
+                    match snap {
+                        Ok((rmin, rmax, changed)) => {
+                            if changed && wm.session_state == SessionVisualState::Active {
+                                let (gx, gy) = wm.windows[slot_idx].grid_origin();
+                                comp.scene_dirty.mark(Rect::new(
+                                    gx,
+                                    gy + rmin * 16,
+                                    (cols as usize) * 8,
+                                    (rmax - rmin + 1) * 16,
+                                ));
+                                comp.scene_dirty.mark(wm.windows[slot_idx].titlebar_rect());
+                            }
+                            true
                         }
+                        Err(_) => false,
                     }
-                    Err(_) => {
-                        wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
-                        reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                };
+                if !ok {
+                    wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
+                    reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
+                    continue;
+                }
+                let (px, cyc) = comp.flush_all(wm);
+                if px > 0 {
+                    if wm.active_window_count() >= 2 {
+                        pres2w_lat.record(cyc);
+                    } else {
+                        pres1w_lat.record(cyc);
                     }
+                }
+                if reply_tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        disp_ep_cap,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
+                        [px, cyc, wm.windows[slot_idx].id as u64, 0],
+                    );
                 }
             }
             IPC_OP_SURFACE_MOVE => {
@@ -600,6 +710,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 let action = wm.handle_input_event(ev, &mut comp.scene_dirty, &mut comp.mmio_dirty);
                 match action {
                     WmInputAction::KeyRouted(wid)
+                    | WmInputAction::PointerRouted(wid)
                     | WmInputAction::WheelRouted(wid)
                     | WmInputAction::CloseRequested(wid) => {
                         if let Some(s) = (0..MAX_WINDOWS)

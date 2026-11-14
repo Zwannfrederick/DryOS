@@ -1,0 +1,72 @@
+{
+  "milestone": "Ascension-3.0-Track-B",
+  "apps_total": 6,
+  "p9a": {
+    "resolution": "1280x800",
+    "back_2m": 2,
+    "calc_eval": "6*7=42",
+    "leaked_frames": 0,
+    "irq12": 30,
+    "screenshots": {
+      "glass_1280x800_dark_home.png": {
+        "non_bg_px": 1022448,
+        "colors": 32
+      },
+      "glass_1280x800_launcher.png": {
+        "non_bg_px": 1022448,
+        "colors": 32
+      },
+      "glass_1280x800_calc.png": {
+        "non_bg_px": 1022448,
+        "colors": 32
+      },
+      "glass_1280x800_editor.png": {
+        "non_bg_px": 1022448,
+        "colors": 32
+      },
+      "glass_1280x800_quick_settings.png": {
+        "non_bg_px": 1022142,
+        "colors": 32
+      },
+      "glass_1280x800_frosted_daylight.png": {
+        "non_bg_px": 818584,
+        "colors": 32
+      },
+      "glass_1280x800_notifications.png": {
+        "non_bg_px": 818272,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 8.33
+  },
+  "p9b": {
+    "resolution": "1920x1080",
+    "back_2m": 4,
+    "gpu_generations": 2,
+    "pci_quiesce": 3,
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass_1920x1080_tiled_gpu.png": {
+        "non_bg_px": 2071408,
+        "colors": 32
+      },
+      "glass_1920x1080_recovered_gen2.png": {
+        "non_bg_px": 2071408,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 5.014
+  },
+  "p9c": {
+    "resolution": "1024x768",
+    "back_2m": 2,
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass_1024x768_compact.png": {
+        "non_bg_px": 785136,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 4.642
+  }
+}

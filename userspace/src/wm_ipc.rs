@@ -8,10 +8,11 @@
 use crate::action::LatencyRing;
 use crate::compositor::DesktopCompositor;
 use crate::gfx::Rect;
-use crate::gpu_proto::{GPU_OP_ATTACH_BACKBUF, GPU_OP_PRESENT_RECT};
+use crate::gpu_proto::{GPU_OP_ATTACH_BACKBUF, GPU_OP_PRESENT_RECT, GPU_OP_QUERY_INFO};
 use crate::shell::LineBuilder;
 use crate::vault_crypto::scrub_bytes;
 use crate::vault_proto::{pack_passphrase_mrs, pack_vault_label};
+use crate::virtio_gpu::MAX_GPU_SCANOUT_2M;
 use crate::wm::{LayoutMode, SessionVisualState, WindowManager, TOPBAR_H};
 use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_revoke, sys_ipc_call_inline,
@@ -51,7 +52,8 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
         | (u64::from(wm.cursor_visible) << 32)
         | (u64::from(wm.cursor_large) << 33);
     let flags = u64::from(wm.session_state == SessionVisualState::DisplayBlanked)
-        | (u64::from(wm.high_contrast) << 1);
+        | (u64::from(wm.high_contrast) << 1)
+        | (u64::from(wm.light_mode) << 2);
     let mrs = [
         (bbox.x as u64) | ((bbox.y as u64) << 32),
         (bbox.w as u64) | ((bbox.h as u64) << 32),
@@ -75,6 +77,7 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
     let _ = sys_cap_revoke(gpu_ep, 1);
     wm.gpu_ep_cap = 0;
     wm.gpu_fallbacks = wm.gpu_fallbacks.wrapping_add(1);
+    wm.glass.push_notif(b"GPU fault -> UEFI GOP fallback active", 2);
     let mut flb = LineBuilder::new();
     flb.push_bytes(b"[DRY-WM] GPU_FALLBACK_TO_GOP reason=");
     flb.push_bytes(reason);
@@ -138,24 +141,39 @@ pub fn handle_wm_admin_op(
                 }
                 wm.gpu_ep_cap = ext.transferred_cap;
                 if wm.gpu_ep_cap != 0 {
-                    let need = (comp.w * comp.h * 4).div_ceil(2 * 1024 * 1024).min(2);
-                    let mut attach_ok = true;
-                    for i in 0..need {
-                        let cap = wm.back_caps[i];
-                        let ok = cap != 0
-                            && sys_ipc_call_with_grant(
-                                wm.gpu_ep_cap,
-                                GPU_OP_ATTACH_BACKBUF,
-                                [i as u64, 0, 0, 0],
-                                cap,
-                                RIGHT_READ | RIGHT_MAP,
-                                0,
-                                0,
-                            )
-                            .is_ok_and(|(t, _, _)| msg_tag_label(t) == IPC_OP_PONG);
-                        if !ok {
-                            attach_ok = false;
-                            break;
+                    let dims_ok = sys_ipc_call_inline(
+                        wm.gpu_ep_cap,
+                        pack_msg_tag(GPU_OP_QUERY_INFO, 0, 1, 0),
+                        [0; 4],
+                        0,
+                    )
+                    .is_ok_and(|(qt, _, qmrs)| {
+                        msg_tag_label(qt) == IPC_OP_PONG
+                            && ((qmrs[0] & 0xffff_ffff) as usize) == comp.w
+                            && ((qmrs[0] >> 32) as usize) == comp.h
+                    });
+                    let need = (comp.w * comp.h * 4)
+                        .div_ceil(2 * 1024 * 1024)
+                        .clamp(1, MAX_GPU_SCANOUT_2M);
+                    let mut attach_ok = dims_ok;
+                    if attach_ok {
+                        for i in 0..need {
+                            let cap = wm.back_caps[i];
+                            let ok = cap != 0
+                                && sys_ipc_call_with_grant(
+                                    wm.gpu_ep_cap,
+                                    GPU_OP_ATTACH_BACKBUF,
+                                    [i as u64, 0, 0, 0],
+                                    cap,
+                                    RIGHT_READ | RIGHT_MAP,
+                                    0,
+                                    0,
+                                )
+                                .is_ok_and(|(t, _, _)| msg_tag_label(t) == IPC_OP_PONG);
+                            if !ok {
+                                attach_ok = false;
+                                break;
+                            }
                         }
                     }
                     if attach_ok {
@@ -163,6 +181,7 @@ pub fn handle_wm_admin_op(
                         glb.push_bytes(b"[DRY-WM] GPU_SCANOUT_BOUND back_2m=");
                         glb.push_u64(need as u64);
                         wm_log_line(&glb);
+                        wm.glass.push_notif(b"VirtIO-GPU 2D scanout bound", 1);
                         comp.scene_dirty.mark(Rect::new(0, 0, comp.w, comp.h));
                     } else {
                         let _ = sys_cap_revoke(wm.gpu_ep_cap, 1);
@@ -177,6 +196,7 @@ pub fn handle_wm_admin_op(
                 wm.p3_mode = mrs[0] != 0;
                 if wm.p3_mode {
                     wm.desktop_mode = true;
+                    wm.glass.push_notif(b"DRY Glass desktop session ready", 0);
                 }
                 wm.running_apps_mask = (mrs[1] & 0xff) as u8;
                 comp.scene_dirty.mark(Rect::new(0, 0, comp.w, TOPBAR_H));
@@ -291,13 +311,25 @@ pub fn handle_wm_admin_op(
                 reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
                 return true;
             }
-            if (mrs[0] & !0x3) != 0 {
+            if (mrs[0] & !0x0f) != 0 {
                 wm.invalid_req_rejects = wm.invalid_req_rejects.wrapping_add(1);
                 reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_INVAL);
                 return true;
             }
             wm.high_contrast = (mrs[0] & 1) != 0;
             wm.cursor_large = (mrs[0] & 2) != 0;
+            wm.light_mode = (mrs[0] & 4) != 0;
+            wm.low_overhead_glass = (mrs[0] & 8) != 0;
+            wm.glass.push_notif(
+                if wm.high_contrast {
+                    b"Theme: High Contrast active"
+                } else if wm.light_mode {
+                    b"Theme: Frosted Daylight active"
+                } else {
+                    b"Theme: Obsidian Dark active"
+                },
+                0,
+            );
             comp.apply_display_prefs(wm);
             let (px, cyc) = comp.flush_all(wm);
             let mut lb = LineBuilder::new();
@@ -305,6 +337,10 @@ pub fn handle_wm_admin_op(
             lb.push_u64(u64::from(wm.high_contrast));
             lb.push_bytes(b" cur_large=");
             lb.push_u64(u64::from(wm.cursor_large));
+            lb.push_bytes(b" light=");
+            lb.push_u64(u64::from(wm.light_mode));
+            lb.push_bytes(b" glass_low=");
+            lb.push_u64(u64::from(wm.low_overhead_glass));
             lb.push_bytes(b" px=");
             lb.push_u64(px);
             wm_log_line(&lb);
@@ -313,7 +349,7 @@ pub fn handle_wm_admin_op(
                     disp_ep_cap,
                     reply_tok,
                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
-                    [mrs[0] & 0x3, px, cyc, 0],
+                    [mrs[0] & 0x0f, px, cyc, 0],
                 );
             }
             true

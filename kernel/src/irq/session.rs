@@ -74,6 +74,8 @@ struct P1InitBootInfo {
     pci_rng_cap: u64,
     gpu_mod_cap: u64,
     pci_gpu_cap: u64,
+    editor_mod_cap: u64,
+    calc_mod_cap: u64,
 }
 
 const _: () = assert!(size_of::<P1InitBootInfo>() <= BOOT_MANIFEST_OFFSET);
@@ -193,6 +195,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-lx-rng.elf").unwrap_or(CapPtr::NULL);
             let gpu_mod_cap =
                 mint_boot_module_cap(cs, lbl, "dry-gpu.elf").unwrap_or(CapPtr::NULL);
+            let editor_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-editor.elf").unwrap_or(CapPtr::NULL);
+            let calc_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-calc.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -267,6 +273,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 pci_rng_cap: pci_rng_cap.0,
                 gpu_mod_cap: gpu_mod_cap.0,
                 pci_gpu_cap: pci_gpu_cap.0,
+                editor_mod_cap: editor_mod_cap.0,
+                calc_mod_cap: calc_mod_cap.0,
             };
             // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
             unsafe {

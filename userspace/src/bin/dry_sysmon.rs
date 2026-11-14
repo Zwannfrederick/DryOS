@@ -15,7 +15,7 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 
-use dry_userspace::action::{compartment_short_name, DesktopAction};
+use dry_userspace::action::{compartment_short_name, DesktopAction, APP_COUNT};
 use dry_userspace::gfx::BOX_HORIZ;
 use dry_userspace::input::{InputEvent, InputEventKind};
 use dry_userspace::shell::LineBuilder;
@@ -29,10 +29,10 @@ use dry_userspace::{
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_create, sys_notify_wait,
     sys_power_query, sys_proc_list, sys_sysinfo, sys_vault_query_epoch, sys_vspace_map,
     sys_write_debug, UserPowerInfo, UserProcInfo, UserSysInfo, IPC_OP_INPUT_EVENT, IPC_OP_PONG,
-    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SURFACE_ATTACH,
-    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED,
-    IPC_OP_WIN_POLL_EVENT, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL, VSPACE_MAP_OP_4K_RW,
-    VSPACE_MAP_OP_UNMAP_4K,
+    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_APPS,
+    IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_BIND_NOTIF, IPC_OP_WIN_CLOSE,
+    IPC_OP_WIN_CLOSED, IPC_OP_WIN_POLL_EVENT, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
+    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const SYSMON_SURF_VADDR: u64 = 0x1800_0000;
@@ -56,6 +56,28 @@ fn log_line(lb: &LineBuilder) {
     out[..n].copy_from_slice(&s[..n]);
     out[n] = b'\n';
     let _ = sys_write_debug(&out[..=n]);
+}
+
+fn query_running_apps(sup_ep_cap: u64) -> u64 {
+    let mut running = 0u64;
+    for page in 0u64..=1 {
+        if let Ok((rtag, _, rmrs)) = sys_ipc_call_inline(
+            sup_ep_cap,
+            pack_msg_tag(IPC_OP_SUP_QUERY_APPS, 0, 1, 0),
+            [page, 0, 0, 0],
+            0,
+        ) {
+            if msg_tag_label(rtag) == IPC_OP_PONG {
+                let lim = if page == 1 { APP_COUNT.saturating_sub(4) } else { 4 };
+                for &w in rmrs.iter().take(lim) {
+                    if ((w >> 32) & 0xff) == 1 {
+                        running += 1;
+                    }
+                }
+            }
+        }
+    }
+    running
 }
 
 fn write_row_cols(surf: &SharedWindowSurface, cols: usize, row: usize, text: &[u8], style: u8) {
@@ -273,6 +295,7 @@ fn render_life_station_frame(
     prev_sys: &UserSysInfo,
     pwr: &UserPowerInfo,
     procs: &[UserProcInfo],
+    running_apps: u64,
     refresh_seq: u64,
     keys_rcvd: u64,
     last_ascii: u8,
@@ -284,7 +307,7 @@ fn render_life_station_frame(
         surf,
         LIFE_COLS,
         0,
-        b"DRY LIFE STATION // LIVE KERNEL & COMPARTMENT TELEMETRY",
+        b"DRY LIFE STATION // GLASS KERNEL & ISLAND TELEMETRY",
         STYLE_HEADER,
     );
     write_row_cols(surf, LIFE_COLS, 1, &div, STYLE_MUTED);
@@ -362,7 +385,11 @@ fn render_life_station_frame(
     let mut r7 = LineBuilder::new();
     r7.push_bytes(b"ACTIVE COMPARTMENTS (");
     r7.push_u64(procs.len() as u64);
-    r7.push_bytes(b" LIVE) // SYS_PROC_LIST");
+    r7.push_bytes(b" LIVE, ");
+    r7.push_u64(running_apps);
+    r7.push_byte(b'/');
+    r7.push_u64(APP_COUNT as u64);
+    r7.push_bytes(b" APPS) // SYS_PROC_LIST");
     write_row_cols(surf, LIFE_COLS, 7, r7.as_bytes(), STYLE_ACCENT);
 
     write_row_cols(
@@ -514,12 +541,14 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     let mut last_ascii: u8 = 0;
 
     if p3_mode {
+        let running_apps = query_running_apps(sup_ep_cap);
         render_life_station_frame(
             surf,
             &sys,
             &prev_sys,
             &pwr,
             &procs[..proc_count.min(procs.len())],
+            running_apps,
             refresh_seq,
             keys_rcvd,
             last_ascii,
@@ -658,12 +687,14 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         if p3_mode {
             let _ = sys_power_query(&mut pwr);
             proc_count = sys_proc_list(&mut procs).unwrap_or((0, 0)).0;
+            let running_apps = query_running_apps(sup_ep_cap);
             render_life_station_frame(
                 surf,
                 &sys,
                 &prev_sys,
                 &pwr,
                 &procs[..proc_count.min(procs.len())],
+                running_apps,
                 refresh_seq,
                 keys_rcvd,
                 last_ascii,

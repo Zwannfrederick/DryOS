@@ -295,3 +295,130 @@ impl Default for SurfaceSnapshot {
         Self::new()
     }
 }
+
+pub const PIXEL_SURFACE_MAGIC: u64 = 0x4452_595f_5049_584c; // "DRY_PIXL"
+pub const SURF_ATTACH_FLAG_PIXEL: u64 = 1 << 18;
+pub const PIXEL_SURF_HEADER_BYTES: usize = 64;
+pub const PIXEL_SURF_MAX_W: usize = 960;
+pub const PIXEL_SURF_MAX_H: usize = 640;
+pub const PIXEL_SURF_MAX_PIXELS: usize = (2 * 1024 * 1024 - PIXEL_SURF_HEADER_BYTES) / 4;
+
+#[repr(C)]
+pub struct SharedPixelSurfaceHeader {
+    pub magic: AtomicU64,
+    pub seq: AtomicU32,
+    pub width: AtomicU16,
+    pub height: AtomicU16,
+    pub dirty_x: AtomicU16,
+    pub dirty_y: AtomicU16,
+    pub dirty_w: AtomicU16,
+    pub dirty_h: AtomicU16,
+    pub flags: AtomicU32,
+    pub cursor_x: AtomicU16,
+    pub cursor_y: AtomicU16,
+    pub reserved: [AtomicU32; 8],
+}
+
+const _: () = assert!(size_of::<SharedPixelSurfaceHeader>() == PIXEL_SURF_HEADER_BYTES);
+
+/// Init `Frame2M`-backed pixel surface header (`USER_RW` in app).
+/// # Safety
+/// `rw_va` must point to a mapped `2 MiB` `USER_RW` frame with `w * h <= PIXEL_SURF_MAX_PIXELS`.
+pub unsafe fn init_pixel_surface_rw(rw_va: u64, w: u16, h: u16) {
+    let hdr = unsafe { &*(rw_va as *const SharedPixelSurfaceHeader) };
+    hdr.seq.store(0, Ordering::Relaxed);
+    hdr.width.store(w, Ordering::Relaxed);
+    hdr.height.store(h, Ordering::Relaxed);
+    hdr.dirty_x.store(0, Ordering::Relaxed);
+    hdr.dirty_y.store(0, Ordering::Relaxed);
+    hdr.dirty_w.store(w, Ordering::Relaxed);
+    hdr.dirty_h.store(h, Ordering::Relaxed);
+    hdr.flags.store(0, Ordering::Relaxed);
+    hdr.cursor_x.store(0, Ordering::Relaxed);
+    hdr.cursor_y.store(0, Ordering::Relaxed);
+    fence(Ordering::Release);
+    hdr.magic.store(PIXEL_SURFACE_MAGIC, Ordering::Release);
+}
+
+/// Atomically publish a dirty pixel rectangle from an app `Frame2M` (`seq` odd -> even).
+/// # Safety
+/// `rw_va` must point to a mapped initialized `SharedPixelSurfaceHeader` + pixels.
+pub unsafe fn publish_pixel_rect_rw(rw_va: u64, x: u16, y: u16, w: u16, h: u16) {
+    let hdr = unsafe { &*(rw_va as *const SharedPixelSurfaceHeader) };
+    let seq0 = hdr.seq.load(Ordering::Relaxed);
+    let odd = seq0.wrapping_add(1) | 1;
+    hdr.seq.store(odd, Ordering::Release);
+    hdr.dirty_x.store(x, Ordering::Relaxed);
+    hdr.dirty_y.store(y, Ordering::Relaxed);
+    hdr.dirty_w.store(w, Ordering::Relaxed);
+    hdr.dirty_h.store(h, Ordering::Relaxed);
+    fence(Ordering::Release);
+    hdr.seq.store(odd.wrapping_add(1), Ordering::Release);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelSurfaceError;
+
+/// Capture dirty (or full when `force_full`) BGRA pixel rect from `ro_va` into `snap_va`.
+/// # Safety
+/// `ro_va` (`USER_RO`, `Frame2M`) and `snap_va` (`USER_RW`, `Frame2M`) must be mapped.
+pub unsafe fn capture_pixel_dirty_from_ro(
+    ro_va: u64,
+    snap_va: u64,
+    reg_w: usize,
+    reg_h: usize,
+    force_full: bool,
+) -> Result<Option<(usize, usize, usize, usize)>, PixelSurfaceError> {
+    if ro_va == 0
+        || snap_va == 0
+        || reg_w < 160
+        || reg_h < 120
+        || reg_w > PIXEL_SURF_MAX_W
+        || reg_h > PIXEL_SURF_MAX_H
+        || reg_w * reg_h > PIXEL_SURF_MAX_PIXELS
+    {
+        return Err(PixelSurfaceError);
+    }
+    let hdr = unsafe { &*(ro_va as *const SharedPixelSurfaceHeader) };
+    if hdr.magic.load(Ordering::Acquire) != PIXEL_SURFACE_MAGIC {
+        return Err(PixelSurfaceError);
+    }
+    let src_px = (ro_va + PIXEL_SURF_HEADER_BYTES as u64) as *const AtomicU32;
+    let dst_px = (snap_va + PIXEL_SURF_HEADER_BYTES as u64) as *mut u32;
+
+    for _attempt in 0..3 {
+        let s1 = hdr.seq.load(Ordering::Acquire);
+        if (s1 & 1) != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let w = hdr.width.load(Ordering::Relaxed) as usize;
+        let h = hdr.height.load(Ordering::Relaxed) as usize;
+        if w != reg_w || h != reg_h {
+            return Err(PixelSurfaceError);
+        }
+        let (dx, dy, dw, dh) = if force_full {
+            (0, 0, w, h)
+        } else {
+            let x0 = (hdr.dirty_x.load(Ordering::Relaxed) as usize).min(w);
+            let y0 = (hdr.dirty_y.load(Ordering::Relaxed) as usize).min(h);
+            let cw = (hdr.dirty_w.load(Ordering::Relaxed) as usize).min(w - x0);
+            let ch = (hdr.dirty_h.load(Ordering::Relaxed) as usize).min(h - y0);
+            (x0, y0, cw, ch)
+        };
+        if dw > 0 && dh > 0 {
+            for row in dy..(dy + dh) {
+                let row_off = row * w + dx;
+                for col in 0..dw {
+                    let px = unsafe { (*src_px.add(row_off + col)).load(Ordering::Relaxed) };
+                    unsafe { dst_px.add(row_off + col).write(px) };
+                }
+            }
+        }
+        fence(Ordering::Acquire);
+        if hdr.seq.load(Ordering::Relaxed) == s1 {
+            return Ok(Some((dx, dy, dw, dh)));
+        }
+    }
+    Ok(None)
+}

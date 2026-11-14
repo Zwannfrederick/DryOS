@@ -49,7 +49,7 @@ const INIT_DLG_Y: u64 = 240;
 
 const ALLOW_MULTI_FLAG: u64 = 1 << 17;
 const NOTIF_SHUTDOWN_BIT: u64 = 1 << 1;
-const ROW_COUNT: usize = 7;
+const ROW_COUNT: usize = 9;
 
 const BLANK_PRESETS: [u16; 4] = [0, 5, 30, 60];
 
@@ -107,7 +107,7 @@ fn render_dialog_surface(surf: &SharedWindowSurface) {
         surf,
         DLG_COLS,
         6,
-        b" Shortcuts: Alt+1..4 Apps  Alt+G Layout",
+        b" Shortcuts: Alt+1..6 Apps  Alt+Space Search",
         STYLE_ACCENT,
     );
     write_row_cols(surf, DLG_COLS, 7, &div, STYLE_MUTED);
@@ -304,6 +304,26 @@ impl SettingsUi {
                 let _ = sys_write_debug(b"[DRY-SETTINGS] APPLY lock_session=1\n");
                 self.set_status(b"Requested Session Lock shield");
             }
+            7 => {
+                let next = self.prefs.theme_flags ^ 4;
+                if self.send_action(DesktopAction::SetThemeContrast(next)) {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"[DRY-SETTINGS] APPLY light_mode=");
+                    lb.push_u64(((self.prefs.theme_flags >> 2) & 1) as u64);
+                    log_line(&lb);
+                    self.set_status(b"Applied DRY Glass Obsidian Dark / Frosted Daylight theme");
+                }
+            }
+            8 => {
+                let next = self.prefs.theme_flags ^ 8;
+                if self.send_action(DesktopAction::SetThemeContrast(next)) {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"[DRY-SETTINGS] APPLY low_overhead_glass=");
+                    lb.push_u64(((self.prefs.theme_flags >> 3) & 1) as u64);
+                    log_line(&lb);
+                    self.set_status(b"Applied DRY Glass frosted blur / low-overhead material");
+                }
+            }
             _ => {}
         }
     }
@@ -339,7 +359,24 @@ impl SettingsUi {
             self.adjust_row(4, 1);
             return false;
         }
-        if (b'1'..=b'7').contains(&ev.ascii) {
+        if ev.ascii == b't' || ev.ascii == b'T' {
+            self.sel_row = 7;
+            self.adjust_row(7, 1);
+            return false;
+        }
+        if ev.ascii == b'b' || ev.ascii == b'B' {
+            self.sel_row = 8;
+            self.adjust_row(8, 1);
+            return false;
+        }
+        if ev.ascii == b'g' || ev.ascii == b'G' {
+            if self.send_action(DesktopAction::TriggerGpuFaultTest) {
+                let _ = sys_write_debug(b"[DRY-SETTINGS] APPLY gpu_fault_test=1\n");
+                self.set_status(b"Triggered live VirtIO-GPU fault & recovery test");
+            }
+            return false;
+        }
+        if (b'1'..=b'9').contains(&ev.ascii) {
             self.sel_row = (ev.ascii - b'1') as usize;
             self.adjust_row(self.sel_row, 1);
             return false;
@@ -427,6 +464,16 @@ impl SettingsUi {
         } else {
             b"[Enter/L] Lock Session (No Auth)"
         };
+        let glass_theme_str: &[u8] = if (self.prefs.theme_flags & 4) != 0 {
+            b"< Frosted Daylight >"
+        } else {
+            b"< Obsidian Dark >"
+        };
+        let glass_blur_str: &[u8] = if (self.prefs.theme_flags & 8) != 0 {
+            b"< Low-Overhead >"
+        } else {
+            b"< Frosted Blur >"
+        };
 
         let rows_spec: [(&[u8], &[u8]); ROW_COUNT] = [
             (b"[1] Window Layout   : ", layout_str),
@@ -436,10 +483,12 @@ impl SettingsUi {
             (b"[5] Cursor Size [C] : ", cur_str),
             (b"[6] Idle DPMS Blank : ", blank_str),
             (b"[7] Session Shield  : ", shield_str),
+            (b"[8] Glass Theme [T] : ", glass_theme_str),
+            (b"[9] Glass Blur  [B] : ", glass_blur_str),
         ];
 
         for (i, (label, val)) in rows_spec.iter().enumerate() {
-            let r = 5 + i * 2;
+            let r = 5 + i;
             let selected = i == self.sel_row;
             let mut lb = LineBuilder::new();
             lb.push_bytes(if selected { b" > " } else { b"   " });
@@ -452,9 +501,9 @@ impl SettingsUi {
                 lb.as_bytes(),
                 if selected { STYLE_OK } else { STYLE_DEFAULT },
             );
-            if r + 1 < 18 {
-                write_row_cols(surf, SET_COLS, r + 1, b"", STYLE_DEFAULT);
-            }
+        }
+        for r in (5 + ROW_COUNT)..18 {
+            write_row_cols(surf, SET_COLS, r, b"", STYLE_DEFAULT);
         }
 
         write_row_cols(surf, SET_COLS, 18, &div, STYLE_MUTED);
@@ -475,7 +524,7 @@ impl SettingsUi {
             surf,
             SET_COLS,
             21,
-            b" Supported Display: Contrast + Cursor (GOP modeset fixed)",
+            b" DRY Glass: [T] Theme  [B] Blur  [G] GPU Recovery  [H] Help",
             STYLE_MUTED,
         );
         surf.end_write(odd);

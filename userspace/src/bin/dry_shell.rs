@@ -12,7 +12,7 @@
 
 use core::cell::UnsafeCell;
 
-use dry_userspace::action::{AppId, DesktopAction};
+use dry_userspace::action::{AppId, DesktopAction, APP_COUNT};
 use dry_userspace::input::{InputEvent, InputEventKind, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use dry_userspace::keymap::{
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_PAGEDOWN,
@@ -499,16 +499,28 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         }
                     }
                     ShellCommand::Apps => {
-                        match sys_ipc_call_inline(
+                        let p0 = sys_ipc_call_inline(
                             sup_ep_cap,
                             pack_msg_tag(IPC_OP_SUP_QUERY_APPS, 0, 1, 0),
                             [0; 4],
                             0,
-                        ) {
-                            Ok((rtag, _, rmrs)) if msg_tag_label(rtag) == IPC_OP_PONG => {
-                                engine.format_apps(rmrs);
+                        );
+                        let p1 = sys_ipc_call_inline(
+                            sup_ep_cap,
+                            pack_msg_tag(IPC_OP_SUP_QUERY_APPS, 0, 1, 0),
+                            [1, 0, 0, 0],
+                            0,
+                        );
+                        match (p0, p1) {
+                            (Ok((t0, _, m0)), Ok((t1, _, m1)))
+                                if msg_tag_label(t0) == IPC_OP_PONG
+                                    && msg_tag_label(t1) == IPC_OP_PONG =>
+                            {
+                                let all: [u64; APP_COUNT] =
+                                    [m0[0], m0[1], m0[2], m0[3], m1[0], m1[1]];
+                                engine.format_apps(all);
                                 let mut running = 0u64;
-                                for w in rmrs {
+                                for w in all {
                                     if ((w >> 32) & 0xff) == 1 {
                                         running += 1;
                                     }
@@ -561,7 +573,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                             }
                         },
                         None => engine.push_line(
-                            b"Usage: open <terminal|lifestation|files|settings>",
+                            b"Usage: open <terminal|lifestation|files|settings|editor|calc>",
                             STYLE_WARN,
                         ),
                     },
@@ -594,7 +606,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                             }
                         }
                         None => engine.push_line(
-                            b"Usage: close <terminal|lifestation|files|settings>",
+                            b"Usage: close <terminal|lifestation|files|settings|editor|calc>",
                             STYLE_WARN,
                         ),
                     },
@@ -620,7 +632,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                             Err(_) => engine.push_line(b"Failed to restart app.", STYLE_WARN),
                         },
                         None => engine.push_line(
-                            b"Usage: restart <terminal|lifestation|files|settings>",
+                            b"Usage: restart <terminal|lifestation|files|settings|editor|calc>",
                             STYLE_WARN,
                         ),
                     },
@@ -732,6 +744,35 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     }
                     ShellCommand::SecAudit => {
                         run_live_p3_sec_probes(sup_ep_cap, engine);
+                    }
+                    ShellCommand::GpuFault => {
+                        match call_sup_action(sup_ep_cap, DesktopAction::TriggerGpuFaultTest) {
+                            Ok(rmrs) => {
+                                let mut lb = LineBuilder::new();
+                                lb.push_bytes(b"GPU fault & recovery OK: gen=");
+                                lb.push_u64(rmrs[0]);
+                                lb.push_bytes(b" vec=");
+                                lb.push_u64(rmrs[1]);
+                                lb.push_byte(b' ');
+                                lb.push_u64(rmrs[2]);
+                                lb.push_byte(b'x');
+                                lb.push_u64(rmrs[3]);
+                                engine.push_line(lb.as_bytes(), STYLE_OK);
+
+                                let mut slb = LineBuilder::new();
+                                slb.push_bytes(b"[DRY-SHELL] CMD=gpufault gen=");
+                                slb.push_u64(rmrs[0]);
+                                slb.push_bytes(b" vec=");
+                                slb.push_u64(rmrs[1]);
+                                debug_line(&slb);
+                            }
+                            Err(_) => {
+                                engine.push_line(
+                                    b"GPU driver island unavailable or recovery failed.",
+                                    STYLE_WARN,
+                                );
+                            }
+                        }
                     }
                     ShellCommand::StorageVault(verb, rest) => {
                         if let Some(act) = exec_storage_vault_command(

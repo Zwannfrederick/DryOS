@@ -23,6 +23,8 @@ pub const TITLE_KIND_GENERIC: u8 = 2;
 pub const TITLE_KIND_FILES: u8 = 3;
 pub const TITLE_KIND_SETTINGS: u8 = 4;
 pub const TITLE_KIND_DIALOG: u8 = 5;
+pub const TITLE_KIND_EDITOR: u8 = 6;
+pub const TITLE_KIND_CALC: u8 = 7;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +104,17 @@ pub enum HitPart {
     ClientBody,
 }
 
+#[derive(Clone, Copy)]
+pub struct RemovedWindowSlot {
+    pub surf_cap: u64,
+    pub surf_vaddr: u64,
+    pub is_pixel: bool,
+    pub snap_cap: u64,
+    pub snap_vaddr: u64,
+    pub notif_cap: u64,
+    pub waiter_tok: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WmError {
     PermDenied,
@@ -119,6 +132,7 @@ pub enum WmInputAction {
     CloseRequested(u32),
     LayoutToggled(LayoutMode),
     KeyRouted(u32),
+    PointerRouted(u32),
     WheelRouted(u32),
     KeyMoved(u32, usize, usize),
     DesktopActionQueued(DesktopAction),
@@ -146,6 +160,11 @@ pub struct WindowSlot {
     pub waiter_reply_tok: u64,
     pub ev_queue: InputRingQueue<WIN_EVENT_QUEUE_CAP>,
     pub snapshot: SurfaceSnapshot,
+    pub is_pixel: bool,
+    pub pixel_w: u16,
+    pub pixel_h: u16,
+    pub snap_cap: u64,
+    pub snap_vaddr: u64,
 }
 
 impl WindowSlot {
@@ -169,6 +188,11 @@ impl WindowSlot {
             waiter_reply_tok: 0,
             ev_queue: InputRingQueue::new(),
             snapshot: SurfaceSnapshot::new(),
+            is_pixel: false,
+            pixel_w: 0,
+            pixel_h: 0,
+            snap_cap: 0,
+            snap_vaddr: 0,
         }
     }
 
@@ -215,5 +239,12 @@ impl WindowSlot {
 pub const fn compute_window_size(cols: u16, rows: u16) -> (usize, usize) {
     let w = (cols as usize) * 8 + WIN_PAD_X * 2 + WIN_BORDER * 2;
     let h = WIN_TITLE_H + (rows as usize) * 16 + WIN_PAD_BOTTOM + WIN_BORDER * 2;
+    (w, h)
+}
+
+#[inline]
+pub const fn compute_pixel_window_size(pw: u16, ph: u16) -> (usize, usize) {
+    let w = (pw as usize) + WIN_PAD_X * 2 + WIN_BORDER * 2;
+    let h = WIN_TITLE_H + (ph as usize) + WIN_PAD_BOTTOM + WIN_BORDER * 2;
     (w, h)
 }

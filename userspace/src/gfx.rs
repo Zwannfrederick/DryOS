@@ -147,6 +147,14 @@ impl DirtyRegion {
     }
 
     #[inline]
+    pub fn intersect_any(&self, r: Rect) -> bool {
+        if r.is_empty() {
+            return false;
+        }
+        self.rects[..self.count].iter().any(|x| !x.intersect(r).is_empty())
+    }
+
+    #[inline]
     pub fn drain_into(&mut self, fb_w: usize, fb_h: usize, out: &mut [Rect; MAX_DIRTY_RECTS]) -> usize {
         let mut n = 0usize;
         for i in 0..self.count {

@@ -2,7 +2,7 @@
 //! Ring 3 Native Terminal Engine (`InputEditor`, `CommandHistory`, `CommandParser`,
 //! `ScrollbackBuffer`, `SurfacePresenter`, and real kernel/supervisor telemetry formatters).
 
-use crate::action::{compartment_short_name, AppId};
+use crate::action::{compartment_short_name, AppId, APP_COUNT};
 use crate::surface::{
     SharedTerminalSurface, SurfaceCell, STYLE_ACCENT, STYLE_DEFAULT, STYLE_HEADER, STYLE_MUTED,
     STYLE_OK, STYLE_PROMPT, STYLE_WARN, TERM_COLS, TERM_ROWS,
@@ -38,6 +38,7 @@ pub enum ShellCommand<'a> {
     OverflowTest,
     CrashInput,
     SecAudit,
+    GpuFault,
     Shutdown,
     StorageVault(&'a [u8], &'a [u8]),
     UnsupportedPosix(u8),
@@ -99,6 +100,7 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"overflow-test" => ShellCommand::OverflowTest,
         b"crash-input" => ShellCommand::CrashInput,
         b"sec-audit" => ShellCommand::SecAudit,
+        b"gpufault" => ShellCommand::GpuFault,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
         b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"vault-status"
         | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
@@ -533,12 +535,12 @@ impl ShellEngine {
         self.push_line(b"  sysinfo | uptime  Live CPU, APIC, RAM, IPC, IRQ & TSC telemetry", STYLE_DEFAULT);
         self.push_line(b"  ps                Live Ring 3 process table (SYS_PROC_LIST)", STYLE_DEFAULT);
         self.push_line(b"  apps              Registered native apps & supervisor state", STYLE_DEFAULT);
-        self.push_line(b"  open|close|restart <terminal|lifestation|files|settings>", STYLE_DEFAULT);
+        self.push_line(b"  open|close|restart <terminal|lifestation|files|settings|editor|calc>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
         self.push_line(b"  ls|cat|write|rm|ln|sync  VFS (/persist, /ram, /boot) ops", STYLE_DEFAULT);
         self.push_line(b"  vault-status|vault-unlock|vault-lock|vault-passwd  DRY Vault", STYLE_DEFAULT);
-        self.push_line(b"  blank|lock|reboot|poweroff|shutdown|suspend  Power & session", STYLE_DEFAULT);
-        self.push_line(b"Keys: Up/Down history | PgUp/PgDn/Wheel scroll | Alt+1..4 apps", STYLE_MUTED);
+        self.push_line(b"  gpufault|blank|lock|reboot|poweroff|shutdown|suspend  System", STYLE_DEFAULT);
+        self.push_line(b"Keys: Up/Down hist | PgUp/PgDn scroll | Alt+1..6 apps | Alt+Space", STYLE_MUTED);
     }
 
     pub fn format_history(&mut self) {
@@ -671,7 +673,7 @@ impl ShellEngine {
         }
     }
 
-    pub fn format_apps(&mut self, words: [u64; 4]) {
+    pub fn format_apps(&mut self, words: [u64; APP_COUNT]) {
         self.push_line(
             b"APP          COMP    STATE            PID   LAUNCHES",
             STYLE_ACCENT,

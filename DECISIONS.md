@@ -1,7 +1,7 @@
 # DRY OS — Mimari Karar Kayıtları (Architecture Decision Records)
 
-> **Tarih:** 10–12 Kasım 2026  
-> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-016`)
+> **Tarih:** 10–14 Kasım 2026  
+> **Durum:** Aktif Mimari ve Ürün Kararları (`ADR-001` .. `ADR-020`)
 
 ---
 
@@ -398,3 +398,14 @@
      - Mevcut `Syscall ABI v0.1` (`0..=31`, `rust_syscall_dispatch = 248 B <= 256 B`) korunarak `Notification` nesnesi `TCB`'ye bağlandı (`sys_notify_bind_tcb` / `sys_notify_unbind_tcb`, `sys_ipc_recv_ext` içinde birleşik IPC+IRQ beklemesi ve bağlı iken doğrudan `sys_notify_wait` -> `-EBUSY`; QEMU `edu` üzerinde `msi_p50 = 22.95 us` [`71,501 cyc`] kanıtlandı).
      - `docs/AUDIT_2A4A.md` içindeki 6 açık P1 bulgusu kapatıldı: `AUD-K6` (`sched/donate.rs` eski sunucu `recompute_chain_from`), `AUD-K7` (`gdt_tss.rs` `NMI` `IST2` + `#MC` `IST3` ayrık `8 KiB` yığınlar, `cases=9/9`), `AUD-K8` (`quiesce_slot_for_cspace` tam sıfırlama + `VT-d` scrub), `AUD-U3` (`ioring.rs` `user_tag` doğrulaması + sınırlı bekleme & sağlık sorgusu), `AUD-U4` (`dry_blk.rs` zaman aşımında `poisoned=true` + `reset_device`), `AUD-U8` (`dry_broker.rs` `ipc_timeout_tsc` + `ISLAND_STATE_FAULTED` hata yanıtı; panic/exit kaldırıldı).
      - Uçtan uca doğrulama (`dry-hw-test.elf`, `tools/qemu_p8_hw_validators.py` `p8a_hw_foundations_vtd_msi_bar64_e2e`) `95/95` QEMU + `5/5` SMP/RAM matrisiyle (`leaked_frames=0`) geçirildi.
+
+---
+
+## ADR-020: `DRY Glass` Masaüstü Ortamı, Çoklu Çözünürlük `VirtIO-GPU` ve `UEFI GOP Fallback`
+
+- **Durum:** Kabul Edildi ve Doğrulandı (`Project Ascension 3.0 — Track B`, `2026-11-14`)
+- **Bağlam:** `Priority C` (`ADR-018`) `VirtIO-GPU` 2D scanout ve temel pencere yöneticisi üzerine; modern saydam katmanlı (`COSMIC` üretkenliği + `macOS` buzlu derinlik dili) tam masaüstü ortamı, kalıcı yerel uygulamalar (`dry_editor.rs`, `dry_calc.rs` ve toplam 6 yerel masaüstü uygulaması, `23` önyükleme modülü kapasite darphanesi) ve yüksek çözünürlüklerde (`1024x768`, `1280x800`, `1920x1080`) dinamik geri alma/yeniden bağlama gereksinimi.
+- **Karar:**
+  - `userspace/src/glass/` (`chrome.rs`, `overlays.rs`) altında koyu/açık tema (`Frosted Daylight` / `Obsidian Night`, `light_mode`) ve performans modu (`low_overhead_glass`) destekli buzlu arka plan bulanıklığı, üst panel, alt dock, `Alt+Space` uygulama başlatıcı, Hızlı Ayarlar (`Quick Settings`) ve Bildirim Merkezi eklendi.
+  - `userspace/src/bin/dry_display.rs` (`MAX_BACKBUF_2M = 8`) ve `dry_gpu.rs` (`MAX_GPU_SCANOUT_2M = 5`) ile `1920x1080` dahil 32-bit `XRGB`/`B8G8R8X8_UNORM` tarama tamponları ve piksel yüzeyleri desteklendi; `userspace/src/wm_ipc.rs` (`try_gpu_present_or_fallback`, `GPU_SCANOUT_BOUND`) canlı `gpufault` (`ep_revoked`) anında sıfır panikle `UEFI GOP`'a düşüp `gen=2` sürücü dirilmesinde `VirtIO-GPU` scanout'a geri bağlandı.
+  - Çoklu çözünürlük deterministik E2E doğrulaması `tools/qemu_p9_glass_validators.py` (`run_p9a_glass_1280x800`, `run_p9b_glass_1920x1080`, `run_p9c_glass_1024x768`) ve `tools/qemu_boot_test.py --p9-only` üzerinden `3/3 PASS`, `leaked_frames=0` ve `10` görsel ekran görüntüsü (`docs/screenshots/glass_*.png`) ile kanıtlandı.

@@ -22,7 +22,7 @@ use dry_userspace::gpu_proto::{
     GPU_OP_PRESENT_RECT, GPU_OP_QUERY_INFO,
 };
 use dry_userspace::shell::LineBuilder;
-use dry_userspace::virtio_gpu::{VirtioGpu2d, GPU_SCANOUT_VA0};
+use dry_userspace::virtio_gpu::{VirtioGpu2d, GPU_SCANOUT_VA0, MAX_GPU_SCANOUT_2M};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_revoke, sys_exit,
     sys_ipc_recv_ext, sys_ipc_reply_inline, sys_vspace_map, sys_write_debug, UserIpcRecvExt,
@@ -66,9 +66,12 @@ unsafe fn blit_ro_backbuf_to_scanout(
     cur_scale: usize,
     blanked: bool,
     high_contrast: bool,
+    light_mode: bool,
 ) {
     let (cur_outline, cur_fill, cur_accent) = if high_contrast {
         (0x0000_0000u32, 0x00FF_EA00u32, 0x0000_FFEEu32)
+    } else if light_mode {
+        (0x000F_172Au32, 0x00FF_FFFFu32, 0x0002_84C7u32)
     } else {
         (0x0006_090Fu32, 0x00F8_FAFCu32, 0x0022_D3EEu32)
     };
@@ -121,7 +124,9 @@ fn emit_gpu_init_log(gpu: &VirtioGpu2d) {
     lb.push_u64(gpu.width as u64);
     lb.push_byte(b'x');
     lb.push_u64(gpu.height as u64);
-    lb.push_bytes(b" fmt=B8G8R8X8 dma_2m=2 msix_vec=");
+    lb.push_bytes(b" fmt=B8G8R8X8 dma_2m=");
+    lb.push_u64(gpu.num_scanout_2m as u64);
+    lb.push_bytes(b" msix_vec=");
     lb.push_u64(gpu.msix_vec as u64);
     lb.push_bytes(b" msi_irqs=");
     lb.push_u64(gpu.msi_irqs);
@@ -146,7 +151,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
         None
     };
 
-    let mut attached_caps = [0u64; 2];
+    let mut attached_caps = [0u64; MAX_GPU_SCANOUT_2M];
     let mut presents = 0u64;
 
     loop {
@@ -229,7 +234,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                     continue;
                 }
                 let idx = mrs[0] as usize;
-                if idx >= 2 || ext.transferred_cap == 0 {
+                if idx >= MAX_GPU_SCANOUT_2M || ext.transferred_cap == 0 {
                     if ext.transferred_cap != 0 {
                         let _ = sys_cap_revoke(ext.transferred_cap, 1);
                     }
@@ -268,7 +273,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 };
                 let w = g.width as usize;
                 let h = g.height as usize;
-                let need_pages = (w * h * 4).div_ceil(TWO_MIB as usize).min(2);
+                let need_pages = (w * h * 4).div_ceil(TWO_MIB as usize).clamp(1, MAX_GPU_SCANOUT_2M);
                 if attached_caps.iter().take(need_pages).any(|&c| c == 0) {
                     reply_err(gpu_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
                     continue;
@@ -284,9 +289,10 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 let cur_scale = if ((mrs[2] >> 33) & 1) != 0 { 2 } else { 1 };
                 let blanked = (mrs[3] & 1) != 0;
                 let high_contrast = (mrs[3] & 2) != 0;
+                let light_mode = (mrs[3] & 4) != 0;
 
                 if h0 > 0 {
-                    // SAFETY: Both RO backbuf pages (`0x2600_0000..`) are verified mapped above.
+                    // SAFETY: `[0..need_pages)` RO backbuf pages (`0x2600_0000..`) are verified mapped above.
                     unsafe {
                         blit_ro_backbuf_to_scanout(
                             w,
@@ -299,6 +305,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                             cur_scale,
                             blanked,
                             high_contrast,
+                            light_mode,
                         );
                     }
                     if g.transfer_and_flush_rows(y0 as u32, h0 as u32).is_err() {

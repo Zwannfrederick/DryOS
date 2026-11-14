@@ -551,7 +551,7 @@ impl ExplorerState {
         write_row(
             surf,
             0,
-            b"DRY FILES // CAPABILITY VFS EXPLORER [CPL=3 0x0104]",
+            b"DRY FILES // GLASS CAPABILITY VFS EXPLORER [0x0104]",
             STYLE_HEADER,
         );
         write_row(surf, 1, &div, STYLE_MUTED);

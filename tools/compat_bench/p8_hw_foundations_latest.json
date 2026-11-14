@@ -1,18 +1,18 @@
 {
   "milestone": "2C-2-hw-foundations",
-  "tsc_mhz": 3113,
+  "tsc_mhz": 3114,
   "bar64_above4g": true,
-  "wc_64k_cyc": 27060,
-  "uc_64k_cyc": 9223,
+  "wc_64k_cyc": 25629,
+  "uc_64k_cyc": 11297,
   "msi_vec": "0x40",
   "msi_irqs": 32,
-  "msi_bound_p50_cyc": 73022,
-  "msi_bound_p50_us": 23.46,
-  "dma_rt_cyc": 620508871,
+  "msi_bound_p50_cyc": 76037,
+  "msi_bound_p50_us": 24.42,
+  "dma_rt_cyc": 621818287,
   "vtd_rogue_faults": 1,
   "kernel_pci_quiesces": 3,
   "kernel_msi_irqs": 33,
   "kernel_msi_acks": 33,
   "leaked_frames": 0,
-  "wall_time_sec": 2.213
+  "wall_time_sec": 3.812
 }

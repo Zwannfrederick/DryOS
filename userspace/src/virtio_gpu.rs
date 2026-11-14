@@ -12,11 +12,11 @@ use crate::{
     VSPACE_MAP_OP_UNMAP_4K,
 };
 
-const GPU_BAR_VADDR: u64 = 0x2540_0000;
-const GPU_VQ_VADDR: u64 = 0x2541_0000;
-const GPU_CMD_VADDR: u64 = 0x2541_1000;
+const GPU_BAR_VADDR: u64 = 0x2480_0000;
+const GPU_VQ_VADDR: u64 = 0x2481_0000;
+const GPU_CMD_VADDR: u64 = 0x2481_1000;
 pub const GPU_SCANOUT_VA0: u64 = 0x2500_0000;
-pub const GPU_SCANOUT_VA1: u64 = 0x2520_0000;
+pub const MAX_GPU_SCANOUT_2M: usize = 5;
 const TWO_MIB: usize = 2 * 1024 * 1024;
 
 const VQ_MAX_SIZE: u16 = 16;
@@ -175,8 +175,9 @@ pub struct VirtioGpu2d {
     cmd_pa: u64,
     vq_cap: u64,
     cmd_cap: u64,
-    scanout_caps: [u64; 2],
-    scanout_pas: [u64; 2],
+    scanout_caps: [u64; MAX_GPU_SCANOUT_2M],
+    scanout_pas: [u64; MAX_GPU_SCANOUT_2M],
+    pub num_scanout_2m: usize,
     queue_size: u16,
     avail_idx: u16,
     last_used_idx: u16,
@@ -229,15 +230,11 @@ impl VirtioGpu2d {
 
         let (vq_cap, vq_pa) = sys_dma_alloc(pci_cap, GPU_VQ_VADDR).map_err(|_| 192)?;
         let (cmd_cap, cmd_pa) = sys_dma_alloc(pci_cap, GPU_CMD_VADDR).map_err(|_| 192)?;
-        let (s_cap0, s_pa0) = sys_dma_alloc_2m(pci_cap, GPU_SCANOUT_VA0).map_err(|_| 193)?;
-        let (s_cap1, s_pa1) = sys_dma_alloc_2m(pci_cap, GPU_SCANOUT_VA1).map_err(|_| 193)?;
 
         // SAFETY: DMA pages are freshly mapped `USER_RW` exclusively inside `dry-gpu`.
         unsafe {
             write_bytes(GPU_VQ_VADDR as *mut u8, 0, 4096);
             write_bytes(GPU_CMD_VADDR as *mut u8, 0, 4096);
-            write_bytes(GPU_SCANOUT_VA0 as *mut u8, 0, TWO_MIB);
-            write_bytes(GPU_SCANOUT_VA1 as *mut u8, 0, TWO_MIB);
 
             let common = GPU_BAR_VADDR + info.common_off as u64;
             mmio_w8(common + 0x14, 0);
@@ -331,8 +328,9 @@ impl VirtioGpu2d {
                 cmd_pa,
                 vq_cap,
                 cmd_cap,
-                scanout_caps: [s_cap0, s_cap1],
-                scanout_pas: [s_pa0, s_pa1],
+                scanout_caps: [0; MAX_GPU_SCANOUT_2M],
+                scanout_pas: [0; MAX_GPU_SCANOUT_2M],
+                num_scanout_2m: 0,
                 queue_size: qsz,
                 avail_idx: 0,
                 last_used_idx: 0,
@@ -461,14 +459,27 @@ impl VirtioGpu2d {
                 if disp.pmodes[0].enabled != 0
                     && disp.pmodes[0].r.width >= 320
                     && disp.pmodes[0].r.height >= 240
-                    && (disp.pmodes[0].r.width as usize) * (disp.pmodes[0].r.height as usize) * 4 <= TWO_MIB * 2
+                    && (disp.pmodes[0].r.width as usize) * (disp.pmodes[0].r.height as usize) * 4
+                        <= TWO_MIB * MAX_GPU_SCANOUT_2M
                 {
                     self.width = disp.pmodes[0].r.width;
                     self.height = disp.pmodes[0].r.height;
                 }
             }
 
-            // 2. Create 2D resource in `B8G8R8X8_UNORM` (`id = 1`).
+            // 2. Allocate `1..=MAX_GPU_SCANOUT_2M` pinned 2 MiB `DEVICE_DMA` scanout pages for live resolution.
+            let total_bytes = (self.width as usize) * (self.height as usize) * 4;
+            let need_2m = total_bytes.div_ceil(TWO_MIB).clamp(1, MAX_GPU_SCANOUT_2M);
+            for i in 0..need_2m {
+                let va = GPU_SCANOUT_VA0 + (i as u64) * (TWO_MIB as u64);
+                let (s_cap, s_pa) = sys_dma_alloc_2m(self.pci_cap, va).map_err(|_| 193)?;
+                self.scanout_caps[i] = s_cap;
+                self.scanout_pas[i] = s_pa;
+                self.num_scanout_2m = i + 1;
+                write_bytes(va as *mut u8, 0, TWO_MIB);
+            }
+
+            // 3. Create 2D resource in `B8G8R8X8_UNORM` (`id = 1`).
             self.cmd_simple(
                 &VirtioGpuResourceCreate2d {
                     hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D),
@@ -480,12 +491,8 @@ impl VirtioGpu2d {
                 VIRTIO_GPU_RESP_OK_NODATA,
             )?;
 
-            // 3. Attach pinned 2 MiB `DEVICE_DMA` backing scatterlist entries (`pa0`, `pa1`).
-            let total_bytes = (self.width as usize) * (self.height as usize) * 4;
-            let len0 = total_bytes.min(TWO_MIB) as u32;
-            let len1 = total_bytes.saturating_sub(TWO_MIB) as u32;
-            let nr_entries = if len1 > 0 { 2u32 } else { 1u32 };
-
+            // 4. Attach pinned 2 MiB `DEVICE_DMA` backing scatterlist entries (`pa0..paN`).
+            let nr_entries = need_2m as u32;
             let attach = VirtioGpuResourceAttachBacking {
                 hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
                 resource_id: GPU_RES_ID_PRIMARY,
@@ -494,20 +501,15 @@ impl VirtioGpu2d {
             let hdr_sz = size_of::<VirtioGpuResourceAttachBacking>();
             let ent_sz = size_of::<VirtioGpuMemEntry>();
             write_volatile(GPU_CMD_VADDR as *mut VirtioGpuResourceAttachBacking, attach);
-            write_volatile(
-                (GPU_CMD_VADDR + hdr_sz as u64) as *mut VirtioGpuMemEntry,
-                VirtioGpuMemEntry {
-                    addr: self.scanout_pas[0],
-                    length: len0,
-                    padding: 0,
-                },
-            );
-            if nr_entries == 2 {
+            let mut rem = total_bytes;
+            for i in 0..need_2m {
+                let seg_len = rem.min(TWO_MIB) as u32;
+                rem = rem.saturating_sub(TWO_MIB);
                 write_volatile(
-                    (GPU_CMD_VADDR + (hdr_sz + ent_sz) as u64) as *mut VirtioGpuMemEntry,
+                    (GPU_CMD_VADDR + (hdr_sz + i * ent_sz) as u64) as *mut VirtioGpuMemEntry,
                     VirtioGpuMemEntry {
-                        addr: self.scanout_pas[1],
-                        length: len1,
+                        addr: self.scanout_pas[i],
+                        length: seg_len,
                         padding: 0,
                     },
                 );
@@ -604,11 +606,17 @@ impl VirtioGpu2d {
         }
         let _ = sys_vspace_map(self.vq_cap, GPU_VQ_VADDR, VSPACE_MAP_OP_UNMAP_4K);
         let _ = sys_vspace_map(self.cmd_cap, GPU_CMD_VADDR, VSPACE_MAP_OP_UNMAP_4K);
-        let _ = sys_vspace_map(self.scanout_caps[0], GPU_SCANOUT_VA0, VSPACE_MAP_OP_UNMAP_2M);
-        let _ = sys_vspace_map(self.scanout_caps[1], GPU_SCANOUT_VA1, VSPACE_MAP_OP_UNMAP_2M);
         let _ = sys_cap_revoke(self.vq_cap, 1);
         let _ = sys_cap_revoke(self.cmd_cap, 1);
-        let _ = sys_cap_revoke(self.scanout_caps[0], 1);
-        let _ = sys_cap_revoke(self.scanout_caps[1], 1);
+        for i in 0..self.num_scanout_2m {
+            let cap = self.scanout_caps[i];
+            if cap != 0 {
+                let va = GPU_SCANOUT_VA0 + (i as u64) * (TWO_MIB as u64);
+                let _ = sys_vspace_map(cap, va, VSPACE_MAP_OP_UNMAP_2M);
+                let _ = sys_cap_revoke(cap, 1);
+                self.scanout_caps[i] = 0;
+            }
+        }
+        self.num_scanout_2m = 0;
     }
 }

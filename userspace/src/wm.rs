@@ -10,11 +10,12 @@
 
 use crate::action::{ActionQueue, AppId, DesktopAction, APP_COUNT};
 use crate::gfx::{DirtyRegion, Rect, CURSOR_H, CURSOR_W};
+use crate::glass::{DOCK_CLEARANCE, GlassState};
 use crate::input::{InputEvent, InputEventKind, MOD_ALT, MOUSE_BTN_LEFT};
-use crate::keymap::{
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
+use crate::keymap::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP};
+use crate::surface::{
+    PIXEL_SURF_MAX_H, PIXEL_SURF_MAX_PIXELS, PIXEL_SURF_MAX_W, TERM_COLS, TERM_ROWS,
 };
-use crate::surface::{TERM_COLS, TERM_ROWS};
 use crate::vault_crypto::scrub_bytes;
 
 pub use crate::wm_types::*;
@@ -34,6 +35,8 @@ pub struct WindowManager {
     pub last_input_tsc: u64,
     pub high_contrast: bool,
     pub cursor_large: bool,
+    pub light_mode: bool,
+    pub low_overhead_glass: bool,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub cursor_visible: bool,
@@ -63,6 +66,7 @@ pub struct WindowManager {
     pub gpu_presents: u64,
     pub gpu_fallbacks: u64,
     pub back_caps: [u64; 8],
+    pub glass: GlassState,
 }
 
 impl WindowManager {
@@ -82,6 +86,8 @@ impl WindowManager {
             last_input_tsc: 0,
             high_contrast: false,
             cursor_large: false,
+            light_mode: false,
+            low_overhead_glass: false,
             cursor_x: 640,
             cursor_y: 400,
             cursor_visible: false,
@@ -110,6 +116,7 @@ impl WindowManager {
             gpu_presents: 0,
             gpu_fallbacks: 0,
             back_caps: [0; 8],
+            glass: GlassState::new(),
         }
     }
 
@@ -145,7 +152,11 @@ impl WindowManager {
 
     #[inline]
     pub const fn topbar_launcher_pill_rect(&self, idx: usize) -> Rect {
-        Rect::new(116 + idx * 78, 4, 72, 20)
+        if self.screen_w < 1200 {
+            Rect::new(90 + idx * 60, 4, 56, 20)
+        } else {
+            Rect::new(116 + idx * 78, 4, 72, 20)
+        }
     }
 
     #[inline]
@@ -279,39 +290,31 @@ impl WindowManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn register_window(
+    fn insert_slot(
         &mut self,
         owner_badge: u64,
+        win_w: usize,
+        win_h: usize,
         cols: u16,
         rows: u16,
+        is_pixel: bool,
+        pixel_w: u16,
+        pixel_h: u16,
         req_x: usize,
         req_y: usize,
         role: WindowRole,
         title_kind: u8,
         surf_cap: u64,
         surf_vaddr: u64,
+        snap_cap: u64,
+        snap_vaddr: u64,
         focus_on_open: bool,
         dirty: &mut DirtyRegion,
     ) -> Result<usize, WmError> {
-        if cols == 0
-            || rows == 0
-            || (cols as usize) > TERM_COLS
-            || (rows as usize) > TERM_ROWS
-        {
-            self.invalid_req_rejects = self.invalid_req_rejects.wrapping_add(1);
-            return Err(WmError::InvalidGeometry);
-        }
-
-        // Replace existing slot if same owner re-attaches without explicit `window_id` (P1 compat),
-        // else claim first free slot.
-        let slot_idx = if let Some(free) = (0..MAX_WINDOWS).find(|&i| !self.windows[i].allocated) {
-            free
-        } else {
+        let Some(slot_idx) = (0..MAX_WINDOWS).find(|&i| !self.windows[i].allocated) else {
             self.invalid_req_rejects = self.invalid_req_rejects.wrapping_add(1);
             return Err(WmError::NoFreeSlots);
         };
-
-        let (win_w, win_h) = compute_window_size(cols, rows);
         let (default_x, default_y) = if req_x == 0 && req_y == 0 {
             let cx = self.screen_w.saturating_sub(win_w + SHADOW_OFF) / 2;
             let cy = TOPBAR_H + self.screen_h.saturating_sub(TOPBAR_H + win_h + SHADOW_OFF) / 2;
@@ -339,6 +342,11 @@ impl WindowManager {
         slot.saved_floating_rect = rect;
         slot.surf_cap = surf_cap;
         slot.surf_vaddr = surf_vaddr;
+        slot.is_pixel = is_pixel;
+        slot.pixel_w = pixel_w;
+        slot.pixel_h = pixel_h;
+        slot.snap_cap = snap_cap;
+        slot.snap_vaddr = snap_vaddr;
 
         if focus_on_open || self.z_len == 0 {
             self.z_stack[self.z_len] = slot_idx;
@@ -364,6 +372,103 @@ impl WindowManager {
             self.ensure_dialogs_above_normal(dirty);
         }
         Ok(slot_idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_window(
+        &mut self,
+        owner_badge: u64,
+        cols: u16,
+        rows: u16,
+        req_x: usize,
+        req_y: usize,
+        role: WindowRole,
+        title_kind: u8,
+        surf_cap: u64,
+        surf_vaddr: u64,
+        focus_on_open: bool,
+        dirty: &mut DirtyRegion,
+    ) -> Result<usize, WmError> {
+        if cols == 0
+            || rows == 0
+            || (cols as usize) > TERM_COLS
+            || (rows as usize) > TERM_ROWS
+        {
+            self.invalid_req_rejects = self.invalid_req_rejects.wrapping_add(1);
+            return Err(WmError::InvalidGeometry);
+        }
+        let (win_w, win_h) = compute_window_size(cols, rows);
+        self.insert_slot(
+            owner_badge,
+            win_w,
+            win_h,
+            cols,
+            rows,
+            false,
+            0,
+            0,
+            req_x,
+            req_y,
+            role,
+            title_kind,
+            surf_cap,
+            surf_vaddr,
+            0,
+            0,
+            focus_on_open,
+            dirty,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_pixel_window(
+        &mut self,
+        owner_badge: u64,
+        pixel_w: u16,
+        pixel_h: u16,
+        req_x: usize,
+        req_y: usize,
+        role: WindowRole,
+        title_kind: u8,
+        surf_cap: u64,
+        surf_vaddr: u64,
+        snap_cap: u64,
+        snap_vaddr: u64,
+        focus_on_open: bool,
+        dirty: &mut DirtyRegion,
+    ) -> Result<usize, WmError> {
+        let pw = pixel_w as usize;
+        let ph = pixel_h as usize;
+        if pw < 160
+            || ph < 120
+            || pw > PIXEL_SURF_MAX_W
+            || ph > PIXEL_SURF_MAX_H
+            || pw * ph > PIXEL_SURF_MAX_PIXELS
+        {
+            self.invalid_req_rejects = self.invalid_req_rejects.wrapping_add(1);
+            return Err(WmError::InvalidGeometry);
+        }
+        let (win_w, win_h) = compute_pixel_window_size(pixel_w, pixel_h);
+        self.insert_slot(
+            owner_badge,
+            win_w,
+            win_h,
+            (pw / 8).clamp(1, TERM_COLS) as u16,
+            (ph / 16).clamp(1, TERM_ROWS) as u16,
+            true,
+            pixel_w,
+            pixel_h,
+            req_x,
+            req_y,
+            role,
+            title_kind,
+            surf_cap,
+            surf_vaddr,
+            snap_cap,
+            snap_vaddr,
+            focus_on_open,
+            dirty,
+        )
     }
 
     /// Focus `slot_idx` and raise it to the top of its role band (`Normal` below `DialogTransient`),
@@ -411,13 +516,13 @@ impl WindowManager {
         !was_top
     }
 
-    /// Remove `slot_idx` from Z-order, return its `(surf_cap, surf_vaddr, notif_cap, waiter_tok)`
-    /// for immediate kernel unmap/revoke, and focus the new topmost window if any remain.
+    /// Remove `slot_idx` from Z-order, return its mapped caps/addresses for immediate kernel
+    /// unmap/revoke, and focus the new topmost window if any remain.
     pub fn remove_window_slot(
         &mut self,
         slot_idx: usize,
         dirty: &mut DirtyRegion,
-    ) -> Option<(u64, u64, u64, u64)> {
+    ) -> Option<RemovedWindowSlot> {
         if slot_idx >= MAX_WINDOWS || !self.windows[slot_idx].allocated {
             return None;
         }
@@ -425,12 +530,15 @@ impl WindowManager {
             self.dragging_slot = None;
         }
         let old_outer = self.windows[slot_idx].outer_rect();
-        let res = (
-            self.windows[slot_idx].surf_cap,
-            self.windows[slot_idx].surf_vaddr,
-            self.windows[slot_idx].notif_cap,
-            self.windows[slot_idx].waiter_reply_tok,
-        );
+        let res = RemovedWindowSlot {
+            surf_cap: self.windows[slot_idx].surf_cap,
+            surf_vaddr: self.windows[slot_idx].surf_vaddr,
+            is_pixel: self.windows[slot_idx].is_pixel,
+            snap_cap: self.windows[slot_idx].snap_cap,
+            snap_vaddr: self.windows[slot_idx].snap_vaddr,
+            notif_cap: self.windows[slot_idx].notif_cap,
+            waiter_tok: self.windows[slot_idx].waiter_reply_tok,
+        };
         self.windows[slot_idx] = WindowSlot::empty();
 
         if let Some(pos) = (0..self.z_len).find(|&p| self.z_stack[p] == slot_idx) {
@@ -518,7 +626,7 @@ impl WindowManager {
     }
 
     #[inline]
-    fn queue_desktop_action(&mut self, act: DesktopAction) -> WmInputAction {
+    pub fn enqueue_desktop_action(&mut self, act: DesktopAction) -> WmInputAction {
         if self.action_queue.push(act) {
             WmInputAction::DesktopActionQueued(act)
         } else {
@@ -554,105 +662,7 @@ impl WindowManager {
         }
 
         if self.session_state == SessionVisualState::SessionLocked {
-            match ev.kind {
-                InputEventKind::MouseMove => {
-                    let old_c = self.cursor_rect();
-                    self.cursor_visible = true;
-                    self.desktop_mode = true;
-                    let max_x = (self.screen_w.saturating_sub(1)) as isize;
-                    let max_y = (self.screen_h.saturating_sub(1)) as isize;
-                    let raw_x = (self.cursor_x as isize) + (ev.dx as isize);
-                    let raw_y = (self.cursor_y as isize) + (ev.dy as isize);
-                    self.cursor_x = raw_x.clamp(0, max_x) as usize;
-                    self.cursor_y = raw_y.clamp(0, max_y) as usize;
-                    cursor_dirty.mark(old_c);
-                    cursor_dirty.mark(self.cursor_rect());
-                    return WmInputAction::CursorMoved;
-                }
-                InputEventKind::MouseButtonDown => {
-                    if !self.cursor_visible {
-                        self.cursor_visible = true;
-                        cursor_dirty.mark(self.cursor_rect());
-                    }
-                    self.buttons_down = ev.buttons;
-                    if (ev.scancode as u8) == MOUSE_BTN_LEFT
-                        && self.unlock_button_rect().contains(self.cursor_x, self.cursor_y)
-                    {
-                        if self.vault_auth_required {
-                            if self.lock_pin_len > 0 {
-                                scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                                return self.queue_desktop_action(DesktopAction::SubmitVaultUnlock(
-                                    self.lock_pin_len,
-                                ));
-                            }
-                            self.locked_blocked_events =
-                                self.locked_blocked_events.wrapping_add(1);
-                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                            return WmInputAction::LockBlocked;
-                        }
-                        self.session_state = SessionVisualState::Active;
-                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                        return self.queue_desktop_action(DesktopAction::UnlockSession);
-                    }
-                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
-                    scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                    return WmInputAction::LockBlocked;
-                }
-                InputEventKind::KeyPress => {
-                    if self.vault_auth_required {
-                        if ev.keycode == KEY_ENTER {
-                            if self.lock_pin_len > 0 {
-                                scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                                return self.queue_desktop_action(DesktopAction::SubmitVaultUnlock(
-                                    self.lock_pin_len,
-                                ));
-                            }
-                            self.locked_blocked_events =
-                                self.locked_blocked_events.wrapping_add(1);
-                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                            return WmInputAction::LockBlocked;
-                        }
-                        if ev.keycode == KEY_BACKSPACE {
-                            if self.lock_pin_len > 0 {
-                                self.lock_pin_len -= 1;
-                                self.lock_pin_buf[self.lock_pin_len as usize] = 0;
-                            }
-                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                            return WmInputAction::LockPinEdited;
-                        }
-                        if ev.keycode == KEY_ESC {
-                            self.clear_lock_pin();
-                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                            return WmInputAction::LockPinEdited;
-                        }
-                        if (0x21..=0x7e).contains(&ev.ascii) && (ev.modifiers & MOD_ALT) == 0 {
-                            if (self.lock_pin_len as usize) < self.lock_pin_buf.len() {
-                                self.lock_pin_buf[self.lock_pin_len as usize] = ev.ascii;
-                                self.lock_pin_len += 1;
-                            }
-                            scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                            return WmInputAction::LockPinEdited;
-                        }
-                        self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
-                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                        return WmInputAction::LockBlocked;
-                    }
-                    if ev.keycode == KEY_ENTER {
-                        self.session_state = SessionVisualState::Active;
-                        scene_dirty.mark(Rect::new(0, 0, self.screen_w, self.screen_h));
-                        return self.queue_desktop_action(DesktopAction::UnlockSession);
-                    }
-                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
-                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
-                    return WmInputAction::LockBlocked;
-                }
-                InputEventKind::MouseScroll => {
-                    self.locked_blocked_events = self.locked_blocked_events.wrapping_add(1);
-                    scene_dirty.mark(Rect::new(0, self.screen_h / 2, self.screen_w, 96));
-                    return WmInputAction::LockBlocked;
-                }
-                _ => return WmInputAction::None,
-            }
+            return crate::glass::overlays::handle_locked_input(self, ev, scene_dirty, cursor_dirty);
         }
 
         match ev.kind {
@@ -676,6 +686,34 @@ impl WindowManager {
 
                 if let Some(d_slot) = self.dragging_slot {
                     if self.windows[d_slot].allocated {
+                        if self.p3_mode && self.layout == LayoutMode::Floating {
+                            let new_sp = if self.cursor_x <= 12 {
+                                Some(Rect::new(
+                                    10,
+                                    TOPBAR_H + 10,
+                                    (self.screen_w / 2).saturating_sub(16),
+                                    self.screen_h.saturating_sub(TOPBAR_H + DOCK_CLEARANCE + 18),
+                                ))
+                            } else if self.cursor_x + 12 >= self.screen_w {
+                                Some(Rect::new(
+                                    (self.screen_w / 2) + 6,
+                                    TOPBAR_H + 10,
+                                    (self.screen_w / 2).saturating_sub(16),
+                                    self.screen_h.saturating_sub(TOPBAR_H + DOCK_CLEARANCE + 18),
+                                ))
+                            } else {
+                                None
+                            };
+                            if new_sp != self.glass.snap_preview {
+                                if let Some(old_r) = self.glass.snap_preview {
+                                    scene_dirty.mark(old_r);
+                                }
+                                if let Some(nr) = new_sp {
+                                    scene_dirty.mark(nr);
+                                }
+                                self.glass.snap_preview = new_sp;
+                            }
+                        }
                         let old_outer = self.windows[d_slot].outer_rect();
                         let rw = self.windows[d_slot].rect.w;
                         let rh = self.windows[d_slot].rect.h;
@@ -704,6 +742,9 @@ impl WindowManager {
                 if (ev.scancode as u8) != MOUSE_BTN_LEFT {
                     return WmInputAction::None;
                 }
+                if let Some(act) = crate::glass::overlays::handle_overlay_click(self, scene_dirty) {
+                    return act;
+                }
                 if self.cursor_y < TOPBAR_H {
                     if self.p3_mode {
                         for idx in 0..APP_COUNT {
@@ -712,7 +753,7 @@ impl WindowManager {
                                 .contains(self.cursor_x, self.cursor_y)
                             {
                                 return self
-                                    .queue_desktop_action(DesktopAction::LaunchOrFocusApp(AppId::ALL[idx]));
+                                    .enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(AppId::ALL[idx]));
                             }
                         }
                     }
@@ -751,6 +792,14 @@ impl WindowManager {
                             return WmInputAction::FocusChanged(win_id);
                         }
                         HitPart::ClientBody => {
+                            if self.windows[slot_idx].is_pixel {
+                                let (gx, gy) = self.windows[slot_idx].grid_origin();
+                                let mut cev = ev;
+                                cev.dx = self.cursor_x.saturating_sub(gx) as i16;
+                                cev.dy = self.cursor_y.saturating_sub(gy) as i16;
+                                let _ = self.windows[slot_idx].ev_queue.push(cev);
+                                return WmInputAction::PointerRouted(win_id);
+                            }
                             if focus_changed {
                                 return WmInputAction::FocusChanged(win_id);
                             }
@@ -763,6 +812,25 @@ impl WindowManager {
                 self.buttons_down = ev.buttons;
                 if (ev.scancode as u8) == MOUSE_BTN_LEFT {
                     if let Some(d_slot) = self.dragging_slot.take() {
+                        if let Some(sr) = self.glass.snap_preview.take() {
+                            scene_dirty.mark(sr);
+                            if self.windows[d_slot].allocated {
+                                let old_o = self.windows[d_slot].outer_rect();
+                                let rw = self.windows[d_slot].rect.w;
+                                let rh = self.windows[d_slot].rect.h;
+                                let tx = if sr.x > self.screen_w / 3 {
+                                    (sr.x + sr.w).saturating_sub(rw) as isize
+                                } else {
+                                    sr.x as isize
+                                };
+                                let (nx, ny) = self.clamp_window_pos(tx, sr.y as isize, rw, rh);
+                                self.windows[d_slot].rect.x = nx;
+                                self.windows[d_slot].rect.y = ny;
+                                self.windows[d_slot].saved_floating_rect = self.windows[d_slot].rect;
+                                scene_dirty.mark(old_o);
+                                scene_dirty.mark(self.windows[d_slot].outer_rect());
+                            }
+                        }
                         if self.windows[d_slot].allocated {
                             return WmInputAction::DragEnded(
                                 self.windows[d_slot].id,
@@ -789,18 +857,26 @@ impl WindowManager {
                 if (ev.modifiers & MOD_ALT) != 0 {
                     if self.p3_mode {
                         let scan7 = (ev.scancode & 0x7f) as u8;
+                        if ev.ascii == b' ' || scan7 == 0x39 {
+                            crate::glass::overlays::toggle_launcher(self, scene_dirty);
+                            return WmInputAction::None;
+                        }
                         let maybe_app = match (ev.ascii, scan7) {
                             (b'1', _) | (_, 0x02) => Some(AppId::Terminal),
                             (b'2', _) | (_, 0x03) => Some(AppId::LifeStation),
                             (b'3', _) | (_, 0x04) => Some(AppId::Files),
                             (b'4', _) | (_, 0x05) => Some(AppId::Settings),
+                            (b'5', _) | (_, 0x06) => Some(AppId::Editor),
+                            (b'6', _) | (_, 0x07) => Some(AppId::Calculator),
                             _ => None,
                         };
                         if let Some(app) = maybe_app {
-                            return self.queue_desktop_action(DesktopAction::LaunchOrFocusApp(app));
+                            crate::glass::overlays::close_all_overlays(self, scene_dirty);
+                            return self.enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(app));
                         }
                         if ev.ascii == b'l' || ev.ascii == b'L' || scan7 == 0x26 {
-                            return self.queue_desktop_action(DesktopAction::LockSession);
+                            crate::glass::overlays::close_all_overlays(self, scene_dirty);
+                            return self.enqueue_desktop_action(DesktopAction::LockSession);
                         }
                     }
                     if ev.keycode == KEY_TAB {
@@ -832,6 +908,10 @@ impl WindowManager {
                         }
                     }
                     return WmInputAction::None;
+                }
+
+                if let Some(act) = crate::glass::overlays::handle_overlay_key(self, ev, scene_dirty) {
+                    return act;
                 }
 
                 if let Some(f_slot) = self.focused_slot() {

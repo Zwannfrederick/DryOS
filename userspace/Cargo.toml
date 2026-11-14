@@ -84,6 +84,14 @@ path = "src/bin/dry_gpu.rs"
 name = "dry-hw-test"
 path = "src/bin/dry_hw_test.rs"
 
+[[bin]]
+name = "dry-editor"
+path = "src/bin/dry_editor.rs"
+
+[[bin]]
+name = "dry-calc"
+path = "src/bin/dry_calc.rs"
+
 [profile.dev]
 panic = "abort"
 

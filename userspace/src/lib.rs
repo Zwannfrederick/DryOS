@@ -8,6 +8,7 @@ pub mod action;
 pub mod compositor;
 pub mod display_banner;
 pub mod gfx;
+pub mod glass;
 pub mod gpu_audit;
 pub mod gpu_proto;
 pub mod init_legacy;
@@ -149,6 +150,8 @@ pub const BADGE_WIN_SHELL: u64 = 0x0102_0001;
 pub const BADGE_WIN_SYSMON: u64 = 0x0103_0002;
 pub const BADGE_WIN_FILES: u64 = 0x0104_0003;
 pub const BADGE_WIN_SETTINGS: u64 = 0x0105_0004;
+pub const BADGE_WIN_EDITOR: u64 = 0x0106_0005;
+pub const BADGE_WIN_CALC: u64 = 0x0107_0006;
 pub const BADGE_WIN_ROGUE_PROBE: u64 = 0x0109_0099;
 
 pub const BADGE_SUP_SHELL: u64 = 0x5501;
@@ -156,6 +159,8 @@ pub const BADGE_SUP_SYSMON: u64 = 0x5502;
 pub const BADGE_SUP_FILES: u64 = 0x5503;
 pub const BADGE_SUP_SETTINGS: u64 = 0x5504;
 pub const BADGE_SUP_DISPLAY: u64 = 0x5505;
+pub const BADGE_SUP_EDITOR: u64 = 0x5506;
+pub const BADGE_SUP_CALC: u64 = 0x5507;
 pub const BADGE_SUP_ROGUE: u64 = 0x5599;
 
 // IPC opcodes shared across `dry-init`, `dry-echo`, `dry-display`, `dry-input`, `dry-shell`, and `dry-sysmon`
@@ -253,6 +258,8 @@ pub struct RootInitBootInfo {
     pub pci_rng_cap: u64,
     pub gpu_mod_cap: u64,
     pub pci_gpu_cap: u64,
+    pub editor_mod_cap: u64,
+    pub calc_mod_cap: u64,
 }
 
 const _: () = assert!(size_of::<RootInitBootInfo>() <= BOOT_MANIFEST_OFFSET as usize);

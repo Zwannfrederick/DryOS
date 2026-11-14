@@ -8,7 +8,10 @@
 use crate::action::{AppId, DesktopAction};
 use crate::init_legacy::{domain_spec, log_line, spawn_and_init_desktop_input};
 use crate::island_audit::{run_island_poc_benchmarks, run_island_poc_lifecycle_audit};
-use crate::gpu_audit::{run_gpu_scanout_audit, teardown_live_gpu, LiveGpuSession};
+use crate::gpu_audit::{
+    run_gpu_scanout_audit, spawn_live_gpu, teardown_live_gpu, trigger_live_gpu_fault_and_recover,
+    LiveGpuSession,
+};
 use crate::lx_island_audit::run_lx_island_audit;
 use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
@@ -141,7 +144,15 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
 
     let mut sec_audit_done =
         !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28);
-    let mut gpu_live: Option<LiveGpuSession> = None;
+    let mut gpu_live: Option<LiveGpuSession> =
+        if boot.pci_gpu_cap != 0
+            && boot.gpu_mod_cap != 0
+            && !matches!(boot.session_mode, 25..=28)
+        {
+            spawn_live_gpu(boot, disp_sup_cap).ok()
+        } else {
+            None
+        };
     let mut restarts = 0u64;
 
     loop {
@@ -151,6 +162,10 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
             if (bits & SUP_BIT_WM_ACTION) != 0 {
                 ctx.drain_wm_actions();
             }
+        }
+        if ctx.gpu_fault_pending {
+            ctx.gpu_fault_pending = false;
+            let _ = trigger_live_gpu_fault_and_recover(boot, &mut gpu_live, disp_sup_cap);
         }
         if ctx.final_power_mode != FinalPowerMode::None {
             break;
@@ -458,12 +473,21 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                 }
             }
             IPC_OP_SUP_QUERY_APPS => {
-                let words = [
-                    ctx.slots[0].pack_query_word(),
-                    ctx.slots[1].pack_query_word(),
-                    ctx.slots[2].pack_query_word(),
-                    ctx.slots[3].pack_query_word(),
-                ];
+                let words = if mrs[0] == 1 {
+                    [
+                        ctx.slots[4].pack_query_word(),
+                        ctx.slots[5].pack_query_word(),
+                        0,
+                        0,
+                    ]
+                } else {
+                    [
+                        ctx.slots[0].pack_query_word(),
+                        ctx.slots[1].pack_query_word(),
+                        ctx.slots[2].pack_query_word(),
+                        ctx.slots[3].pack_query_word(),
+                    ]
+                };
                 if reply_tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         sup_ep,
@@ -501,7 +525,12 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     );
                     let _ = ctx.execute_action(act);
                 } else {
-                    match ctx.execute_action(act) {
+                    let res = if matches!(act, DesktopAction::TriggerGpuFaultTest) {
+                        trigger_live_gpu_fault_and_recover(boot, &mut gpu_live, disp_sup_cap)
+                    } else {
+                        ctx.execute_action(act)
+                    };
+                    match res {
                         Ok(out_mrs) => {
                             if reply_tok != 0 {
                                 let _ = sys_ipc_reply_inline(

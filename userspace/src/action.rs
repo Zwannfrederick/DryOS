@@ -6,14 +6,16 @@
 //! the exact same strongly-typed `DesktopAction` payloads.
 
 use crate::wm::{
-    TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON, TITLE_KIND_TERMINAL,
+    TITLE_KIND_CALC, TITLE_KIND_EDITOR, TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON,
+    TITLE_KIND_TERMINAL,
 };
 use crate::{
-    BADGE_SUP_FILES, BADGE_SUP_SETTINGS, BADGE_SUP_SHELL, BADGE_SUP_SYSMON, BADGE_WIN_FILES,
-    BADGE_WIN_SETTINGS, BADGE_WIN_SHELL, BADGE_WIN_SYSMON,
+    BADGE_SUP_CALC, BADGE_SUP_EDITOR, BADGE_SUP_FILES, BADGE_SUP_SETTINGS, BADGE_SUP_SHELL,
+    BADGE_SUP_SYSMON, BADGE_WIN_CALC, BADGE_WIN_EDITOR, BADGE_WIN_FILES, BADGE_WIN_SETTINGS,
+    BADGE_WIN_SHELL, BADGE_WIN_SYSMON,
 };
 
-pub const APP_COUNT: usize = 4;
+pub const APP_COUNT: usize = 6;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,8 @@ pub enum AppId {
     LifeStation = 1,
     Files = 2,
     Settings = 3,
+    Editor = 4,
+    Calculator = 5,
 }
 
 impl AppId {
@@ -30,6 +34,8 @@ impl AppId {
         Self::LifeStation,
         Self::Files,
         Self::Settings,
+        Self::Editor,
+        Self::Calculator,
     ];
 
     #[inline]
@@ -39,6 +45,8 @@ impl AppId {
             1 => Some(Self::LifeStation),
             2 => Some(Self::Files),
             3 => Some(Self::Settings),
+            4 => Some(Self::Editor),
+            5 => Some(Self::Calculator),
             _ => None,
         }
     }
@@ -49,6 +57,8 @@ impl AppId {
             b"life" | b"lifestation" | b"sysmon" | b"2" => Some(Self::LifeStation),
             b"files" | b"fs" | b"3" => Some(Self::Files),
             b"settings" | b"set" | b"prefs" | b"4" => Some(Self::Settings),
+            b"editor" | b"notes" | b"edit" | b"5" => Some(Self::Editor),
+            b"calc" | b"calculator" | b"6" => Some(Self::Calculator),
             _ => None,
         }
     }
@@ -60,6 +70,8 @@ impl AppId {
             Self::LifeStation => b"lifestation",
             Self::Files => b"files",
             Self::Settings => b"settings",
+            Self::Editor => b"editor",
+            Self::Calculator => b"calc",
         }
     }
 
@@ -70,6 +82,32 @@ impl AppId {
             Self::LifeStation => b"2:Life",
             Self::Files => b"3:Files",
             Self::Settings => b"4:Set",
+            Self::Editor => b"5:Edit",
+            Self::Calculator => b"6:Calc",
+        }
+    }
+
+    #[inline]
+    pub const fn compact_pill_label(self) -> &'static [u8] {
+        match self {
+            Self::Terminal => b"1:Trm",
+            Self::LifeStation => b"2:Lif",
+            Self::Files => b"3:Fls",
+            Self::Settings => b"4:Set",
+            Self::Editor => b"5:Edt",
+            Self::Calculator => b"6:Clc",
+        }
+    }
+
+    #[inline]
+    pub const fn display_title(self) -> &'static [u8] {
+        match self {
+            Self::Terminal => b"Terminal",
+            Self::LifeStation => b"LifeStation",
+            Self::Files => b"Files",
+            Self::Settings => b"Settings",
+            Self::Editor => b"Editor",
+            Self::Calculator => b"Calculator",
         }
     }
 
@@ -80,6 +118,8 @@ impl AppId {
             Self::LifeStation => 0x0103,
             Self::Files => 0x0104,
             Self::Settings => 0x0105,
+            Self::Editor => 0x0106,
+            Self::Calculator => 0x0107,
         }
     }
 
@@ -90,6 +130,8 @@ impl AppId {
             Self::LifeStation => BADGE_WIN_SYSMON,
             Self::Files => BADGE_WIN_FILES,
             Self::Settings => BADGE_WIN_SETTINGS,
+            Self::Editor => BADGE_WIN_EDITOR,
+            Self::Calculator => BADGE_WIN_CALC,
         }
     }
 
@@ -100,6 +142,8 @@ impl AppId {
             Self::LifeStation => BADGE_SUP_SYSMON,
             Self::Files => BADGE_SUP_FILES,
             Self::Settings => BADGE_SUP_SETTINGS,
+            Self::Editor => BADGE_SUP_EDITOR,
+            Self::Calculator => BADGE_SUP_CALC,
         }
     }
 
@@ -110,6 +154,8 @@ impl AppId {
             Self::LifeStation => TITLE_KIND_SYSMON,
             Self::Files => TITLE_KIND_FILES,
             Self::Settings => TITLE_KIND_SETTINGS,
+            Self::Editor => TITLE_KIND_EDITOR,
+            Self::Calculator => TITLE_KIND_CALC,
         }
     }
 }
@@ -136,6 +182,7 @@ pub enum DesktopAction {
     RequestSuspendS3,
     RequestPoweroffHw,
     SubmitVaultUnlock(u8),
+    TriggerGpuFaultTest,
 }
 
 impl DesktopAction {
@@ -162,6 +209,7 @@ impl DesktopAction {
             Self::RequestSuspendS3 => [17, 0],
             Self::RequestPoweroffHw => [18, 0],
             Self::SubmitVaultUnlock(len) => [19, len as u64],
+            Self::TriggerGpuFaultTest => [20, 0],
         }
     }
 
@@ -196,6 +244,7 @@ impl DesktopAction {
             17 => Self::RequestSuspendS3,
             18 => Self::RequestPoweroffHw,
             19 => Self::SubmitVaultUnlock((w1 & 0x3f) as u8),
+            20 => Self::TriggerGpuFaultTest,
             _ => Self::None,
         }
     }
@@ -265,6 +314,8 @@ pub const fn compartment_short_name(comp_id: u16, domain: u8) -> &'static [u8] {
         (_, 0x0103) => b"LifeStation",
         (_, 0x0104) => b"Files",
         (_, 0x0105) => b"Settings",
+        (_, 0x0106) => b"Editor",
+        (_, 0x0107) => b"Calculator",
         (1, _) => b"root-svc",
         _ => b"user-app",
     }

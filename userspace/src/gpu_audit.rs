@@ -18,10 +18,10 @@ use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_ep_create,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_recv_ext, sys_ipc_reply_inline,
     sys_ipc_send_inline, sys_proc_list, sys_proc_wait, sys_sysinfo, RootInitBootInfo,
-    UserIpcRecvExt, UserProcInfo, UserSysInfo, EEXIST, IPC_OP_CRASH_UD2, IPC_OP_ERR_PERM,
-    IPC_OP_EXIT_CLEAN, IPC_OP_PONG, IPC_OP_WM_BIND_SUP_NOTIF, IPC_OP_WM_TOGGLE_TILING, RIGHT_CALL,
-    RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_WRITE,
-    VAULT_OP_STATUS,
+    UserIpcRecvExt, UserProcInfo, UserSysInfo, EEXIST, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, IPC_OP_WM_BIND_SUP_NOTIF,
+    IPC_OP_WM_SET_SESSION_STATE, IPC_OP_WM_TOGGLE_TILING, RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP,
+    RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_WRITE, VAULT_OP_STATUS,
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
@@ -36,6 +36,7 @@ pub struct LiveGpuSession {
     gpu_sup_cap: u64,
     gpu_disp_cap: u64,
     gpu_rogue_cap: u64,
+    pub generation: u64,
 }
 
 struct GpuSpawned {
@@ -92,6 +93,7 @@ fn spawn_gpu_gen(boot: &RootInitBootInfo, fault_ep: u64, generation: u64) -> Res
             gpu_sup_cap,
             gpu_disp_cap,
             gpu_rogue_cap,
+            generation,
         },
         pid,
         width: bmrs[1] & 0xffff_ffff,
@@ -382,4 +384,114 @@ pub fn teardown_live_gpu(live: LiveGpuSession, disp_sup_cap: u64) {
     let fault_ep = live.fault_ep;
     revoke_gpu_generation(live);
     let _ = sys_cap_revoke(fault_ep, 2);
+}
+
+fn nudge_display_active(disp_sup_cap: u64) -> Result<(), u32> {
+    let (tag, _, _) = sys_ipc_call_inline(
+        disp_sup_cap,
+        pack_msg_tag(IPC_OP_WM_SET_SESSION_STATE, 0, 3, 0),
+        [0, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| IPC_OP_ERR_INVAL)?;
+    if msg_tag_label(tag) != IPC_OP_PONG {
+        return Err(IPC_OP_ERR_INVAL);
+    }
+    Ok(())
+}
+
+pub fn spawn_live_gpu(boot: &RootInitBootInfo, disp_sup_cap: u64) -> Result<LiveGpuSession, i32> {
+    if boot.gpu_mod_cap == 0 || boot.pci_gpu_cap == 0 || disp_sup_cap == 0 {
+        return Err(270);
+    }
+    let sup_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let fault_ep = sys_ep_create(sup_spec).map_err(|_| 271)?;
+    let g1 = spawn_gpu_gen(boot, fault_ep, 1).inspect_err(|_| {
+        let _ = sys_cap_revoke(fault_ep, 2);
+    })?;
+    if bind_display_gpu(disp_sup_cap, g1.session.gpu_disp_cap).is_err() {
+        teardown_live_gpu(g1.session, disp_sup_cap);
+        return Err(276);
+    }
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-GPU] LIVE_SESSION_ACTIVE gen=1 w=");
+    lb.push_u64(g1.width);
+    lb.push_bytes(b" h=");
+    lb.push_u64(g1.height);
+    log_line(&lb);
+    Ok(g1.session)
+}
+
+pub fn trigger_live_gpu_fault_and_recover(
+    boot: &RootInitBootInfo,
+    gpu_live: &mut Option<LiveGpuSession>,
+    disp_sup_cap: u64,
+) -> Result<[u64; 4], u32> {
+    let Some(live) = gpu_live.take() else {
+        return Err(IPC_OP_ERR_NOSYS);
+    };
+    let fault_ep = live.fault_ep;
+    let next_gen = live.generation.saturating_add(1);
+    let expect_badge = 0x6600_0000 | (live.generation & 0xffff_ffff);
+
+    if sys_ipc_send_inline(
+        live.gpu_sup_cap,
+        pack_msg_tag(IPC_OP_CRASH_UD2, 0, 1, 0),
+        [0; 4],
+        0,
+    )
+    .is_err()
+    {
+        teardown_live_gpu(live, disp_sup_cap);
+        return Err(IPC_OP_ERR_INVAL);
+    }
+
+    let mut fext = UserIpcRecvExt::default();
+    let Ok((ftag, ftok, fmrs)) = sys_ipc_recv_ext(fault_ep, 0, 0, &mut fext) else {
+        let _ = sys_cap_revoke(fault_ep, 2);
+        return Err(IPC_OP_ERR_INVAL);
+    };
+    let fault_vec = fmrs[0] & 0xff;
+    if ftok != 0 {
+        let _ = sys_ipc_reply_inline(
+            fault_ep,
+            ftok,
+            pack_msg_tag(FAULT_REPLY_KILL, 0, 1, 0),
+            [0; 4],
+        );
+    }
+    let _ = sys_proc_wait(live.proc_handle, 0, 0);
+    revoke_gpu_generation(live);
+    if msg_tag_label(ftag) != FAULT_MSG_LABEL || fext.sender_badge != expect_badge || fault_vec != 6 {
+        let _ = sys_cap_revoke(fault_ep, 2);
+        return Err(IPC_OP_ERR_INVAL);
+    }
+
+    // Force a present while `dry-gpu` is dead so `dry-display` detects `EREVOKED` -> GOP fallback.
+    nudge_display_active(disp_sup_cap)?;
+
+    let Ok(g2) = spawn_gpu_gen(boot, fault_ep, next_gen) else {
+        let _ = sys_cap_revoke(fault_ep, 2);
+        return Err(IPC_OP_ERR_INVAL);
+    };
+    if bind_display_gpu(disp_sup_cap, g2.session.gpu_disp_cap).is_err() {
+        teardown_live_gpu(g2.session, disp_sup_cap);
+        return Err(IPC_OP_ERR_INVAL);
+    }
+    nudge_display_active(disp_sup_cap)?;
+
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-GPU] LIVE_RECOVERY_OK gen=");
+    lb.push_u64(next_gen);
+    lb.push_bytes(b" vec=");
+    lb.push_u64(fault_vec);
+    lb.push_bytes(b" w=");
+    lb.push_u64(g2.width);
+    lb.push_bytes(b" h=");
+    lb.push_u64(g2.height);
+    log_line(&lb);
+
+    let out = [next_gen, fault_vec, g2.width, g2.height];
+    *gpu_live = Some(g2.session);
+    Ok(out)
 }

@@ -219,9 +219,10 @@ impl WindowManager {
                     let gap_y = 10usize;
                     let col_w = self.screen_w.saturating_sub(pad_x * 2 + gap_x + SHADOW_OFF) / 2;
                     let rows_grid = n.div_ceil(2).max(1);
+                    let dock_pad = if self.p3_mode { crate::glass::DOCK_CLEARANCE } else { 0 };
                     let avail_h = self
                         .screen_h
-                        .saturating_sub(TOPBAR_H + pad_y * 2 + SHADOW_OFF);
+                        .saturating_sub(TOPBAR_H + pad_y * 2 + SHADOW_OFF + dock_pad);
                     let cell_h = avail_h.saturating_sub(gap_y * (rows_grid - 1)) / rows_grid;
                     for (k, &idx) in normal_slots.iter().take(n).enumerate() {
                         let col_k = k % 2;

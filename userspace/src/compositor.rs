@@ -1,35 +1,28 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! Ring 3 Multi-Window Scene Rasterizer, Clipped Z-Order Compositor & Software Cursor Blitter
-//! (`Milestone 2A-2`).
+//! (`Milestone 2A-2` & `DRY Glass` `Ascension 3.0`).
 //!
 //! Design Invariants:
 //! 1. **Cursor-Free Scene Backbuffer (`back_ptr`):** `back_ptr` (`WB` RAM) holds only the desktop,
-//!    top bar, and Z-ordered windows. The 12x16 software pointer is overlaid exclusively while
-//!    flushing damaged scanlines into `fb_ptr` (`WC` GOP MMIO), making cursor trails impossible
+//!    top bar, dock, windows, and overlays. The 12x16 software pointer is overlaid exclusively
+//!    while flushing damaged scanlines into `fb_ptr` (`WC` GOP MMIO), making cursor trails impossible
 //!    and avoiding any glyph re-rasterization on cursor motion (`<= 384` px touched per move!).
-//! 2. **Clipped Bottom-to-Top Z-Order Painting:** `repaint_scene_rect` clips every background fill,
-//!    window shadow, border, titlebar, and cell grid strictly to `clip`, then paints `wm.z_stack`
-//!    from bottom to top so background window updates never bleed through overlapping foreground windows.
+//! 2. **Clipped Bottom-to-Top Z-Order Painting:** `repaint_scene_rect` delegates layering to
+//!    `glass::chrome` and `glass::overlays`, strictly clipped to `clip`, painting `wm.z_stack`
+//!    from bottom to top so background updates never bleed through foreground windows.
 
 use core::arch::asm;
 use core::ptr::write_volatile;
 
-use crate::action::{AppId, APP_COUNT};
 use crate::gfx::{
-    glyph_8x16, DirtyRegion, Rect, BOX_HORIZ, CURSOR_H, CURSOR_SPRITE_12X16, CURSOR_W,
-    MAX_DIRTY_RECTS,
+    glyph_8x16, DirtyRegion, Rect, CURSOR_H, CURSOR_SPRITE_12X16, CURSOR_W, MAX_DIRTY_RECTS,
 };
-use crate::shell::LineBuilder;
+use crate::glass::theme::{GlassTokens, ThemeMode};
 use crate::surface::{
     SurfaceCell, STYLE_ACCENT, STYLE_HEADER, STYLE_MUTED, STYLE_OK, STYLE_PROMPT, STYLE_WARN,
     TERM_CELLS,
 };
-use crate::wm::{
-    LayoutMode, SessionVisualState, WindowManager, WindowSlot, MAX_WINDOWS, SHADOW_OFF,
-    TITLE_KIND_DIALOG, TITLE_KIND_FILES, TITLE_KIND_SETTINGS, TITLE_KIND_SYSMON,
-    TITLE_KIND_TERMINAL, TOPBAR_H, WIN_BORDER, WIN_TITLE_H,
-};
-use crate::wm_layout::{TABSTRIP_H, TABSTRIP_Y};
+use crate::wm::{SessionVisualState, WindowManager};
 use crate::{rdtsc_user, UserFbInfo};
 
 #[derive(Clone, Copy)]
@@ -57,10 +50,10 @@ pub struct Palette {
 
 impl Palette {
     pub fn from_fb(info: &UserFbInfo) -> Self {
-        Self::from_fb_prefs(info, false)
+        Self::from_fb_prefs(info, false, false)
     }
 
-    pub fn from_fb_prefs(info: &UserFbInfo, high_contrast: bool) -> Self {
+    pub fn from_fb_prefs(info: &UserFbInfo, high_contrast: bool, light_mode: bool) -> Self {
         if high_contrast {
             return Self {
                 bg_canvas: pack_rgb(info, 0x00, 0x00, 0x00),
@@ -82,6 +75,29 @@ impl Palette {
                 fg_prompt: pack_rgb(info, 0x5C, 0xE1, 0xFF),
                 cur_outline: pack_rgb(info, 0x00, 0x00, 0x00),
                 cur_fill: pack_rgb(info, 0xFF, 0xEA, 0x00),
+            };
+        }
+        if light_mode {
+            return Self {
+                bg_canvas: pack_rgb(info, 0xDC, 0xE9, 0xF7),
+                bg_grid: pack_rgb(info, 0xA4, 0xBC, 0xD6),
+                bg_topbar: pack_rgb(info, 0xF6, 0xFA, 0xFE),
+                bg_pill: pack_rgb(info, 0xE2, 0xEC, 0xF7),
+                bg_shadow: pack_rgb(info, 0x1E, 0x29, 0x3B),
+                bg_win: pack_rgb(info, 0xF4, 0xF8, 0xFD),
+                bg_title_focus: pack_rgb(info, 0xE0, 0xEF, 0xFD),
+                bg_title_idle: pack_rgb(info, 0xEC, 0xF1, 0xF7),
+                bg_close: pack_rgb(info, 0xFE, 0xE2, 0xE2),
+                border_focus: pack_rgb(info, 0x02, 0x84, 0xC7),
+                border_idle: pack_rgb(info, 0x94, 0xA8, 0xC0),
+                fg_primary: pack_rgb(info, 0x0F, 0x17, 0x2A),
+                fg_muted: pack_rgb(info, 0x47, 0x55, 0x69),
+                fg_accent: pack_rgb(info, 0x03, 0x69, 0xA1),
+                fg_ok: pack_rgb(info, 0x04, 0x78, 0x57),
+                fg_warn: pack_rgb(info, 0xB4, 0x53, 0x09),
+                fg_prompt: pack_rgb(info, 0x03, 0x69, 0xA1),
+                cur_outline: pack_rgb(info, 0x0F, 0x17, 0x2A),
+                cur_fill: pack_rgb(info, 0xFF, 0xFF, 0xFF),
             };
         }
         Self {
@@ -166,6 +182,7 @@ pub struct DesktopCompositor {
     pub fb_stride: usize,
     pub fb_info: UserFbInfo,
     pub pal: Palette,
+    pub glass: GlassTokens,
     pub scene_dirty: DirtyRegion,
     pub mmio_dirty: DirtyRegion,
     pub scratch_cells: [SurfaceCell; TERM_CELLS],
@@ -215,6 +232,7 @@ impl DesktopCompositor {
                 cur_outline: 0,
                 cur_fill: 0,
             },
+            glass: GlassTokens::zeroed(),
             scene_dirty: DirtyRegion::new(),
             mmio_dirty: DirtyRegion::new(),
             scratch_cells: [SurfaceCell::BLANK; TERM_CELLS],
@@ -228,18 +246,23 @@ impl DesktopCompositor {
         self.h = info.height as usize;
         self.fb_stride = (info.pitch as usize) / 4;
         self.fb_info = *info;
-        self.pal = Palette::from_fb_prefs(info, false);
+        self.pal = Palette::from_fb_prefs(info, false, false);
+        self.glass = GlassTokens::from_fb(info, ThemeMode::ObsidianDark);
         self.scene_dirty = DirtyRegion::new();
         self.mmio_dirty = DirtyRegion::new();
     }
 
     pub fn apply_display_prefs(&mut self, wm: &WindowManager) {
-        self.pal = Palette::from_fb_prefs(&self.fb_info, wm.high_contrast);
+        self.pal = Palette::from_fb_prefs(&self.fb_info, wm.high_contrast, wm.light_mode);
+        self.glass = GlassTokens::from_fb(
+            &self.fb_info,
+            ThemeMode::from_wm(wm.high_contrast, wm.light_mode),
+        );
         self.scene_dirty.mark(Rect::new(0, 0, self.w, self.h));
     }
 
     #[inline]
-    fn fill_back_clipped(&mut self, r: Rect, clip: Rect, color: u32) {
+    pub fn fill_back_clipped(&mut self, r: Rect, clip: Rect, color: u32) {
         let c = r.intersect(clip).clamp_to(self.w, self.h);
         if c.is_empty() {
             return;
@@ -253,7 +276,15 @@ impl DesktopCompositor {
     }
 
     #[inline]
-    fn draw_glyph_clipped(&mut self, gx: usize, gy: usize, ch: u8, fg: u32, bg: u32, clip: Rect) {
+    pub fn draw_glyph_clipped(
+        &mut self,
+        gx: usize,
+        gy: usize,
+        ch: u8,
+        fg: u32,
+        bg: u32,
+        clip: Rect,
+    ) {
         let cell_r = Rect::new(gx, gy, 8, 16);
         let inter = cell_r.intersect(clip).clamp_to(self.w, self.h);
         if inter.is_empty() {
@@ -288,491 +319,18 @@ impl DesktopCompositor {
         }
     }
 
-    fn draw_str_clipped(&mut self, x: usize, y: usize, text: &[u8], fg: u32, bg: u32, clip: Rect) {
+    pub fn draw_str_clipped(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &[u8],
+        fg: u32,
+        bg: u32,
+        clip: Rect,
+    ) {
         for (i, &ch) in text.iter().enumerate() {
             self.draw_glyph_clipped(x + i * 8, y, ch, fg, bg, clip);
         }
-    }
-
-    fn paint_background_and_topbar(&mut self, wm: &WindowManager, clip: Rect) {
-        let c = clip.clamp_to(self.w, self.h);
-        if c.is_empty() {
-            return;
-        }
-        let y_start = c.y.max(TOPBAR_H);
-        let y_end = c.y + c.h;
-        if y_start < y_end {
-            let bg_clip = Rect::new(c.x, y_start, c.w, y_end - y_start);
-            self.fill_back_clipped(bg_clip, bg_clip, self.pal.bg_canvas);
-            let first_gy = y_start.div_ceil(64) * 64;
-            let mut gy = first_gy;
-            while gy < y_end {
-                let first_gx = c.x.div_ceil(64) * 64;
-                let mut gx = first_gx;
-                while gx < c.x + c.w {
-                    for &(dx, dy) in &[(0usize, 0usize), (1, 0), (0, 1)] {
-                        let px = gx + dx;
-                        let py = gy + dy;
-                        if bg_clip.contains(px, py) && px < self.w && py < self.h {
-                            // SAFETY: `(px, py)` verified `< (self.w, self.h)`.
-                            unsafe {
-                                *self.back_ptr.add(py * self.w + px) = self.pal.bg_grid;
-                            }
-                        }
-                    }
-                    gx += 64;
-                }
-                gy += 64;
-            }
-        }
-
-        if c.y < TOPBAR_H {
-            let tb_clip = c.intersect(Rect::new(0, 0, self.w, TOPBAR_H));
-            self.fill_back_clipped(Rect::new(0, 0, self.w, TOPBAR_H - 1), tb_clip, self.pal.bg_topbar);
-            self.fill_back_clipped(Rect::new(0, TOPBAR_H - 1, self.w, 1), tb_clip, self.pal.border_idle);
-
-            if wm.p3_mode {
-                self.draw_str_clipped(
-                    12,
-                    6,
-                    b"DRY OS 2A-3",
-                    self.pal.fg_primary,
-                    self.pal.bg_topbar,
-                    tb_clip,
-                );
-                let focused_badge = wm.focused_slot().map_or(0, |s| wm.windows[s].owner_badge);
-                for idx in 0..APP_COUNT {
-                    let app = AppId::ALL[idx];
-                    let pr = wm.topbar_launcher_pill_rect(idx);
-                    let is_focused = focused_badge == app.win_badge();
-                    let is_running = (wm.running_apps_mask & (1u8 << idx)) != 0
-                        || (0..wm.windows.len()).any(|s| {
-                            wm.windows[s].allocated && wm.windows[s].owner_badge == app.win_badge()
-                        });
-                    let (pbg, pfg) = if is_focused {
-                        (self.pal.bg_title_focus, self.pal.fg_primary)
-                    } else if is_running {
-                        (self.pal.bg_pill, self.pal.fg_ok)
-                    } else {
-                        (self.pal.bg_title_idle, self.pal.fg_muted)
-                    };
-                    self.fill_back_clipped(pr, tb_clip, pbg);
-                    if is_focused {
-                        self.fill_back_clipped(
-                            Rect::new(pr.x, pr.y + pr.h - 2, pr.w, 2),
-                            tb_clip,
-                            self.pal.border_focus,
-                        );
-                    }
-                    let lbl = app.pill_label();
-                    let tx = pr.x + pr.w.saturating_sub(lbl.len() * 8) / 2;
-                    self.draw_str_clipped(tx, 6, lbl, pfg, pbg, tb_clip);
-                }
-            } else {
-                let brand: &[u8] = if wm.desktop_mode {
-                    b"DRY OS // DESKTOP PREVIEW 2A-2"
-                } else {
-                    b"DRY OS // P1 INTERACTIVE DESKTOP"
-                };
-                self.draw_str_clipped(14, 6, brand, self.pal.fg_primary, self.pal.bg_topbar, tb_clip);
-            }
-
-            // Center layout pill (`[MODE: FLOAT/TILED/STACK/TABBED]`) + active window indicator.
-            let pill = wm.topbar_mode_pill_rect();
-            if (wm.desktop_mode || wm.p3_mode) && self.w >= 960 {
-                self.fill_back_clipped(pill, tb_clip, self.pal.bg_pill);
-                let mode_lbl: &[u8] = match wm.layout {
-                    LayoutMode::Floating => b"MODE: FLOAT",
-                    LayoutMode::SideBySideTiled => b"MODE: TILED",
-                    LayoutMode::Stacked => b"MODE: STACK",
-                    LayoutMode::Tabbed => b"MODE: TABBED",
-                };
-                self.draw_str_clipped(
-                    pill.x + 8,
-                    6,
-                    mode_lbl,
-                    self.pal.fg_accent,
-                    self.pal.bg_pill,
-                    tb_clip,
-                );
-            }
-
-            if self.w >= 960 {
-                let mut status = [b' '; 44];
-                let mut sp = 0usize;
-                let active_lbl: &[u8] = match wm.focused_slot().map(|s| wm.windows[s].title_kind) {
-                    Some(TITLE_KIND_SYSMON) if wm.p3_mode => b"FOCUS:LIFESTN WINS:",
-                    Some(TITLE_KIND_SYSMON) => b"FOCUS:SYSMON  WINS:",
-                    Some(TITLE_KIND_TERMINAL) => b"FOCUS:TERMINAL WINS:",
-                    Some(TITLE_KIND_FILES) => b"FOCUS:FILES   WINS:",
-                    Some(TITLE_KIND_SETTINGS) => b"FOCUS:SETTINGS WINS:",
-                    Some(_) => b"FOCUS:APP     WINS:",
-                    None => b"FOCUS:NONE    WINS:",
-                };
-                for &b in active_lbl {
-                    status[sp] = b;
-                    sp += 1;
-                }
-                sp += write_u32_ascii(&mut status[sp..], wm.active_window_count() as u32);
-                let suffix: &[u8] = if wm.p3_mode {
-                    b" | ALT+1..4 / ALT+T"
-                } else if wm.desktop_mode {
-                    b" | ALT+TAB / ALT+T"
-                } else {
-                    b" | ALT+ARROWS: MOVE"
-                };
-                for &b in suffix {
-                    if sp < status.len() {
-                        status[sp] = b;
-                        sp += 1;
-                    }
-                }
-                let rx = self.w.saturating_sub(sp * 8 + 14);
-                self.draw_str_clipped(rx, 6, &status[..sp], self.pal.fg_ok, self.pal.bg_topbar, tb_clip);
-            }
-        }
-
-        // In `Tabbed` mode, paint clickable workspace tab strip headers for all open `Normal` windows.
-        if wm.layout == LayoutMode::Tabbed {
-            let strip_clip = c.intersect(Rect::new(0, TABSTRIP_Y, self.w, TABSTRIP_H));
-            if !strip_clip.is_empty() {
-                let mut normal_slots = [0usize; MAX_WINDOWS];
-                let n = wm.collect_normal_slots(&mut normal_slots);
-                for (tab_i, &slot_idx) in normal_slots.iter().take(n).enumerate() {
-                    let tr = wm.tab_pill_rect(tab_i);
-                    let w = &wm.windows[slot_idx];
-                    let (tbg, tfg, bcol) = if w.focused {
-                        (self.pal.bg_title_focus, self.pal.fg_primary, self.pal.border_focus)
-                    } else {
-                        (self.pal.bg_title_idle, self.pal.fg_muted, self.pal.border_idle)
-                    };
-                    self.fill_back_clipped(tr, strip_clip, tbg);
-                    self.fill_back_clipped(Rect::new(tr.x, tr.y + tr.h - 2, tr.w, 2), strip_clip, bcol);
-                    let lbl: &[u8] = match w.title_kind {
-                        TITLE_KIND_TERMINAL => b"TAB: Terminal",
-                        TITLE_KIND_SYSMON => b"TAB: LifeStn",
-                        TITLE_KIND_FILES => b"TAB: Files",
-                        TITLE_KIND_SETTINGS => b"TAB: Settings",
-                        _ => b"TAB: Window",
-                    };
-                    self.draw_str_clipped(tr.x + 10, tr.y + 4, lbl, tfg, tbg, strip_clip);
-                }
-            }
-        }
-    }
-
-    fn paint_window_clipped(&mut self, win: &WindowSlot, p3_mode: bool, clip: Rect) {
-        if !win.allocated || !win.visible {
-            return;
-        }
-        let outer = win.outer_rect();
-        let wclip = outer.intersect(clip).clamp_to(self.w, self.h);
-        if wclip.is_empty() {
-            return;
-        }
-
-        let wx = win.rect.x;
-        let wy = win.rect.y;
-        let ww = win.rect.w;
-        let wh = win.rect.h;
-
-        // 1. Drop shadow (only outside the window body itself so we don't double-fill body pixels).
-        self.fill_back_clipped(
-            Rect::new(wx + ww, wy + SHADOW_OFF, SHADOW_OFF, wh),
-            wclip,
-            self.pal.bg_shadow,
-        );
-        self.fill_back_clipped(
-            Rect::new(wx + SHADOW_OFF, wy + wh, ww.saturating_sub(SHADOW_OFF), SHADOW_OFF),
-            wclip,
-            self.pal.bg_shadow,
-        );
-
-        // 2. Crisp 2px focus/unfocused border.
-        let bcol = if win.focused {
-            self.pal.border_focus
-        } else {
-            self.pal.border_idle
-        };
-        self.fill_back_clipped(Rect::new(wx, wy, ww, WIN_BORDER), wclip, bcol);
-        self.fill_back_clipped(Rect::new(wx, wy + wh - WIN_BORDER, ww, WIN_BORDER), wclip, bcol);
-        self.fill_back_clipped(Rect::new(wx, wy, WIN_BORDER, wh), wclip, bcol);
-        self.fill_back_clipped(Rect::new(wx + ww - WIN_BORDER, wy, WIN_BORDER, wh), wclip, bcol);
-
-        // 3. Titlebar chrome + close `[x]` button.
-        let tb_bg = if win.focused {
-            self.pal.bg_title_focus
-        } else {
-            self.pal.bg_title_idle
-        };
-        let tb_rect = win.titlebar_rect();
-        if !tb_rect.intersect(wclip).is_empty() {
-            self.fill_back_clipped(tb_rect, wclip, tb_bg);
-            let title_fg = if win.focused {
-                self.pal.fg_primary
-            } else {
-                self.pal.fg_muted
-            };
-            let title_str: &[u8] = match win.title_kind {
-                TITLE_KIND_SYSMON if p3_mode => b"LIFE STATION // dry-sysmon [0x0103]",
-                TITLE_KIND_SYSMON => b"SYSTEM MONITOR // dry-sysmon [0x0103]",
-                TITLE_KIND_TERMINAL => b"DRY TERMINAL // dry-shell [0x0102]",
-                TITLE_KIND_FILES => b"FILES // dry-files [0x0104]",
-                TITLE_KIND_SETTINGS => b"SETTINGS // dry-settings [0x0105]",
-                TITLE_KIND_DIALOG => b"QUICK HELP // Dialog [AUTO-FLOAT]",
-                _ => b"DRY APP // [CPL=3]",
-            };
-            self.draw_str_clipped(
-                wx + WIN_BORDER + 10,
-                wy + WIN_BORDER + 6,
-                title_str,
-                title_fg,
-                tb_bg,
-                wclip,
-            );
-
-            let close_r = win.close_btn_rect();
-            self.fill_back_clipped(close_r, wclip, self.pal.bg_close);
-            self.draw_str_clipped(
-                close_r.x + 7,
-                close_r.y + 2,
-                b"x",
-                self.pal.fg_warn,
-                self.pal.bg_close,
-                wclip,
-            );
-
-            // Live compact telemetry badge to the left of `[x]`.
-            let mut badge = [b' '; 20];
-            let mut p = 0usize;
-            if win.title_kind == TITLE_KIND_TERMINAL {
-                for &b in b"CMD:" {
-                    badge[p] = b;
-                    p += 1;
-                }
-                p += write_u32_ascii(&mut badge[p..], win.snapshot.cmd_count);
-            } else {
-                for &b in b"UP:" {
-                    badge[p] = b;
-                    p += 1;
-                }
-                p += write_u32_ascii(&mut badge[p..], win.snapshot.uptime_sec_snap);
-                if p < badge.len() {
-                    badge[p] = b's';
-                    p += 1;
-                }
-            }
-            let bx = close_r.x.saturating_sub(p * 8 + 10);
-            if bx > wx + WIN_BORDER + title_str.len() * 8 + 16 {
-                self.draw_str_clipped(bx, wy + WIN_BORDER + 6, &badge[..p], self.pal.fg_ok, tb_bg, wclip);
-            }
-        }
-
-        // 4. Client surface body & cached character grid.
-        let body_rect = Rect::new(
-            wx + WIN_BORDER,
-            wy + WIN_BORDER + WIN_TITLE_H,
-            ww - WIN_BORDER * 2,
-            wh - WIN_BORDER * 2 - WIN_TITLE_H,
-        );
-        let body_clip = body_rect.intersect(wclip);
-        if body_clip.is_empty() {
-            return;
-        }
-
-        let (grid_x, grid_y) = win.grid_origin();
-        let cols = win.cols as usize;
-        let rows = win.rows as usize;
-        let grid_rect = Rect::new(grid_x, grid_y, cols * 8, rows * 16);
-
-        // Fill padding strips around `grid_rect` (or entire body if snapshot not yet populated).
-        if !win.snapshot.valid {
-            self.fill_back_clipped(body_rect, body_clip, self.pal.bg_win);
-            return;
-        }
-        self.fill_back_clipped(
-            Rect::new(body_rect.x, body_rect.y, body_rect.w, grid_y - body_rect.y),
-            body_clip,
-            self.pal.bg_win,
-        );
-        let grid_bottom = grid_y + rows * 16;
-        let body_bottom = body_rect.y + body_rect.h;
-        if body_bottom > grid_bottom {
-            self.fill_back_clipped(
-                Rect::new(body_rect.x, grid_bottom, body_rect.w, body_bottom - grid_bottom),
-                body_clip,
-                self.pal.bg_win,
-            );
-        }
-        self.fill_back_clipped(
-            Rect::new(body_rect.x, grid_y, grid_x - body_rect.x, rows * 16),
-            body_clip,
-            self.pal.bg_win,
-        );
-        let grid_right = grid_x + cols * 8;
-        let body_right = body_rect.x + body_rect.w;
-        if body_right > grid_right {
-            self.fill_back_clipped(
-                Rect::new(grid_right, grid_y, body_right - grid_right, rows * 16),
-                body_clip,
-                self.pal.bg_win,
-            );
-        }
-
-        let gclip = grid_rect.intersect(body_clip);
-        if gclip.is_empty() {
-            return;
-        }
-        let r_start = (gclip.y - grid_y) / 16;
-        let r_end = ((gclip.y + gclip.h - 1 - grid_y) / 16).min(rows - 1);
-        let c_start = (gclip.x - grid_x) / 8;
-        let c_end = ((gclip.x + gclip.w - 1 - grid_x) / 8).min(cols - 1);
-
-        let cur_vis = win.snapshot.cursor_visible && win.focused;
-        let cur_r = win.snapshot.cursor_row as usize;
-        let cur_c = win.snapshot.cursor_col as usize;
-
-        for r in r_start..=r_end {
-            let py = grid_y + r * 16;
-            let row_base = r * cols;
-            for c in c_start..=c_end {
-                let cell = win.snapshot.cells[row_base + c];
-                let ch = if (0x20..=0x7E).contains(&cell.ch) || cell.ch == BOX_HORIZ {
-                    cell.ch
-                } else {
-                    b' '
-                };
-                let is_cur = cur_vis && r == cur_r && c == cur_c;
-                let (fg, bg) = if is_cur {
-                    (self.pal.bg_win, self.pal.fg_accent)
-                } else {
-                    (self.pal.style_fg(cell.style), self.pal.bg_win)
-                };
-                self.draw_glyph_clipped(grid_x + c * 8, py, ch, fg, bg, gclip);
-            }
-        }
-    }
-
-    fn paint_lock_shield(&mut self, wm: &WindowManager, clip: Rect) {
-        self.fill_back_clipped(Rect::new(0, 0, self.w, self.h), clip, self.pal.bg_shadow);
-        let cw = 640usize;
-        let ch = 224usize;
-        let cx = self.w.saturating_sub(cw) / 2;
-        let cy = self.h.saturating_sub(ch) / 2;
-        let card = Rect::new(cx, cy, cw, ch);
-        if card.intersect(clip).is_empty() {
-            return;
-        }
-        self.fill_back_clipped(card, clip, self.pal.border_focus);
-        let inner = Rect::new(cx + 2, cy + 2, cw - 4, ch - 4);
-        self.fill_back_clipped(inner, clip, self.pal.bg_win);
-        let hdr = Rect::new(cx + 2, cy + 2, cw - 4, 32);
-        self.fill_back_clipped(hdr, clip, self.pal.bg_title_focus);
-
-        self.draw_str_clipped(
-            cx + 18,
-            cy + 10,
-            b"DRY OS // SESSION LOCK SHIELD [CPL=3 COMPOSITOR GATE]",
-            self.pal.fg_accent,
-            self.pal.bg_title_focus,
-            clip,
-        );
-        self.draw_str_clipped(
-            cx + 18,
-            cy + 48,
-            b"STATUS : INPUT ROUTING BLOCKED TO ALL USER COMPARTMENTS",
-            self.pal.fg_ok,
-            self.pal.bg_win,
-            clip,
-        );
-        if wm.vault_auth_required {
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 70,
-                b"AUTH   : DRY VAULT PASSPHRASE REQUIRED (PBKDF2-SHA256)",
-                self.pal.fg_accent,
-                self.pal.bg_win,
-                clip,
-            );
-            let mut plb = LineBuilder::new();
-            plb.push_bytes(b"Passphrase [ ");
-            for _ in 0..(wm.lock_pin_len as usize).min(24) {
-                plb.push_byte(b'*');
-            }
-            plb.push_bytes(b"_ ] (Type + Enter)");
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 96,
-                plb.as_bytes(),
-                self.pal.fg_primary,
-                self.pal.bg_win,
-                clip,
-            );
-
-            let mut flb = LineBuilder::new();
-            flb.push_bytes(b"Auth failures: ");
-            flb.push_u64(wm.vault_auth_failures as u64);
-            flb.push_bytes(b" | Blocked inputs: ");
-            flb.push_u64(wm.locked_blocked_events);
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 124,
-                flb.as_bytes(),
-                if wm.vault_auth_failures > 0 {
-                    self.pal.fg_warn
-                } else {
-                    self.pal.fg_muted
-                },
-                self.pal.bg_win,
-                clip,
-            );
-        } else {
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 72,
-                b"AUTH   : UNAUTHENTICATED LOCK SHIELD (DRY Vault Auth PLANNED)",
-                self.pal.fg_warn,
-                self.pal.bg_win,
-                clip,
-            );
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 98,
-                b"Active Ring 3 apps continue executing isolated underneath.",
-                self.pal.fg_muted,
-                self.pal.bg_win,
-                clip,
-            );
-
-            let mut blb = LineBuilder::new();
-            blb.push_bytes(b"Blocked key/mouse inputs while locked: ");
-            blb.push_u64(wm.locked_blocked_events);
-            self.draw_str_clipped(
-                cx + 18,
-                cy + 124,
-                blb.as_bytes(),
-                self.pal.fg_primary,
-                self.pal.bg_win,
-                clip,
-            );
-        }
-
-        let btn = wm.unlock_button_rect();
-        self.fill_back_clipped(btn, clip, self.pal.border_focus);
-        let b_in = Rect::new(btn.x + 2, btn.y + 2, btn.w - 4, btn.h - 4);
-        self.fill_back_clipped(b_in, clip, self.pal.bg_pill);
-        self.draw_str_clipped(
-            btn.x + 16,
-            btn.y + 6,
-            if wm.vault_auth_required {
-                b"[ AUTHENTICATE & UNLOCK (Enter) ]"
-            } else {
-                b"[ UNLOCK SESSION (Enter/Click) ]"
-            },
-            self.pal.fg_accent,
-            self.pal.bg_pill,
-            clip,
-        );
     }
 
     /// Repaint `clip` in `back_ptr` from bottom-to-top Z-order and queue `clip` for MMIO flush.
@@ -786,22 +344,33 @@ impl DesktopCompositor {
             self.mmio_dirty.mark(c);
             return;
         }
+        let tokens = self.glass;
         if wm.session_state == SessionVisualState::SessionLocked {
-            self.paint_lock_shield(wm, c);
+            crate::glass::overlays::paint_lock_shield_glass(self, wm, &tokens, c);
             self.mmio_dirty.mark(c);
             return;
         }
-        self.paint_background_and_topbar(wm, c);
+        crate::glass::chrome::paint_wallpaper(self, &tokens, c);
+        crate::glass::chrome::paint_topbar_and_tabs(self, wm, &tokens, c);
         for z in 0..wm.z_len {
             let slot_idx = wm.z_stack[z];
-            self.paint_window_clipped(&wm.windows[slot_idx], wm.p3_mode, c);
+            crate::glass::chrome::paint_window_glass(
+                self,
+                &wm.windows[slot_idx],
+                wm.p3_mode,
+                &tokens,
+                c,
+            );
         }
+        crate::glass::chrome::paint_dock_and_snap(self, wm, &tokens, c);
+        crate::glass::overlays::paint_overlays(self, wm, &tokens, c);
         self.mmio_dirty.mark(c);
     }
 
     /// Drain all pending `scene_dirty` + `mmio_dirty` rectangles and stream modified scanlines
     /// (compositing the 12x16 software cursor on-the-fly) into the GOP framebuffer or bound `dry-gpu`.
     pub fn flush_all(&mut self, wm: &mut WindowManager) -> (u64, u64) {
+        crate::glass::chrome::expand_blur_damage(wm, &mut self.scene_dirty);
         let mut s_rects = [Rect::EMPTY; MAX_DIRTY_RECTS];
         let sn = self.scene_dirty.drain_into(self.w, self.h, &mut s_rects);
         for r in s_rects.iter().take(sn) {
