@@ -120,16 +120,17 @@ pub fn paint_dock_and_snap(
         ui.border_strong
     };
     c.stroke_rrect_aa(dr, 12, rim_col, 190);
+    if tokens.mode != ThemeMode::HighContrast {
+        c.hline(dr.x + 12, dr.y + 1, dr.w.saturating_sub(24), ui.border_strong, 115);
+    }
 
     let focused_badge = wm.focused_slot().map_or(0, |s| wm.windows[s].owner_badge);
     for (idx, app) in AppId::ALL.iter().copied().enumerate() {
         let ir = dock_item_rect(wm, idx);
+        let (win_total, win_min) = wm.count_windows_for_app(app);
         let is_focused = focused_badge == app.win_badge();
-        let is_running = (wm.running_apps_mask & (1u8 << idx)) != 0
-            || wm
-                .windows
-                .iter()
-                .any(|w| w.allocated && w.owner_badge == app.win_badge());
+        let all_min = win_total > 0 && win_min >= win_total;
+        let is_running = (wm.running_apps_mask & (1u8 << idx)) != 0 || win_total > 0;
 
         if is_focused {
             c.fill_rrect_aa(ir, 9, ui.accent_subtle, 245);
@@ -145,6 +146,8 @@ pub fn paint_dock_and_snap(
         let icon_r = Rect::new(ir.x + 6, ir.y + 6, ir.w.saturating_sub(12), ir.h.saturating_sub(12));
         let fg = if is_focused {
             ui.accent_fg
+        } else if all_min {
+            ui.fg_muted
         } else if is_running {
             ui.fg_primary
         } else {
@@ -155,9 +158,13 @@ pub fn paint_dock_and_snap(
         if is_focused {
             let dot = Rect::new(ir.x + 10, ir.y + ir.h + 1, ir.w.saturating_sub(20), 3);
             c.fill_rrect_aa(dot, 1, ui.accent, 255);
+        } else if win_total > 1 {
+            let dcol = if all_min { ui.warn } else { ui.fg_primary };
+            c.fill_rrect_aa(Rect::new(ir.x + 11, ir.y + ir.h + 1, 5, 2), 1, dcol, 230);
+            c.fill_rrect_aa(Rect::new(ir.x + 20, ir.y + ir.h + 1, 5, 2), 1, dcol, 230);
         } else if is_running {
             let dot = Rect::new(ir.x + 14, ir.y + ir.h + 1, ir.w.saturating_sub(28), 2);
-            c.fill_rrect_aa(dot, 1, ui.fg_muted, 220);
+            c.fill_rrect_aa(dot, 1, if all_min { ui.warn } else { ui.fg_muted }, 220);
         }
     }
 }
@@ -173,6 +180,12 @@ pub fn expand_blur_damage(wm: &WindowManager, dirty: &mut DirtyRegion) {
     let dr = pad_rect(dock_rect(wm), 6);
     if dirty.intersect_any(dr) {
         dirty.mark(dr);
+    }
+    if wm.glass.overview_open {
+        let ov_r = pad_rect(crate::glass::overview::overview_modal_rect(wm), 6);
+        if dirty.intersect_any(ov_r) {
+            dirty.mark(ov_r);
+        }
     }
     if wm.glass.launcher_open {
         let full_lr = pad_rect(crate::glass::overlays::launcher_modal_rect(wm), 6);

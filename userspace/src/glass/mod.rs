@@ -10,8 +10,10 @@ pub mod chrome;
 pub mod dock_bar;
 pub mod icons;
 pub mod overlays;
+pub mod overview;
 pub mod theme;
 pub mod typography;
+pub mod window_strip;
 
 use crate::action::APP_COUNT;
 use crate::gfx::Rect;
@@ -42,6 +44,11 @@ pub struct GlassState {
     pub launcher_query: [u8; 20],
     pub launcher_len: u8,
     pub launcher_sel: usize,
+    pub overview_open: bool,
+    pub overview_query: [u8; 24],
+    pub overview_len: u8,
+    pub overview_sel_win_id: u32,
+    pub overview_scroll: usize,
     pub qs_open: bool,
     pub notif_open: bool,
     pub notifs: [GlassNotif; MAX_GLASS_NOTIFS],
@@ -57,6 +64,11 @@ impl GlassState {
             launcher_query: [0; 20],
             launcher_len: 0,
             launcher_sel: 0,
+            overview_open: false,
+            overview_query: [0; 24],
+            overview_len: 0,
+            overview_sel_win_id: 0,
+            overview_scroll: 0,
             qs_open: false,
             notif_open: false,
             notifs: [GlassNotif::EMPTY; MAX_GLASS_NOTIFS],
@@ -68,15 +80,18 @@ impl GlassState {
 
     #[inline]
     pub const fn any_overlay_open(&self) -> bool {
-        self.launcher_open || self.qs_open || self.notif_open
+        self.launcher_open || self.overview_open || self.qs_open || self.notif_open
     }
 
     pub fn close_overlays(&mut self) {
         self.launcher_open = false;
+        self.overview_open = false;
         self.qs_open = false;
         self.notif_open = false;
         self.launcher_len = 0;
         self.launcher_sel = 0;
+        self.overview_len = 0;
+        self.overview_scroll = 0;
     }
 
     pub fn push_notif(&mut self, text: &[u8], kind: u8) {

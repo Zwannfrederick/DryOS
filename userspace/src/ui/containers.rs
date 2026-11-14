@@ -10,6 +10,31 @@ use super::icons::{draw_vector_icon, IconKind};
 use super::layout::{inset_rect, UiCtx};
 use super::theme::{StatusKind, UiTheme};
 
+pub const SIDEBAR_COMPACT_W: usize = 52;
+
+/// Compute adaptive sidebar width: uses readable full width at normal geometry,
+/// or switches to `SIDEBAR_COMPACT_W` icon-rail (`< 104`) on narrow/HiDPI tiling.
+pub fn sidebar_preferred_w(
+    t: UiTheme,
+    win_w: usize,
+    items: &[(&[u8], IconKind)],
+) -> usize {
+    let mut max_lw = 0usize;
+    for &(label, _) in items {
+        let lw = measure_text(FontId::SansSemiBold, t.body_px, label).max(0) as usize;
+        if lw > max_lw {
+            max_lw = lw;
+        }
+    }
+    let full_w = max_lw + 58;
+    let min_content = (390 * t.dpi_pct as usize) / 100;
+    if win_w >= 540 && full_w + t.sp_md * 2 + t.sp_sm + min_content <= win_w {
+        full_w.clamp(124, 176)
+    } else {
+        SIDEBAR_COMPACT_W
+    }
+}
+
 pub fn sidebar_nav(
     c: &mut Canvas,
     ui: &mut UiCtx,
@@ -20,8 +45,9 @@ pub fn sidebar_nav(
 ) -> bool {
     let t = ui.theme;
     c.fill_bordered_rrect_aa(r, t.r_md, t.bg_sidebar, t.border_subtle);
-    let inner = inset_rect(r, 8, 10);
-    let row_h = 30usize;
+    let compact = r.w < 104;
+    let inner = inset_rect(r, if compact { 6 } else { 8 }, 10);
+    let row_h = 32usize;
     let gap = 4usize;
     let mut changed = false;
 
@@ -41,33 +67,67 @@ pub fn sidebar_nav(
             c.fill_bordered_rrect_aa(rr, t.r_sm, t.bg_selected, t.border_strong);
             c.fill_rrect_aa(Rect::new(rr.x + 2, rr.y + 6, 3, rr.h.saturating_sub(12)), 2, t.accent_fg, 255);
         } else if resp.hovered {
-            c.fill_rrect_aa(rr, t.r_sm, t.bg_hover, 200);
+            c.fill_rrect_aa(rr, t.r_sm, t.bg_hover, 210);
         }
         if resp.focused {
             c.stroke_rrect_aa(rr, t.r_sm, t.focus_ring, 210);
         }
 
         let ic_sz = 16usize;
-        let ir = Rect::new(rr.x + 10, rr.y + (rr.h - ic_sz) / 2, ic_sz, ic_sz);
+        let ix = if compact {
+            rr.x + (rr.w.saturating_sub(ic_sz)) / 2
+        } else {
+            rr.x + 10
+        };
+        let ir = Rect::new(ix, rr.y + (rr.h - ic_sz) / 2, ic_sz, ic_sz);
         let fg = if is_sel { t.fg_primary } else { t.fg_secondary };
         let acc = if is_sel { t.accent_fg } else { t.fg_muted };
         draw_vector_icon(c, ir, icon, fg, acc);
 
-        let font = if is_sel { FontId::SansSemiBold } else { FontId::SansRegular };
-        let m = font_metrics(font, t.body_px);
-        let ty = rr.y as i32 + ((rr.h as i32 - (m.ascent + m.descent)) / 2);
-        let tx = (rr.x + 32) as i32;
-        c.draw_text_ellipsis(
-            tx,
-            ty,
-            (rr.x + rr.w).saturating_sub(tx as usize + 6) as i32,
-            font,
-            t.body_px,
-            label,
-            fg,
-        );
+        if !compact {
+            let font = if is_sel { FontId::SansSemiBold } else { FontId::SansRegular };
+            let m = font_metrics(font, t.body_px);
+            let ty = rr.y as i32 + ((rr.h as i32 - (m.ascent + m.descent)) / 2);
+            let tx = (rr.x + 32) as i32;
+            c.draw_text_ellipsis(
+                tx,
+                ty,
+                (rr.x + rr.w).saturating_sub(tx as usize + 6) as i32,
+                font,
+                t.body_px,
+                label,
+                fg,
+            );
+        }
     }
     changed
+}
+
+/// Floating hover tooltip for compact icon-rail sidebars, painted after right pane cards.
+pub fn sidebar_tooltip_overlay(
+    c: &mut Canvas,
+    t: UiTheme,
+    sb_r: Rect,
+    items: &[(&[u8], IconKind)],
+    base_id: u16,
+    hovered_id: u16,
+) {
+    if sb_r.w >= 104 || hovered_id < base_id {
+        return;
+    }
+    let idx = (hovered_id - base_id) as usize;
+    if idx >= items.len() {
+        return;
+    }
+    let label = items[idx].0;
+    let ry = sb_r.y + 10 + idx * 36;
+    let tw = measure_text(FontId::SansSemiBold, t.caption_px, label).max(20) as usize;
+    let pw = tw + 18;
+    let ph = 26usize;
+    let px = (sb_r.x + sb_r.w + 6).min(c.w.saturating_sub(pw + 6));
+    let tip_r = Rect::new(px, ry + 3, pw, ph);
+    c.fill_bordered_rrect_aa(tip_r, t.r_sm, t.bg_card_alt, t.accent);
+    c.draw_text_centered(tip_r, FontId::SansSemiBold, t.caption_px, label, t.fg_primary);
 }
 
 pub fn tab_bar(
@@ -240,8 +300,17 @@ pub fn metric_card(
     c.fill_bordered_rrect_aa(r, t.r_md, t.bg_card, t.border_subtle);
     let (_, fg_accent) = t.status_colors(kind);
     let accent = if kind == StatusKind::Neutral { t.accent_fg } else { fg_accent };
-    let inner = inset_rect(r, 12, 10);
-    c.draw_text_ellipsis(
+    let inner = inset_rect(r, 12, 8);
+    if inner.w < 16 || inner.h < 12 {
+        return;
+    }
+    let mut mc = c.sub_clip(inner);
+    let m_cap = font_metrics(FontId::SansSemiBold, t.caption_px);
+    let m_val = font_metrics(FontId::SansSemiBold, t.title_px);
+    let cap_h = m_cap.line_height.max(12) as usize;
+    let val_h = m_val.line_height.max(16) as usize;
+
+    mc.draw_text_ellipsis(
         inner.x as i32,
         inner.y as i32,
         inner.w as i32 - 12,
@@ -250,27 +319,29 @@ pub fn metric_card(
         label,
         t.fg_muted,
     );
-    c.fill_circle_aa((inner.x + inner.w - 4) as i32 * 16, (inner.y + 6) as i32 * 16, 48, accent, 255);
+    mc.fill_circle_aa((inner.x + inner.w - 4) as i32 * 16, (inner.y + 6) as i32 * 16, 48, accent, 255);
 
-    c.draw_text_ellipsis(
-        inner.x as i32,
-        (inner.y + 18) as i32,
-        inner.w as i32,
-        FontId::SansSemiBold,
-        t.title_px,
-        value,
-        t.fg_primary,
-    );
+    if inner.h >= cap_h + val_h + 2 {
+        mc.draw_text_ellipsis(
+            inner.x as i32,
+            (inner.y + cap_h + 2) as i32,
+            inner.w as i32,
+            FontId::SansSemiBold,
+            t.title_px,
+            value,
+            t.fg_primary,
+        );
+    }
 
     if let Some(p) = pct {
-        if inner.h >= 60 {
-            progress_bar(c, t, Rect::new(inner.x, inner.y + 44, inner.w, 7), p, kind);
+        if inner.h >= cap_h + val_h + 26 {
+            progress_bar(&mut mc, t, Rect::new(inner.x, inner.y + cap_h + val_h + 6, inner.w, 7), p, kind);
         }
     }
-    if !sub.is_empty() {
-        c.draw_text_ellipsis(
+    if !sub.is_empty() && inner.h >= cap_h + val_h + cap_h + 6 {
+        mc.draw_text_ellipsis(
             inner.x as i32,
-            (inner.y + inner.h.saturating_sub(16)) as i32,
+            (inner.y + inner.h.saturating_sub(cap_h)) as i32,
             inner.w as i32,
             FontId::SansRegular,
             t.caption_px,

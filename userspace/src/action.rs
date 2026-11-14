@@ -158,6 +158,32 @@ impl AppId {
             Self::Calculator => TITLE_KIND_CALC,
         }
     }
+
+    #[inline]
+    pub const fn from_title_kind(tk: u8) -> Option<Self> {
+        match tk {
+            TITLE_KIND_TERMINAL => Some(Self::Terminal),
+            TITLE_KIND_SYSMON => Some(Self::LifeStation),
+            TITLE_KIND_FILES => Some(Self::Files),
+            TITLE_KIND_SETTINGS => Some(Self::Settings),
+            TITLE_KIND_EDITOR => Some(Self::Editor),
+            TITLE_KIND_CALC => Some(Self::Calculator),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn from_win_badge(badge: u64) -> Option<Self> {
+        match badge {
+            BADGE_WIN_SHELL | BADGE_SUP_SHELL => Some(Self::Terminal),
+            BADGE_WIN_SYSMON | BADGE_SUP_SYSMON => Some(Self::LifeStation),
+            BADGE_WIN_FILES | BADGE_SUP_FILES => Some(Self::Files),
+            BADGE_WIN_SETTINGS | BADGE_SUP_SETTINGS => Some(Self::Settings),
+            BADGE_WIN_EDITOR | BADGE_SUP_EDITOR => Some(Self::Editor),
+            BADGE_WIN_CALC | BADGE_SUP_CALC => Some(Self::Calculator),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

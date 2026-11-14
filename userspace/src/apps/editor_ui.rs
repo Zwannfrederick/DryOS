@@ -16,12 +16,14 @@ pub enum EditorAction {
     None,
     Save,
     Clear,
+    ToggleScratch,
     MoveCursor(usize, usize),
 }
 
 pub struct EditorView<'a> {
     pub path: &'a [u8],
     pub persist_ok: bool,
+    pub scratch_open: bool,
     pub line_slices: &'a [&'a [u8]],
     pub cur_row: usize,
     pub cur_col: usize,
@@ -56,18 +58,22 @@ pub fn render_editor(
     let btn_h = (top_h.saturating_sub(14)).max(26);
     let btn_y = top_r.y + (top_h.saturating_sub(btn_h)) / 2;
     let save_w = ((measure_text(FontId::SansSemiBold, t.body_px, b"Save (Ctrl+S)").max(90) as usize)
-        + 42)
+        + 40)
         .min(w / 3);
-    let clear_w = ((measure_text(FontId::SansSemiBold, t.body_px, b"Clear").max(52) as usize) + 26)
+    let clear_w = ((measure_text(FontId::SansSemiBold, t.body_px, b"Clear").max(50) as usize) + 22)
+        .min(w / 6);
+    let new_w = ((measure_text(FontId::SansSemiBold, t.body_px, b"New Note").max(68) as usize) + 24)
         .min(w / 5);
 
     let save_x = w.saturating_sub(t.sp_md + save_w);
     let clear_x = save_x.saturating_sub(t.sp_sm + clear_w);
+    let new_x = clear_x.saturating_sub(t.sp_sm + new_w);
     let save_r = Rect::new(save_x, btn_y, save_w, btn_h);
     let clear_r = Rect::new(clear_x, btn_y, clear_w, btn_h);
+    let new_r = Rect::new(new_x, btn_y, new_w, btn_h);
 
     let path_x = t.sp_md;
-    let path_max = clear_x.saturating_sub(path_x + t.sp_sm);
+    let path_max = new_x.saturating_sub(path_x + t.sp_sm);
     if path_max >= 96 {
         let pill_r = Rect::new(path_x, btn_y, path_max.min(276), btn_h);
         c.fill_bordered_rrect_aa(pill_r, t.r_sm, t.bg_card, t.border_subtle);
@@ -124,8 +130,16 @@ pub fn render_editor(
         selected: false,
     };
     let clear_opts = ButtonOpts::secondary(b"Clear");
+    let new_opts = ButtonOpts {
+        label: if view.scratch_open { b"Close #2" } else { b"New Note" },
+        icon: None,
+        variant: ButtonVariant::Secondary,
+        disabled: false,
+        selected: view.scratch_open,
+    };
     let clicked_save = button(&mut c, &mut ui, 1, save_r, save_opts);
     let clicked_clear = button(&mut c, &mut ui, 2, clear_r, clear_opts);
+    let clicked_scratch = button(&mut c, &mut ui, 4, new_r, new_opts);
 
     let hit_pos = multiline_viewport(
         &mut c,
@@ -207,6 +221,8 @@ pub fn render_editor(
         EditorAction::Save
     } else if clicked_clear {
         EditorAction::Clear
+    } else if clicked_scratch {
+        EditorAction::ToggleScratch
     } else if let Some((row, col)) = hit_pos {
         EditorAction::MoveCursor(row, col)
     } else {

@@ -154,6 +154,15 @@ impl<'a> UiCtx<'a> {
     }
 
     #[inline]
+    pub fn hovered_id(&self) -> u16 {
+        if self.next_hovered != 0 {
+            self.next_hovered
+        } else {
+            self.persist.hovered
+        }
+    }
+
+    #[inline]
     pub fn take_key(&mut self) -> Option<InputEvent> {
         self.key.take()
     }

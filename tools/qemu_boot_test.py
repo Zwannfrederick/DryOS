@@ -33,6 +33,7 @@ from qemu_p7_gpu_validators import run_p7_gpu_suite
 from qemu_p8_hw_validators import run_p8_hw_suite
 from qemu_p9_glass_validators import run_p9_glass_suite
 from qemu_p10_glass2_validators import run_p10_glass2_suite
+from qemu_p11_glass21_validators import run_p11_glass21_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -607,6 +608,7 @@ def main() -> None:
     parser.add_argument("--p8-only", action="store_true", help="Run only Milestone 2C-2 VT-d, MSI/MSI-X, BAR64 & bound-notification hardware suite")
     parser.add_argument("--p9-only", action="store_true", help="Run only DRY Glass Desktop, Multi-Res VirtIO-GPU & Native Apps suite")
     parser.add_argument("--p10-only", action="store_true", help="Run only DRY Glass 2.0 TrueType UI, 6 Native Apps, Multi-DPI & Multi-Res suite")
+    parser.add_argument("--p11-only", action="store_true", help="Run only DRY Glass 2.1 Adaptive Window Strip, Overview & HiDPI Sidebar suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -660,6 +662,11 @@ def main() -> None:
     if args.p10_only:
         n_p10 = run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p10} DRY GLASS 2.0 CHECKS PASSED.")
+        return
+
+    if args.p11_only:
+        n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p11} DRY GLASS 2.1 CHECKS PASSED.")
         return
 
     if args.p3_matrix:
@@ -744,13 +751,14 @@ def main() -> None:
     n_p8 = run_p8_hw_suite(kernel_elf, BUILD_DIR, ROOT, write_mbr_esp_image, run_qemu)
     n_p9 = run_p9_glass_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p10 = run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10} DETERMINISTIC QEMU CHECKS "
+        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11} DETERMINISTIC QEMU CHECKS "
         f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
         f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW + "
-        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0) PASSED."
+        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1) PASSED."
     )
 
 

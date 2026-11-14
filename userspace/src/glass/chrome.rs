@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! DRY Glass Compositor Chrome — Wallpaper, Frosted Topbar, Tabs & AA Windows (`DRY Glass 2.0`).
 
-use crate::action::AppId;
 use crate::compositor::{pack_rgb, write_u32_ascii, DesktopCompositor};
 use crate::gfx::{Rect, BOX_HORIZ};
 use crate::glass::blur::{backdrop_frosted_rect, blend_soft_rrect_shadow, fill_rounded_raw, in_rounded_rect};
@@ -96,49 +95,7 @@ fn paint_p3_topbar_items(
     let blbl: &[u8] = if wm.screen_w < 1200 { b"Glass" } else { b"DRY Glass" };
     c.draw_text((br.x + 22) as i32, (br.y + 3) as i32, FontId::SansSemiBold, 11, blbl, br_fg);
 
-    let focused_badge = wm.focused_slot().map_or(0, |s| wm.windows[s].owner_badge);
-    for (idx, app) in AppId::ALL.iter().copied().enumerate() {
-        let pr = wm.topbar_launcher_pill_rect(idx);
-        let is_focused = focused_badge == app.win_badge();
-        let is_running = (wm.running_apps_mask & (1u8 << idx)) != 0
-            || wm.windows.iter().any(|w| w.allocated && w.owner_badge == app.win_badge());
-        let (pbg, pbd, pfg) = if is_focused {
-            (ui.accent_subtle, ui.accent, ui.fg_primary)
-        } else if is_running {
-            (ui.bg_card_alt, ui.border_strong, ui.fg_primary)
-        } else {
-            (ui.bg_card, ui.border_subtle, ui.fg_muted)
-        };
-        c.fill_bordered_rrect_aa(pr, 6, pbg, pbd);
-        if is_focused {
-            c.fill_rrect_aa(Rect::new(pr.x + 6, pr.y + pr.h - 2, pr.w.saturating_sub(12), 2), 1, ui.accent, 255);
-        } else if is_running {
-            c.fill_circle_aa((pr.x + 6) as i32, (pr.y + pr.h / 2) as i32, 2, ui.ok, 255);
-        }
-        let lbl: &[u8] = if wm.screen_w < 1200 {
-            match app {
-                AppId::Terminal => b"Term",
-                AppId::LifeStation => b"Life",
-                AppId::Files => b"File",
-                AppId::Settings => b"Set",
-                AppId::Editor => b"Note",
-                AppId::Calculator => b"Calc",
-            }
-        } else {
-            match app {
-                AppId::Terminal => b"1:Term",
-                AppId::LifeStation => b"2:Life",
-                AppId::Files => b"3:Files",
-                AppId::Settings => b"4:Cfg",
-                AppId::Editor => b"5:Notes",
-                AppId::Calculator => b"6:Calc",
-            }
-        };
-        let font = if is_focused { FontId::SansSemiBold } else { FontId::SansRegular };
-        let tx = pr.x + if is_running && !is_focused { 4 } else { 0 };
-        let tr = Rect::new(tx, pr.y, pr.w.saturating_sub(tx - pr.x), pr.h);
-        c.draw_text_centered(tr, font, 11, lbl, pfg);
-    }
+    crate::glass::window_strip::paint_adaptive_window_strip(comp, wm, tokens, tb_clip);
 
     let mode_r = wm.topbar_mode_pill_rect();
     c.fill_bordered_rrect_aa(mode_r, 6, ui.bg_card_alt, ui.border_subtle);
@@ -378,24 +335,31 @@ fn paint_p3_window(
         ui.border_subtle
     };
     c.stroke_rrect_aa(win.rect, corner_r, border_col, 240);
+    if win.focused && tokens.mode != ThemeMode::HighContrast {
+        c.hline(wx + corner_r, wy + 1, ww.saturating_sub(corner_r * 2), ui.border_strong, 140);
+    }
 
     let title_fg = if win.focused { ui.fg_primary } else { ui.fg_muted };
     let mut title_x = wx + WIN_BORDER + 10;
-    if let Some(app) = app_from_title_kind(win.title_kind) {
+    if let Some(app) = WindowManager::slot_app_id(win) {
         draw_vector_icon(&mut c, Rect::new(title_x, wy + WIN_BORDER + 6, 16, 16), IconKind::from_app(app), title_fg, ui.accent);
         title_x += 22;
     }
-    let title_str: &[u8] = match win.title_kind {
-        TITLE_KIND_SYSMON => b"Life Station",
-        TITLE_KIND_TERMINAL => b"DRY Terminal",
-        TITLE_KIND_FILES => b"DRY Files",
-        TITLE_KIND_SETTINGS => b"Settings",
-        TITLE_KIND_EDITOR => b"DRY Notes",
-        TITLE_KIND_CALC => b"Calculator",
-        TITLE_KIND_DIALOG => b"Quick Help",
-        _ => b"DRY App",
-    };
-    c.draw_text(title_x as i32, (wy + WIN_BORDER + 6) as i32, FontId::SansSemiBold, 13, title_str, title_fg);
+    let min_r = win.minimize_btn_rect();
+    let title_str = crate::glass::overview::slot_effective_title(win);
+    let title_max = min_r.x.saturating_sub(title_x + 10);
+    c.draw_text_ellipsis(
+        title_x as i32,
+        (wy + WIN_BORDER + 6) as i32,
+        title_max as i32,
+        FontId::SansSemiBold,
+        13,
+        title_str,
+        title_fg,
+    );
+
+    c.fill_bordered_rrect_aa(min_r, 5, ui.bg_card_alt, ui.border_subtle);
+    c.fill_rect(Rect::new(min_r.x + 6, min_r.y + min_r.h / 2, min_r.w.saturating_sub(12), 2), title_fg);
 
     let close_r = win.close_btn_rect();
     let close_bg = if win.focused { 0xC83E44 } else { ui.bg_card_alt };
@@ -420,7 +384,7 @@ fn paint_p3_window(
         }
         let bs = &badge[..p];
         let bw = (measure_text(FontId::MonoRegular, 10, bs).max(0) as usize) + 12;
-        let bx = close_r.x.saturating_sub(bw + 8);
+        let bx = min_r.x.saturating_sub(bw + 8);
         if bx > title_x + 120 {
             let br = Rect::new(bx, wy + WIN_BORDER + 5, bw, 18);
             c.fill_rrect_aa(br, 5, ui.bg_card_alt, 220);

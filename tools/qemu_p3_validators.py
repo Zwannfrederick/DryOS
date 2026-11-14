@@ -130,9 +130,9 @@ def run_p3a_apps_lifecycle_e2e(
         if "kind=0 vec=0 window_cleaned=true" not in term_reap:
             raise RuntimeError(f"[{name}] Closing Terminal window should reap cleanly without OS exit: {term_reap!r}")
 
-        # 9. Relaunch `Terminal` via Topbar Launcher `[1:Term]` pill `(152, 14)` (`dx=-441, dy=-54`)!
+        # 9. Relaunch `Terminal` via Adaptive Window Strip recent-app icon at `(230, 14)` (`dx=-363, dy=-54`)!
         idx = len(h.serial_lines)
-        qmp.move_in_steps(-441, -54, steps=6)
+        qmp.move_in_steps(-363, -54, steps=6)
         qmp.click_left()
         term_spawn = h.wait_for("[DRY-SUP] APP_SPAWNED app=terminal", start_idx=idx)
         if "launches=2" not in term_spawn:

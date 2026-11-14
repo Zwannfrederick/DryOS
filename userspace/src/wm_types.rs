@@ -6,7 +6,9 @@ use crate::gfx::Rect;
 use crate::input::InputRingQueue;
 use crate::surface::{SurfaceSnapshot, TERM_COLS, TERM_ROWS};
 
-pub const MAX_WINDOWS: usize = 8;
+/// Maximum concurrent composited windows.
+/// Bounded by kernel `MAX_CSPACES = 32` and ~4 MiB surface+snapshot memory per pixel window.
+pub const MAX_WINDOWS: usize = 16;
 pub const WIN_EVENT_QUEUE_CAP: usize = 32;
 pub const SUP_BIT_WM_ACTION: u64 = 1 << 0;
 
@@ -100,6 +102,7 @@ impl SessionVisualState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitPart {
     TitleBar,
+    MinimizeButton,
     CloseButton,
     ClientBody,
 }
@@ -148,8 +151,12 @@ pub struct WindowSlot {
     pub role: WindowRole,
     pub title_kind: u8,
     pub visible: bool,
+    pub minimized: bool,
     pub focused: bool,
     pub close_requested: bool,
+    pub instance_ordinal: u8,
+    pub custom_title: [u8; 32],
+    pub custom_title_len: u8,
     pub cols: u16,
     pub rows: u16,
     pub rect: Rect,
@@ -179,8 +186,12 @@ impl WindowSlot {
             role: WindowRole::Normal,
             title_kind: TITLE_KIND_TERMINAL,
             visible: false,
+            minimized: false,
             focused: false,
             close_requested: false,
+            instance_ordinal: 0,
+            custom_title: [0u8; 32],
+            custom_title_len: 0,
             cols: TERM_COLS as u16,
             rows: TERM_ROWS as u16,
             rect: Rect::EMPTY,
@@ -200,6 +211,40 @@ impl WindowSlot {
             last_cfg_h: 0,
             last_cfg_flags: 0,
         }
+    }
+
+    /// Resets slot fields in place without materializing a ~14 KiB `WindowSlot` on the 16 KiB Ring-3 stack.
+    pub fn reset_in_place(&mut self) {
+        self.allocated = false;
+        self.id = 0;
+        self.owner_badge = 0;
+        self.role = WindowRole::Normal;
+        self.title_kind = TITLE_KIND_TERMINAL;
+        self.visible = false;
+        self.minimized = false;
+        self.focused = false;
+        self.close_requested = false;
+        self.instance_ordinal = 0;
+        self.custom_title = [0; 32];
+        self.custom_title_len = 0;
+        self.cols = TERM_COLS as u16;
+        self.rows = TERM_ROWS as u16;
+        self.rect = Rect::EMPTY;
+        self.saved_floating_rect = Rect::EMPTY;
+        self.surf_cap = 0;
+        self.surf_vaddr = 0;
+        self.notif_cap = 0;
+        self.waiter_reply_tok = 0;
+        self.ev_queue.reset();
+        self.snapshot.reset_in_place();
+        self.is_pixel = false;
+        self.pixel_w = 0;
+        self.pixel_h = 0;
+        self.snap_cap = 0;
+        self.snap_vaddr = 0;
+        self.last_cfg_w = 0;
+        self.last_cfg_h = 0;
+        self.last_cfg_flags = 0;
     }
 
     #[inline]
@@ -231,6 +276,26 @@ impl WindowSlot {
     pub const fn close_btn_rect(&self) -> Rect {
         let bx = (self.rect.x + self.rect.w).saturating_sub(WIN_BORDER + 28);
         Rect::new(bx, self.rect.y + WIN_BORDER + 4, 22, 20)
+    }
+
+    #[inline]
+    pub const fn minimize_btn_rect(&self) -> Rect {
+        let bx = self.close_btn_rect().x.saturating_sub(26);
+        Rect::new(bx, self.rect.y + WIN_BORDER + 4, 22, 20)
+    }
+
+    /// Stores a custom UTF-8/ASCII window title suffix/override capped to 32 bytes.
+    pub fn set_custom_title(&mut self, title: &[u8]) {
+        let n = title.len().min(self.custom_title.len());
+        self.custom_title = [0u8; 32];
+        self.custom_title[..n].copy_from_slice(&title[..n]);
+        self.custom_title_len = n as u8;
+    }
+
+    #[inline]
+    pub fn custom_title_bytes(&self) -> &[u8] {
+        let n = (self.custom_title_len as usize).min(self.custom_title.len());
+        &self.custom_title[..n]
     }
 
     #[inline]

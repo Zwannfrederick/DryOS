@@ -5,7 +5,9 @@ use crate::apps::{PixelAppWindow, PointerStep};
 use crate::gfx::Rect;
 use crate::sup_services::SupervisorPrefs;
 use crate::ttf::{font_metrics, measure_text, FontId};
-use crate::ui::containers::{card, list_row, sidebar_nav, status_badge};
+use crate::ui::containers::{
+    card, list_row, sidebar_nav, sidebar_preferred_w, sidebar_tooltip_overlay, status_badge,
+};
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::layout::{inset_rect, split_bot, split_left, split_top, UiCtx};
 use crate::ui::theme::{StatusKind, UiTheme};
@@ -61,13 +63,22 @@ fn row_spec(idx: usize, light_mode: bool) -> (IconKind, &'static [u8], &'static 
     }
 }
 
-pub fn settings_vis_rows(t: UiTheme, _w: usize, h: usize) -> usize {
+const SETTINGS_CATS: [(&[u8], IconKind); 4] = [
+    (b"Workspace", IconKind::LayoutTiled),
+    (b"Input", IconKind::Sliders),
+    (b"Appearance", IconKind::Sun),
+    (b"Security", IconKind::Shield),
+];
+
+pub fn settings_vis_rows(t: UiTheme, w: usize, h: usize) -> usize {
     let top_h = (t.ctrl_h + 12).clamp(40, 48);
     let foot_h = 30usize;
     let mid_h = h.saturating_sub(top_h + foot_h + t.sp_sm * 2);
+    let sb_w = sidebar_preferred_w(t, w, &SETTINGS_CATS);
+    let hdr_h = if sb_w < 104 { 28usize } else { 0usize };
     let m_body = font_metrics(FontId::SansRegular, t.body_px);
     let row_h = (m_body.line_height as usize + 18).clamp(36, 48);
-    (mid_h.saturating_sub(14) / row_h).max(1)
+    (mid_h.saturating_sub(14 + hdr_h) / row_h).max(1)
 }
 
 pub fn category_for_row(row: usize) -> usize {
@@ -104,7 +115,7 @@ pub fn render_settings(
     let (mid_outer, foot_r) = split_bot(rest1, foot_h, 0);
     let mid_r = inset_rect(mid_outer, t.sp_md, t.sp_sm);
 
-    let sb_w = if w >= 520 { 136usize } else { 108usize };
+    let sb_w = sidebar_preferred_w(t, w, &SETTINGS_CATS);
     let (sb_r, list_r) = split_left(mid_r, sb_w, t.sp_sm);
 
     let mut c = win.canvas();
@@ -187,26 +198,49 @@ pub fn render_settings(
     }
 
     // Left category sidebar
-    let mut cat = category_for_row(view.sel_row);
-    let cats: [(&[u8], IconKind); 4] = [
-        (b"Workspace", IconKind::LayoutTiled),
-        (b"Input", IconKind::Sliders),
-        (b"Appearance", IconKind::Sun),
-        (b"Security", IconKind::Shield),
-    ];
-    if sidebar_nav(&mut c, &mut ui, 30, sb_r, &cats, &mut cat) {
+    let mut cat = category_for_row(view.sel_row).min(SETTINGS_CATS.len() - 1);
+    if sidebar_nav(&mut c, &mut ui, 30, sb_r, &SETTINGS_CATS, &mut cat) {
         act = SettingsAction::SelectCategory(cat);
     }
 
     // Right settings list card
     c.fill_bordered_rrect_aa(list_r, t.r_md, t.bg_card, t.border_subtle);
+    let hdr_h = if sb_w < 104 && list_r.h >= 26 {
+        let bh = 24usize.min(list_r.h.saturating_sub(8));
+        let hdr_r = Rect::new(list_r.x + 8, list_r.y + 4, list_r.w.saturating_sub(16), bh);
+        c.fill_rrect_aa(hdr_r, t.r_sm, t.bg_card_alt, 235);
+        let active_cat = SETTINGS_CATS[cat];
+        if bh >= 16 {
+            draw_vector_icon(
+                &mut c,
+                Rect::new(hdr_r.x + 8, hdr_r.y + (bh.saturating_sub(14)) / 2, 14, 14),
+                active_cat.1,
+                t.fg_primary,
+                t.accent_fg,
+            );
+        }
+        let hm = font_metrics(FontId::SansSemiBold, t.caption_px);
+        let hy = hdr_r.y as i32 + ((hdr_r.h as i32 - (hm.ascent + hm.descent)) / 2);
+        let mut hc = c.sub_clip(hdr_r);
+        hc.draw_text(
+            (hdr_r.x + 28) as i32,
+            hy,
+            FontId::SansSemiBold,
+            t.caption_px,
+            active_cat.0,
+            t.fg_primary,
+        );
+        bh + 4
+    } else {
+        0usize
+    };
     let m_body = font_metrics(FontId::SansRegular, t.body_px);
     let row_h = (m_body.line_height as usize + 18).clamp(36, 48);
     let rows_area = Rect::new(
         list_r.x + 8,
-        list_r.y + 7,
+        list_r.y + 7 + hdr_h,
         list_r.w.saturating_sub(22),
-        list_r.h.saturating_sub(14),
+        list_r.h.saturating_sub(14 + hdr_h),
     );
     let vis_rows = (rows_area.h / row_h).max(1);
     let light_mode = (view.prefs.theme_flags & 4) != 0;
@@ -416,7 +450,9 @@ pub fn render_settings(
         t.border_strong,
     );
 
+    let hov_id = ui.hovered_id();
     ui.finish();
+    sidebar_tooltip_overlay(&mut c, t, sb_r, &SETTINGS_CATS, 30, hov_id);
 
     // Footer bar
     c.fill_rect(foot_r, t.bg_sidebar);
@@ -426,7 +462,7 @@ pub fn render_settings(
     let hint = b"[Up/Down] Select  [1-9,0] Edit  [H] Help  [Q] Close";
     let hw = measure_text(FontId::SansRegular, t.caption_px, hint).max(0) as usize;
     let show_msg = if view.status_msg.is_empty() {
-        b"Live DRY Glass 2.0 Settings" as &[u8]
+        b"Live DRY Glass 2.1 Settings" as &[u8]
     } else {
         view.status_msg
     };

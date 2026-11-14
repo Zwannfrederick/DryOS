@@ -300,7 +300,8 @@ impl WindowManager {
                 let mut stack_k = 0usize;
                 for z in 0..self.z_len {
                     let idx = self.z_stack[z];
-                    if self.windows[idx].role != WindowRole::Normal {
+                    let w = &self.windows[idx];
+                    if !w.allocated || !w.visible || w.role != WindowRole::Normal {
                         continue;
                     }
                     let old_o = self.windows[idx].outer_rect();

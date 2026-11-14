@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! Window Manager Input Routing & Event Dispatch (`Milestone 2A-2`–`DRY Glass 2.0`).
 
-use crate::action::{AppId, DesktopAction, APP_COUNT};
+use crate::action::{AppId, DesktopAction};
 use crate::gfx::{DirtyRegion, Rect};
 use crate::glass::DOCK_CLEARANCE;
 use crate::input::{InputEvent, InputEventKind, MOD_ALT, MOUSE_BTN_LEFT};
@@ -170,33 +170,28 @@ impl WindowManager {
         if let Some(act) = crate::glass::overlays::handle_overlay_click(self, scene_dirty) {
             return act;
         }
-        if self.cursor_y < TOPBAR_H {
-            if self.p3_mode {
-                for idx in 0..APP_COUNT {
-                    if self
-                        .topbar_launcher_pill_rect(idx)
-                        .contains(self.cursor_x, self.cursor_y)
-                    {
-                        return self.enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(
-                            AppId::ALL[idx],
-                        ));
-                    }
-                }
-            }
-            if self.topbar_mode_pill_rect().contains(self.cursor_x, self.cursor_y) {
-                let m = if self.p3_mode {
-                    self.set_layout_mode(self.layout.next_mode(), scene_dirty)
-                } else {
-                    self.toggle_tiling(scene_dirty)
-                };
-                return WmInputAction::LayoutToggled(m);
-            }
+        if self.cursor_y < TOPBAR_H
+            && self.topbar_mode_pill_rect().contains(self.cursor_x, self.cursor_y)
+        {
+            let m = if self.p3_mode {
+                self.set_layout_mode(self.layout.next_mode(), scene_dirty)
+            } else {
+                self.toggle_tiling(scene_dirty)
+            };
+            return WmInputAction::LayoutToggled(m);
         }
         if let Some(tab_slot) = self.hit_test_tabstrip(self.cursor_x, self.cursor_y) {
             let _ = self.focus_and_raise(tab_slot, scene_dirty);
             return WmInputAction::FocusChanged(self.windows[tab_slot].id);
         }
         if let Some((slot_idx, part)) = self.hit_test_topmost(self.cursor_x, self.cursor_y) {
+            if part == HitPart::MinimizeButton {
+                let _ = self.minimize_slot(slot_idx, scene_dirty);
+                if let Some(new_f) = self.focused_slot() {
+                    return WmInputAction::FocusChanged(self.windows[new_f].id);
+                }
+                return WmInputAction::None;
+            }
             let focus_changed = self.focus_and_raise(slot_idx, scene_dirty);
             let win_id = self.windows[slot_idx].id;
             match part {
@@ -204,6 +199,7 @@ impl WindowManager {
                     self.windows[slot_idx].close_requested = true;
                     return WmInputAction::CloseRequested(win_id);
                 }
+                HitPart::MinimizeButton => return WmInputAction::None,
                 HitPart::TitleBar => {
                     if self.layout != LayoutMode::Floating
                         && self.windows[slot_idx].role == WindowRole::Normal
@@ -298,6 +294,26 @@ impl WindowManager {
         if (ev.modifiers & MOD_ALT) != 0 {
             if self.p3_mode {
                 let scan7 = (ev.scancode & 0x7f) as u8;
+                if ev.ascii == b'w' || ev.ascii == b'W' || scan7 == 0x11 {
+                    crate::glass::overview::toggle_overview(self, scene_dirty);
+                    return WmInputAction::None;
+                }
+                if self.glass.overview_open
+                    && (ev.ascii == b'm' || ev.ascii == b'M' || scan7 == 0x32)
+                {
+                    if let Some(act) = crate::glass::overlays::handle_overlay_key(self, ev, scene_dirty) {
+                        return act;
+                    }
+                }
+                if ev.ascii == b'm' || ev.ascii == b'M' || scan7 == 0x32 {
+                    if let Some(f_slot) = self.focused_slot() {
+                        let _ = self.minimize_slot(f_slot, scene_dirty);
+                        if let Some(new_f) = self.focused_slot() {
+                            return WmInputAction::FocusChanged(self.windows[new_f].id);
+                        }
+                    }
+                    return WmInputAction::None;
+                }
                 if ev.ascii == b' ' || scan7 == 0x39 {
                     crate::glass::overlays::toggle_launcher(self, scene_dirty);
                     return WmInputAction::None;
@@ -401,6 +417,9 @@ impl WindowManager {
             }
             InputEventKind::MouseButtonUp => self.handle_mouse_button_up(ev, scene_dirty),
             InputEventKind::MouseScroll => {
+                if crate::glass::overview::handle_overview_scroll(self, ev.dy, scene_dirty) {
+                    return WmInputAction::None;
+                }
                 let target_slot = self
                     .hit_test_topmost(self.cursor_x, self.cursor_y)
                     .map(|(s, _)| s)

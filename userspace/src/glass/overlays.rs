@@ -106,7 +106,8 @@ pub fn notif_clear_rect(wm: &WindowManager) -> Rect {
     Rect::new(p.x + p.w - 72, p.y + 10, 58, 22)
 }
 
-fn contains_ascii_icase(haystack: &[u8], needle: &[u8]) -> bool {
+#[inline]
+pub(crate) fn contains_ascii_icase(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
@@ -141,7 +142,7 @@ pub fn filter_launcher_apps(wm: &WindowManager, out: &mut [AppId; APP_COUNT]) ->
     n
 }
 
-fn log_glass_toggle(kind: &[u8], open: bool) {
+pub(crate) fn log_glass_toggle(kind: &[u8], open: bool) {
     let mut lb = LineBuilder::new();
     lb.push_bytes(b"[DRY-GLASS] ");
     lb.push_bytes(kind);
@@ -151,12 +152,16 @@ fn log_glass_toggle(kind: &[u8], open: bool) {
 }
 
 #[inline]
-fn pad_overlay(r: Rect) -> Rect {
+pub(crate) fn pad_overlay(r: Rect) -> Rect {
     Rect::new(r.x.saturating_sub(8), r.y.saturating_sub(6), r.w + 16, r.h + 16)
 }
 
 pub fn toggle_launcher(wm: &mut WindowManager, dirty: &mut DirtyRegion) {
     let next = !wm.glass.launcher_open;
+    if wm.glass.overview_open {
+        dirty.mark(pad_overlay(crate::glass::overview::overview_modal_rect(wm)));
+        log_glass_toggle(b"OVERVIEW", false);
+    }
     if wm.glass.qs_open {
         dirty.mark(pad_overlay(qs_panel_rect(wm)));
     }
@@ -171,6 +176,11 @@ pub fn toggle_launcher(wm: &mut WindowManager, dirty: &mut DirtyRegion) {
 }
 
 pub fn close_all_overlays(wm: &mut WindowManager, dirty: &mut DirtyRegion) {
+    if wm.glass.overview_open {
+        dirty.mark(pad_overlay(crate::glass::overview::overview_modal_rect(wm)));
+        log_glass_toggle(b"OVERVIEW", false);
+    }
+
     if wm.glass.launcher_open {
         dirty.mark(pad_overlay(launcher_modal_rect(wm)));
         log_glass_toggle(b"LAUNCHER", false);
@@ -295,6 +305,18 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
             toggle_launcher(wm, dirty);
             return Some(WmInputAction::None);
         }
+        if let Some(hit) = crate::glass::window_strip::hit_test_adaptive_strip(wm, wm.cursor_x, wm.cursor_y) {
+            return Some(match hit {
+                crate::glass::window_strip::StripHit::ToggleOverview => {
+                    crate::glass::overview::toggle_overview(wm, dirty);
+                    WmInputAction::None
+                }
+                crate::glass::window_strip::StripHit::App(app) => {
+                    close_all_overlays(wm, dirty);
+                    wm.enqueue_desktop_action(DesktopAction::LaunchOrFocusApp(app))
+                }
+            });
+        }
         if topbar_qs_pill_rect(wm).contains(wm.cursor_x, wm.cursor_y) {
             let next = !wm.glass.qs_open;
             close_all_overlays(wm, dirty);
@@ -315,6 +337,12 @@ pub fn handle_overlay_click(wm: &mut WindowManager, dirty: &mut DirtyRegion) -> 
             dirty.mark(Rect::new(0, 0, wm.screen_w, TOPBAR_H));
             log_glass_toggle(b"NOTIF", next);
             return Some(WmInputAction::None);
+        }
+    }
+
+    if wm.glass.overview_open {
+        if let Some(act) = crate::glass::overview::handle_overview_click(wm, dirty) {
+            return Some(act);
         }
     }
 
@@ -393,10 +421,14 @@ pub fn handle_overlay_key(wm: &mut WindowManager, ev: InputEvent, dirty: &mut Di
     if !wm.p3_mode || !wm.glass.any_overlay_open() {
         return None;
     }
+    if wm.glass.overview_open {
+        return crate::glass::overview::handle_overview_key(wm, ev, dirty);
+    }
     if ev.keycode == KEY_ESC {
         close_all_overlays(wm, dirty);
         return Some(WmInputAction::None);
     }
+
     if wm.glass.launcher_open {
         let mut apps = [AppId::Terminal; APP_COUNT];
         let n = filter_launcher_apps(wm, &mut apps);
@@ -457,6 +489,10 @@ pub fn paint_overlays(
     let blur = !wm.low_overhead_glass && tokens.mode != ThemeMode::HighContrast;
     let ui = UiTheme::new(tokens.mode, wm.dpi_pct());
     let fmt = PixelFormat::from_fb(&comp.fb_info);
+
+    if wm.glass.overview_open {
+        crate::glass::overview::paint_overview(comp, wm, tokens, clip, blur);
+    }
     if wm.glass.launcher_open {
         paint_launcher(comp, wm, tokens, &ui, fmt, clip, blur);
     }
@@ -468,7 +504,7 @@ pub fn paint_overlays(
     }
 }
 
-fn paint_frosted_panel(
+pub(crate) fn paint_frosted_panel(
     comp: &mut DesktopCompositor,
     tokens: &GlassTokens,
     ui: &UiTheme,

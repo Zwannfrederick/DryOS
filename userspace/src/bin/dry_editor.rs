@@ -7,6 +7,7 @@
 
 use dry_userspace::apps::editor_ui::{render_editor, EditorAction, EditorView};
 use dry_userspace::apps::{app_log_line, app_poll_tsc, PixelAppWindow, PointerStep};
+use dry_userspace::gfx::Rect;
 use dry_userspace::input::{InputEvent, InputEventKind, MOD_CTRL};
 use dry_userspace::keymap::{
     KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_UP,
@@ -25,6 +26,8 @@ use dry_userspace::{
 };
 
 const EDITOR_SURF_VADDR: u64 = 0x1c00_0000;
+const EDITOR_SCRATCH_SURF_VADDR: u64 = 0x1e00_0000;
+const ALLOW_MULTI_FLAG: u64 = 1 << 17;
 const WIN_W: u16 = 640;
 const WIN_H: u16 = 400;
 const INIT_X: u64 = 240;
@@ -351,7 +354,7 @@ impl EditorState {
         (true, false)
     }
 
-    fn render_frame(&mut self, win: &mut PixelAppWindow, step: PointerStep) -> EditorAction {
+    fn render_frame(&mut self, win: &mut PixelAppWindow, scratch_open: bool, step: PointerStep) -> EditorAction {
         let mut line_slices: [&[u8]; MAX_LINES] = [&[]; MAX_LINES];
         for (r, slot) in line_slices.iter_mut().enumerate().take(self.line_count) {
             let len = (self.lens[r] as usize).min(MAX_LINE_COLS);
@@ -362,6 +365,7 @@ impl EditorState {
         let mut view = EditorView {
             path,
             persist_ok: self.persist_ok,
+            scratch_open,
             line_slices: &line_slices[..self.line_count],
             cur_row: self.cur_row,
             cur_col: self.cur_col,
@@ -373,24 +377,42 @@ impl EditorState {
         render_editor(win, &mut view, step)
     }
 
-    fn apply_action(&mut self, act: EditorAction) -> bool {
+    fn apply_action(&mut self, act: EditorAction) -> (bool, bool) {
         match act {
-            EditorAction::None => false,
+            EditorAction::None => (false, false),
             EditorAction::Save => {
                 self.save_notes();
-                true
+                (true, false)
             }
             EditorAction::Clear => {
                 self.clear_doc();
-                true
+                (true, false)
             }
+            EditorAction::ToggleScratch => (true, true),
             EditorAction::MoveCursor(r, col) => {
                 self.cur_row = r.min(self.line_count.saturating_sub(1));
                 self.cur_col = col.min(self.lens[self.cur_row] as usize);
-                true
+                (true, false)
             }
         }
     }
+}
+
+fn render_scratch_window(swin: &mut PixelAppWindow, buf: &[u8]) {
+    let t = swin.theme();
+    let mut c = swin.canvas();
+    c.clear(t.bg_app);
+    c.fill_rect(Rect::new(0, 0, swin.w as usize, 34), t.bg_sidebar);
+    c.draw_text(14, 9, FontId::SansSemiBold, t.body_px, b"Quick Scratchpad (#2)", t.fg_primary);
+    c.fill_bordered_rrect_aa(
+        Rect::new(12, 44, (swin.w as usize).saturating_sub(24), (swin.h as usize).saturating_sub(58)),
+        t.r_md,
+        t.bg_card,
+        t.border_subtle,
+    );
+    let line = if buf.is_empty() { b"Type quick notes here (separate window)." } else { buf };
+    c.draw_text(22, 58, FontId::MonoRegular, t.mono_px, line, t.fg_primary);
+    swin.publish_initial();
 }
 
 #[unsafe(no_mangle)]
@@ -429,7 +451,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         .unwrap_or_else(|_| sys_exit(243));
     let mut ed = EditorState::new(vfs_ep, persist_ok);
     ed.load_initial();
-    let _ = ed.render_frame(&mut win, PointerStep::default());
+    let _ = ed.render_frame(&mut win, false, PointerStep::default());
     win.publish_initial();
     let win_id = win.attach(
         disp_ep_cap,
@@ -440,6 +462,9 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         TITLE_KIND_EDITOR,
         0,
     );
+    let mut scratch_win: Option<PixelAppWindow> = None;
+    let mut scratch_buf = [0u8; 48];
+    let mut scratch_len = 0usize;
 
     let mut rlb = LineBuilder::new();
     rlb.push_bytes(b"[DRY-EDITOR] Ready in CPL3 Userspace win_id=");
@@ -452,6 +477,8 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
 
     loop {
         let mut dirty = false;
+        let mut scratch_dirty = false;
+        let mut toggle_scratch = false;
         let mut exit_now = false;
         if win_id != 0 {
             while let Ok((ptag, _, pmrs)) = sys_ipc_call_inline(
@@ -471,18 +498,28 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                         ed.ensure_cursor_visible(&win);
                         dirty = true;
                     } else if ev.kind == InputEventKind::KeyPress {
-                        let (d, q) = ed.handle_key(ev, &win);
-                        dirty |= d;
-                        if q {
-                            exit_now = true;
-                            break;
+                        if (ev.modifiers & MOD_CTRL) != 0
+                            && (ev.ascii == 0x0e
+                                || ev.ascii == b'n'
+                                || ev.ascii == b'N'
+                                || (ev.scancode & 0x7f) == 0x31)
+                        {
+                            toggle_scratch = true;
+                        } else {
+                            let (d, q) = ed.handle_key(ev, &win);
+                            dirty |= d;
+                            if q {
+                                exit_now = true;
+                                break;
+                            }
                         }
                     } else {
                         let step = win.ingest_pointer(ev);
                         if step.clicked || step.scroll_dy != 0 {
-                            let act = ed.render_frame(&mut win, step);
-                            let _ = ed.apply_action(act);
-                            dirty = true;
+                            let act = ed.render_frame(&mut win, scratch_win.is_some(), step);
+                            let (d, tog) = ed.apply_action(act);
+                            dirty |= d;
+                            toggle_scratch |= tog;
                         } else if step.redraw {
                             dirty = true;
                         }
@@ -492,14 +529,86 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                 }
             }
         }
+        if let Some(ref mut swin) = scratch_win {
+            let mut close_scratch = false;
+            while swin.win_id != 0 {
+                let Ok((ptag, _, pmrs)) = sys_ipc_call_inline(
+                    disp_ep_cap,
+                    pack_msg_tag(IPC_OP_WIN_POLL_EVENT, 0, 1, 0),
+                    [swin.win_id as u64, 0, 0, 0],
+                    0,
+                ) else {
+                    break;
+                };
+                let plbl = msg_tag_label(ptag);
+                if plbl == IPC_OP_WIN_CLOSED {
+                    close_scratch = true;
+                    break;
+                }
+                if plbl == IPC_OP_INPUT_EVENT {
+                    let (ev, _) = InputEvent::from_ipc_mrs(pmrs);
+                    if swin.handle_window_config(ev) {
+                        scratch_dirty = true;
+                    } else if ev.kind == InputEventKind::KeyPress {
+                        if ev.keycode == KEY_ESC {
+                            close_scratch = true;
+                            break;
+                        } else if ev.keycode == KEY_BACKSPACE && scratch_len > 0 {
+                            scratch_len -= 1;
+                            scratch_dirty = true;
+                        } else if (0x20..=0x7e).contains(&ev.ascii) && scratch_len < scratch_buf.len() {
+                            scratch_buf[scratch_len] = ev.ascii;
+                            scratch_len += 1;
+                            scratch_dirty = true;
+                        }
+                    } else {
+                        let _ = swin.ingest_pointer(ev);
+                    }
+                } else {
+                    break;
+                }
+            }
+            if close_scratch {
+                toggle_scratch = true;
+            }
+        }
+        if toggle_scratch {
+            if let Some(swin) = scratch_win.take() {
+                swin.teardown(disp_ep_cap);
+            } else if let Ok(mut swin) = PixelAppWindow::alloc_and_map(
+                EDITOR_SCRATCH_SURF_VADDR,
+                400,
+                220,
+                win.theme_flags,
+            ) {
+                render_scratch_window(&mut swin, &scratch_buf[..scratch_len]);
+                let _ = swin.attach(
+                    disp_ep_cap,
+                    notif_cap,
+                    INIT_X + 70,
+                    INIT_Y + 48,
+                    WindowRole::Normal,
+                    TITLE_KIND_EDITOR,
+                    ALLOW_MULTI_FLAG,
+                );
+                scratch_win = Some(swin);
+            }
+            dirty = true;
+        }
         if win.sync_prefs(sup_ep_cap) {
             dirty = true;
         }
         if exit_now {
             break;
         }
+        if let Some(ref mut swin) = scratch_win {
+            if swin.sync_prefs(sup_ep_cap) || scratch_dirty {
+                render_scratch_window(swin, &scratch_buf[..scratch_len]);
+                let _ = swin.present_full(disp_ep_cap);
+            }
+        }
         if dirty && win_id != 0 {
-            let _ = ed.render_frame(&mut win, PointerStep::default());
+            let _ = ed.render_frame(&mut win, scratch_win.is_some(), PointerStep::default());
             let _ = win.present_full(disp_ep_cap);
         }
         if let Ok(bits) = sys_notify_wait(notif_cap, 0, poll_tsc) {
@@ -509,6 +618,9 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         }
     }
 
+    if let Some(swin) = scratch_win.take() {
+        swin.teardown(disp_ep_cap);
+    }
     win.teardown(disp_ep_cap);
     if vfs_ep != 0 {
         let _ = sys_cap_revoke(vfs_ep, 1);

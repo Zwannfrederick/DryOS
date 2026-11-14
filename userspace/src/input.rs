@@ -206,6 +206,14 @@ impl<const N: usize> InputRingQueue<N> {
         self.coalesced_moves
     }
 
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+        self.overflow_count = 0;
+        self.coalesced_moves = 0;
+    }
+
     /// Enqueue `ev` strictly in FIFO order; drops incoming event and increments `overflow_count` if full.
     #[inline]
     pub fn push(&mut self, ev: InputEvent) -> bool {

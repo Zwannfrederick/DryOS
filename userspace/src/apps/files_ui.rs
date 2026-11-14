@@ -6,7 +6,8 @@ use crate::gfx::Rect;
 use crate::shell::LineBuilder;
 use crate::ttf::{font_metrics, measure_text, FontId};
 use crate::ui::containers::{
-    breadcrumb_bar, card, list_row, sidebar_nav, status_badge, table_header,
+    breadcrumb_bar, card, list_row, sidebar_nav, sidebar_preferred_w, sidebar_tooltip_overlay,
+    status_badge, table_header,
 };
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::layout::{inset_rect, split_bot, split_left, split_top, UiCtx};
@@ -54,11 +55,23 @@ pub struct FilesView<'a> {
     pub status_warn: bool,
 }
 
+fn files_nav_items(persist_available: bool) -> [(&'static [u8], IconKind); 3] {
+    [
+        (b"/boot", IconKind::Shield),
+        (b"/ram", IconKind::Memory),
+        (
+            b"/persist",
+            if persist_available { IconKind::Folder } else { IconKind::Warning },
+        ),
+    ]
+}
+
 pub fn files_vis_rows(t: UiTheme, w: usize, h: usize) -> usize {
     let top_h = (t.ctrl_h + 12).clamp(40, 48);
     let foot_h = 32usize;
     let main_h = h.saturating_sub(top_h + foot_h + t.sp_sm * 2);
-    let sb_w = if w >= 520 { 132usize } else { 108usize };
+    let nav_items = files_nav_items(true);
+    let sb_w = sidebar_preferred_w(t, w, &nav_items);
     let right_w = w.saturating_sub(t.sp_md * 2 + sb_w + t.sp_sm);
     let list_h = if right_w >= 400 { main_h } else { main_h * 56 / 100 };
     let row_h = (font_metrics(FontId::SansRegular, t.body_px).line_height as usize + 8).max(24);
@@ -81,7 +94,8 @@ pub fn render_files(
     let (mid_outer, foot_r) = split_bot(rest1, foot_h, 0);
     let mid_r = inset_rect(mid_outer, t.sp_md, t.sp_sm);
 
-    let sb_w = if w >= 520 { 132usize } else { 108usize };
+    let nav_items = files_nav_items(view.persist_available);
+    let sb_w = sidebar_preferred_w(t, w, &nav_items);
     let (sb_r, content_r) = split_left(mid_r, sb_w, t.sp_sm);
     let (list_r, preview_r) = if content_r.w >= 400 {
         split_left(content_r, content_r.w * 53 / 100, t.sp_sm)
@@ -153,18 +167,35 @@ pub fn render_files(
     };
     let badge_w = measure_text(FontId::SansSemiBold, t.caption_px, badge_lbl).max(0) as usize + 22;
     let bc_max_w = rx.saturating_sub(t.sp_md + badge_w + 10);
-    if bc_max_w >= 110 {
-        let bc_r = Rect::new(t.sp_md, btn_y, bc_max_w.min(200), btn_h);
+    let bc_need = (measure_text(FontId::SansSemiBold, t.body_px, b"VFS > persist").max(80) as usize) + 52;
+    if bc_max_w >= bc_need {
+        let bc_r = Rect::new(t.sp_md, btn_y, bc_max_w.min(220), btn_h);
         let _ = breadcrumb_bar(&mut c, &mut ui, 20, bc_r, &[b"VFS", mount_lbl]);
         let bx = bc_r.x + bc_r.w + 8;
         if bx + badge_w <= rx {
             status_badge(&mut c, t, bx, top_r.y + (top_h.saturating_sub(20)) / 2, badge_lbl, badge_kind);
         }
     } else if rx > t.sp_md + badge_w + 4 {
+        let mut bx = t.sp_md;
+        if sb_r.w < 104 {
+            let act_mount = nav_items[view.mount_idx.min(nav_items.len() - 1)].0;
+            let mw = measure_text(FontId::SansSemiBold, t.caption_px, act_mount).max(0) as usize + 22;
+            if bx + mw + 6 + badge_w <= rx {
+                status_badge(
+                    &mut c,
+                    t,
+                    bx,
+                    top_r.y + (top_h.saturating_sub(20)) / 2,
+                    act_mount,
+                    StatusKind::Accent,
+                );
+                bx += mw + 6;
+            }
+        }
         status_badge(
             &mut c,
             t,
-            t.sp_md,
+            bx,
             top_r.y + (top_h.saturating_sub(20)) / 2,
             badge_lbl,
             badge_kind,
@@ -173,14 +204,6 @@ pub fn render_files(
 
     // Left sidebar
     let mut sel_mount = view.mount_idx;
-    let nav_items: [(&[u8], IconKind); 3] = [
-        (b"/boot", IconKind::Shield),
-        (b"/ram", IconKind::Memory),
-        (
-            b"/persist",
-            if view.persist_available { IconKind::Folder } else { IconKind::Warning },
-        ),
-    ];
     if sidebar_nav(&mut c, &mut ui, 30, sb_r, &nav_items, &mut sel_mount) {
         act = FilesAction::SelectMount(sel_mount);
     }
@@ -202,63 +225,66 @@ pub fn render_files(
     let row_h = (font_metrics(FontId::SansRegular, t.body_px).line_height as usize + 8).max(24);
     let vis_rows = (rows_area.h / row_h).max(1);
     let m_body = font_metrics(FontId::SansRegular, t.body_px);
+    let mut rc = c.sub_clip(rows_area);
 
-    for r in 0..vis_rows {
-        let idx = view.list_scroll + r;
-        if idx >= view.entries.len() {
-            break;
-        }
-        let rr = Rect::new(rows_area.x, rows_area.y + r * row_h, rows_area.w, row_h.saturating_sub(2));
-        let selected = idx == view.sel_idx;
-        if list_row(&mut c, &mut ui, 50 + r as u16, rr, selected, (idx & 1) == 1) {
-            act = if selected {
-                FilesAction::OpenEntry(idx)
+    if rows_area.h >= 12 {
+        for r in 0..vis_rows {
+            let idx = view.list_scroll + r;
+            if idx >= view.entries.len() {
+                break;
+            }
+            let rr = Rect::new(rows_area.x, rows_area.y + r * row_h, rows_area.w, row_h.saturating_sub(2));
+            let selected = idx == view.sel_idx;
+            if list_row(&mut rc, &mut ui, 50 + r as u16, rr, selected, (idx & 1) == 1) {
+                act = if selected {
+                    FilesAction::OpenEntry(idx)
+                } else {
+                    FilesAction::SelectEntry(idx)
+                };
+            }
+
+            let e = &view.entries[idx];
+            let is_priv = (e.flags & VFS_FLAG_PRIVATE) != 0;
+            let ic = if is_priv { IconKind::Lock } else { IconKind::File };
+            let ic_rgb = if is_priv { t.warn_fg } else if selected { t.accent_fg } else { t.fg_secondary };
+            draw_vector_icon(
+                &mut rc,
+                Rect::new(rr.x + 6, rr.y + (rr.h.saturating_sub(14)) / 2, 14, 14),
+                ic,
+                ic_rgb,
+                t.accent_fg,
+            );
+
+            let mut sz_lb = LineBuilder::new();
+            if is_priv {
+                sz_lb.push_bytes(b"PRIV");
             } else {
-                FilesAction::SelectEntry(idx)
-            };
+                sz_lb.push_u64(e.size_bytes as u64);
+                sz_lb.push_byte(b'B');
+            }
+            let sz_w = measure_text(FontId::MonoRegular, t.caption_px, sz_lb.as_bytes()).max(0) as usize;
+            let ty = rr.y as i32 + ((rr.h as i32 - (m_body.ascent + m_body.descent)) / 2);
+            let sz_x = (rr.x + rr.w).saturating_sub(sz_w + 6);
+            rc.draw_text(
+                sz_x as i32,
+                ty + 1,
+                FontId::MonoRegular,
+                t.caption_px,
+                sz_lb.as_bytes(),
+                if is_priv { t.warn_fg } else { t.fg_muted },
+            );
+
+            let name_max = sz_x.saturating_sub(rr.x + 28);
+            rc.draw_text_ellipsis(
+                (rr.x + 24) as i32,
+                ty,
+                name_max as i32,
+                if selected { FontId::SansSemiBold } else { FontId::SansRegular },
+                t.body_px,
+                e.name_bytes(),
+                if is_priv { t.warn_fg } else { t.fg_primary },
+            );
         }
-
-        let e = &view.entries[idx];
-        let is_priv = (e.flags & VFS_FLAG_PRIVATE) != 0;
-        let ic = if is_priv { IconKind::Lock } else { IconKind::File };
-        let ic_rgb = if is_priv { t.warn_fg } else if selected { t.accent_fg } else { t.fg_secondary };
-        draw_vector_icon(
-            &mut c,
-            Rect::new(rr.x + 6, rr.y + (rr.h.saturating_sub(14)) / 2, 14, 14),
-            ic,
-            ic_rgb,
-            t.accent_fg,
-        );
-
-        let mut sz_lb = LineBuilder::new();
-        if is_priv {
-            sz_lb.push_bytes(b"PRIV");
-        } else {
-            sz_lb.push_u64(e.size_bytes as u64);
-            sz_lb.push_byte(b'B');
-        }
-        let sz_w = measure_text(FontId::MonoRegular, t.caption_px, sz_lb.as_bytes()).max(0) as usize;
-        let ty = rr.y as i32 + ((rr.h as i32 - (m_body.ascent + m_body.descent)) / 2);
-        let sz_x = (rr.x + rr.w).saturating_sub(sz_w + 6);
-        c.draw_text(
-            sz_x as i32,
-            ty + 1,
-            FontId::MonoRegular,
-            t.caption_px,
-            sz_lb.as_bytes(),
-            if is_priv { t.warn_fg } else { t.fg_muted },
-        );
-
-        let name_max = sz_x.saturating_sub(rr.x + 28);
-        c.draw_text_ellipsis(
-            (rr.x + 24) as i32,
-            ty,
-            name_max as i32,
-            if selected { FontId::SansSemiBold } else { FontId::SansRegular },
-            t.body_px,
-            e.name_bytes(),
-            if is_priv { t.warn_fg } else { t.fg_primary },
-        );
     }
 
     let sb_track = Rect::new(
@@ -277,6 +303,7 @@ pub fn render_files(
         t.border_strong,
     );
 
+    let hov_id = ui.hovered_id();
     ui.finish();
 
     // File Preview Card
@@ -366,6 +393,7 @@ pub fn render_files(
         c.draw_text(hx as i32, fy, FontId::SansRegular, t.caption_px, hint, t.fg_muted);
     }
 
+    sidebar_tooltip_overlay(&mut c, t, sb_r, &nav_items, 30, hov_id);
     act
 }
 

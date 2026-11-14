@@ -498,7 +498,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     };
     app.query_live_prefs();
     app.sync_window_themes();
-    app.set_status(b"Live DRY Glass 2.0 Settings");
+    app.set_status(b"Live DRY Glass 2.1 Settings");
 
     let init_v = SettingsView {
         prefs: app.prefs,

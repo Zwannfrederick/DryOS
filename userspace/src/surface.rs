@@ -195,6 +195,20 @@ impl SurfaceSnapshot {
         }
     }
 
+    pub fn reset_in_place(&mut self) {
+        self.valid = false;
+        self.seq = 0;
+        self.cols = TERM_COLS as u16;
+        self.rows = TERM_ROWS as u16;
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        self.cursor_visible = false;
+        self.cmd_count = 0;
+        self.ext_irqs_snap = 0;
+        self.uptime_sec_snap = 0;
+        self.cells.fill(SurfaceCell::BLANK);
+    }
+
     /// Atomically snapshot `[rmin..=rmax]` from a `USER_RO` shared surface at `ro_vaddr` into `self`
     /// using `scratch` to prevent torn updates if a client mutates shared memory concurrently.
     ///

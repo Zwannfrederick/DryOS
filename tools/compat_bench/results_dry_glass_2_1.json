@@ -1,0 +1,68 @@
+{
+  "milestone": "DRY-Glass-2.1",
+  "tracks": [
+    "A",
+    "B"
+  ],
+  "screenshots_total": 9,
+  "p11a": {
+    "resolution": "1280x800",
+    "windows_opened": 7,
+    "leaked_frames": 0,
+    "irq12": 5,
+    "screenshots": {
+      "glass21_1280x800_grouped_strip.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "glass21_1280x800_overview_grouped.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "glass21_1280x800_overview_search_note.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "glass21_1280x800_daylight_125dpi.png": {
+        "non_bg_px": 1023287,
+        "colors": 32
+      },
+      "glass21_1280x800_daylight_150dpi_tiled.png": {
+        "non_bg_px": 1023281,
+        "colors": 32
+      },
+      "glass21_1280x800_hc_150dpi_tiled.png": {
+        "non_bg_px": 1023336,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 8.164
+  },
+  "p11b": {
+    "resolution": "1024x768",
+    "dpi_pct": 150,
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass21_1024x768_narrow_150dpi_tiled.png": {
+        "non_bg_px": 786181,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 3.62
+  },
+  "p11c": {
+    "resolution": "1920x1080",
+    "leaked_frames": 0,
+    "screenshots": {
+      "glass21_1920x1080_tiled_workspace.png": {
+        "non_bg_px": 2073133,
+        "colors": 32
+      },
+      "glass21_1920x1080_overview.png": {
+        "non_bg_px": 2073133,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 5.128
+  }
+}

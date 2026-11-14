@@ -47,8 +47,9 @@ use dry_userspace::{
 
 const FB_MAP_VADDR: u64 = 0x1000_0000;
 const SURFACE_BASE_VADDR: u64 = 0x1800_0000;
-const PIXEL_SURF_BASE_VADDR: u64 = 0x1A00_0000;
-const PIXEL_SNAP_BASE_VADDR: u64 = 0x1B00_0000;
+// Reserved 32 MiB windows (16 * 2 MiB slots) below BACKBUF_VADDR (0x2000_0000).
+const PIXEL_SURF_BASE_VADDR: u64 = 0x1820_0000;
+const PIXEL_SNAP_BASE_VADDR: u64 = 0x1A20_0000;
 const BACKBUF_VADDR: u64 = 0x2000_0000;
 const WALLPAPER_VADDR: u64 = 0x3000_0000;
 const TWO_MIB: usize = 2 * 1024 * 1024;
@@ -204,6 +205,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
     alb.push_u64((num_2m * TWO_MIB) as u64);
     log_line(&alb);
     let _ = sys_write_debug(b"[DRY-DISPLAY] P1 Ring 3 desktop compositor active\n");
+    let _ = dry_userspace::glass::overview::run_window_scalability_selftest();
 
     let mut in2comp_lat = LatencyRing::new();
     let mut cursor_lat = LatencyRing::new();
