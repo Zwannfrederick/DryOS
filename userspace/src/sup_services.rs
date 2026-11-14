@@ -168,11 +168,11 @@ pub fn spawn_and_seed_vfs(
 
     let mut seeded = 0u64;
     if boot_info_addr != 0 && boot.boot_manifest_count > 0 {
-        let count = (boot.boot_manifest_count as usize).min(20);
+        let count = (boot.boot_manifest_count as usize).min(crate::vfs_mem::MAX_BOOT_ENTRIES);
         let base_ptr = (boot_info_addr + BOOT_MANIFEST_OFFSET) as *const BootModManifestEntry;
         for i in 0..count {
             // SAFETY: Kernel mapped `0x0070_0000..0x0070_1000` (`4 KiB`) `USER_RO` and wrote
-            // `boot_manifest_count` (`<= 16`) `48 B` `BootModManifestEntry` structs at `+0x100`.
+            // `boot_manifest_count` (`<= 32`) `48 B` `BootModManifestEntry` structs at `+0x100`.
             let entry = unsafe { core::ptr::read_unaligned(base_ptr.add(i)) };
             let nlen = entry
                 .name

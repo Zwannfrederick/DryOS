@@ -11,7 +11,7 @@ use crate::vfs_proto::{
 };
 use crate::{BADGE_SUPERVISOR, EEXIST, EINVAL, ENOENT, ENOSPC, EPERM};
 
-pub const MAX_BOOT_ENTRIES: usize = 20;
+pub const MAX_BOOT_ENTRIES: usize = 36;
 pub const MAX_RAM_INODES: usize = 32;
 pub const MAX_RAM_FILE_BYTES: usize = 2048;
 

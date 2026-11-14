@@ -21,7 +21,9 @@ use crate::irq::{
     ioapic_present, irq_line_delivered, irq_telemetry, mint_root_irq_cap, IRQ_KEYBOARD_PS2,
     IRQ_MOUSE_PS2,
 };
-use crate::limine::{get_boot_module, latched_boot_module_count, latched_boot_module_meta};
+use crate::limine::{
+    get_boot_module, latched_boot_module_count, latched_boot_module_meta, MAX_LATCHED_MODULES,
+};
 use crate::percpu::get_percpu_by_idx;
 use crate::pmm::{flush_all_magazines_quiescent, measure_fragmentation, PageOrder};
 use crate::proc::supervisor::mint_boot_module_cap;
@@ -78,6 +80,11 @@ struct BootModManifestEntry {
     name: [u8; 40],
     size_bytes: u64,
 }
+
+const _: () = assert!(
+    BOOT_MANIFEST_OFFSET + MAX_LATCHED_MODULES * size_of::<BootModManifestEntry>()
+        <= crate::pmm::PAGE_SIZE
+);
 
 /// Launch the live Ring 3 session (`interactive=1`, `desktop=1`, `desktop3=1`, or `desktop4=1`).
 #[inline(never)]
@@ -205,7 +212,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
 
             let (info_fr_cap, info_fh) =
                 cspace_alloc_frame(cs, lbl, lbl, PageOrder::Order4KiB, false, 0)?;
-            let mod_count = latched_boot_module_count().min(16);
+            let mod_count = latched_boot_module_count().min(MAX_LATCHED_MODULES);
             let boot_info = P1InitBootInfo {
                 magic: ROOT_INIT_BOOT_MAGIC,
                 echo_mod_cap: echo_cap.0,

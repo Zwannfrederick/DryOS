@@ -426,7 +426,8 @@ pub fn latch_cmdline_to_static_bss() -> &'static str {
     }
 }
 
-pub const MAX_LATCHED_MODULES: usize = 16;
+/// Boot-module descriptor capacity (`R-18`): `32 * 88 B = 2.75 KiB` of permanent `.bss`, `0` stack.
+pub const MAX_LATCHED_MODULES: usize = 32;
 
 #[derive(Clone, Copy)]
 struct LatchedModule {
@@ -463,7 +464,14 @@ pub fn latch_boot_modules_to_static_bss() -> usize {
     }
     // SAFETY: Executed once on BSP (`CLI`) while `LimineModuleResponse` is mapped.
     unsafe {
-        let count = ((*resp).module_count as usize).min(MAX_LATCHED_MODULES);
+        let count = (*resp).module_count as usize;
+        // Fail loudly instead of silently dropping modules past the table (`R-18`).
+        assert!(
+            count <= MAX_LATCHED_MODULES,
+            "Limine module_count {} exceeds MAX_LATCHED_MODULES {}",
+            count,
+            MAX_LATCHED_MODULES
+        );
         let mods_ptr = (*resp).modules;
         let dst = &mut *STATIC_MODULES.0.get();
         let mut stored = 0usize;
