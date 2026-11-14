@@ -326,6 +326,10 @@ pub fn notif_wait(
                     inner_res = Err(SysError::Revoked);
                     return;
                 }
+                if current_thread_killed(cur_slot) {
+                    inner_res = Err(SysError::Canceled);
+                    return;
+                }
                 let word = n.pending_bits.swap(0, Ordering::AcqRel);
                 if word != 0 {
                     inner_res = Ok(Some(word));
@@ -408,6 +412,11 @@ pub fn notif_wait(
                         n.waiter_slot.store(NO_WAITER, Ordering::Release);
                         n.wait_state.store(WAIT_IDLE, Ordering::Release);
                         terminal = Some(Err(SysError::TimedOut));
+                    } else if current_thread_killed(cur_slot) {
+                        // `AUD-K15`: a killed process must leave an untimed wait.
+                        n.waiter_slot.store(NO_WAITER, Ordering::Release);
+                        n.wait_state.store(WAIT_IDLE, Ordering::Release);
+                        terminal = Some(Err(SysError::Canceled));
                     }
                 }
             });
@@ -449,6 +458,10 @@ pub fn notif_wait(
                     n.waiter_slot.store(NO_WAITER, Ordering::Release);
                     n.wait_state.store(WAIT_IDLE, Ordering::Release);
                     terminal = Some(Err(SysError::TimedOut));
+                } else if current_thread_killed(cur_slot) {
+                    n.waiter_slot.store(NO_WAITER, Ordering::Release);
+                    n.wait_state.store(WAIT_IDLE, Ordering::Release);
+                    terminal = Some(Err(SysError::Canceled));
                 }
             }
         });
@@ -456,6 +469,12 @@ pub fn notif_wait(
             return done;
         }
     }
+}
+
+#[inline]
+fn current_thread_killed(cur_slot: usize) -> bool {
+    let pid = tcb(cur_slot).process_id.load(Ordering::Relaxed);
+    pid != 0 && crate::proc::is_process_kill_requested(pid)
 }
 
 #[inline]

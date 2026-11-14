@@ -46,7 +46,7 @@ impl VaultDiskRecord {
     pub fn is_valid(&self) -> bool {
         self.magic == VAULT_REC_MAGIC
             && self.version == 1
-            && self.pbkdf2_iters >= 256
+            && (256..=65_536).contains(&self.pbkdf2_iters)
             && self.crc32 == self.compute_crc32()
     }
 

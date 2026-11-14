@@ -25,13 +25,13 @@ were denial of service, revocation bypass, and lost wakeups.
 | AUD-K6 | P1 | Priority-donation leak: detaching a stale outgoing edge does not recompute the previous server's `effective_prio` (`sched/donate.rs:186-190`). | OPEN |
 | AUD-K7 | P1 | NMI/#MC use IST 0; an NMI inside the `SYSCALL` entry/exit window runs on the user-chosen `RSP` (`idt.rs:474`). No NMI source exists in QEMU today. | OPEN (needs dedicated IST stacks) |
 | AUD-K8 | P1 | `quiesce_pci_for_cspace` unpins DMA frames without a device reset; `SYS_DEV_MAP` can then re-enable Bus Master with an empty pin table (`pci.rs`). Requires a `RootSystem` `PciDev` holder, which without an IOMMU is kernel-equivalent anyway (`R-03`). | OPEN |
-| AUD-K9 | P1 | `cspace_spawn_tcb` publishes a runnable thread before `insert_root_cap`; `OutOfSlots` (ELF of ~248 pages) leaves an orphan thread (`cspace/objects.rs:710-731`). | OPEN |
+| AUD-K9 | P1 | `cspace_spawn_tcb` publishes a runnable thread before `insert_root_cap`; `OutOfSlots` (ELF of ~248 pages) leaves an orphan thread (`cspace/objects.rs:710-731`). | **FIXED** — `reserve_root_slot` / `abort_root_slot` / `commit_root_slot` reserve the `CNode` slot before spawning the `TCB` (`cspace/mod.rs`, `cspace/objects.rs`). |
 | AUD-K10 | P2 | Slot stuck `Revoking` when object teardown fails after the state change (`cspace/revoke.rs:535-566`); child derived during destroy survives for kinds without teardown. | OPEN |
 | AUD-K11 | P2 | IRQ storm clamp leaves a throttled line unusable until rebind, and rebind resets the storm window (`irq/mod.rs`). | OPEN |
 | AUD-K12 | P2 | Global mapping-record pool is 512 entries, no per-CSpace quota (system-wide map/spawn DoS, `cspace/cap.rs:23`). | OPEN |
-| AUD-K13 | P2 | Stale range record after `copy_to_user` failure in `sys_fb_map`/`sys_dev_map`; `owner_cspace` check-then-store race in `pci.rs`; ELF `seg_end + 0xfff` overflow (`proc/elf.rs:173`). | OPEN |
+| AUD-K13 | P2 | Stale range record after `copy_to_user` failure in `sys_fb_map`/`sys_dev_map`; `owner_cspace` check-then-store race in `pci.rs`; ELF `seg_end + 0xfff` overflow (`proc/elf.rs:173`). | **PARTIAL** — `pci.rs` (`AUD-K13b`) `owner_cspace` claim converted to atomic `compare_exchange` with rollback (`pci.rs`); remaining items OPEN. |
 | AUD-K14 | P2 | Lock-free page-table walk in `uaccess.rs` with `IF=1` may read a freed page-table frame; PMM global lock spins without polling shootdowns. | SUSPECTED |
-| AUD-K15 | P1 | A process killed while blocked in an untimed IPC wait is woken but re-parks; it never terminates and its parent's `SYS_PROC_WAIT` blocks. | See `Milestone 2A-4a` FaultEndpoint work (kill-aware waits). |
+| AUD-K15 | P1 | A process killed while blocked in an untimed IPC wait is woken but re-parks; it never terminates and its parent's `SYS_PROC_WAIT` blocks. | **FIXED+TEST** — pre/post-park `current_thread_killed` and first-iteration `try_resolve_ipc_wait` checks in `ipc/notif.rs` and `ipc/endpoint_state.rs` (`audit_tests.rs`). |
 
 ## Ring 3 findings
 
@@ -40,12 +40,12 @@ were denial of service, revocation bypass, and lost wakeups.
 | AUD-U1 | P1 | `IPC_OP_SUP_RECONNECT_INPUT` had no badge check and did an untimed `SYS_PROC_WAIT` on a live child: any app could hang or terminate (`sys_exit(150/151)`) the root supervisor (`supervisor.rs`). | **FIXED** — trusted desktop badges only, bounded reap, error reply instead of exit. Legacy P1/P2 sessions (`init_legacy.rs`) keep the old path. |
 | AUD-U5 | P1 | `IoRingSharedPage::pop_sqe` accepted `tail - head > CAP` from the peer (up to 2^32 bogus entries). | **FIXED** (bounded; a hostile peer can still rewrite `head`, see below). |
 | AUD-U6 | P1 | `dry-vfs` `IPC_OP_EXIT_CLEAN` was unauthenticated. | **FIXED** — `BADGE_SUPERVISOR` only. |
-| AUD-U2 | P1 | DRYFS reformats the volume on *any* verification failure, including a transient read error or one bad data block (`persist_fs.rs:259-317`). | OPEN (data-loss risk) |
+| AUD-U2 | P1 | DRYFS reformats the volume on *any* verification failure, including a transient read error or one bad data block (`persist_fs.rs:259-317`). | **FIXED** — refuses wipe/reformat (`EIO_RING`) when `DRYFS_MAGIC` is present on either superblock (`persist_fs.rs`). |
 | AUD-U3 | P1 | `dry-vfs` waits forever on `cq_notif` if `dry-blk` dies with a request pending; CQE `user_tag` is not checked (`ioring.rs:276-284`). | OPEN |
 | AUD-U4 | P1 | `dry-blk` reuses in-flight descriptors after a timeout without a device reset (`dry_blk.rs:351-376`). | OPEN |
-| AUD-U7 | P1 | Vault fails open: reseeds the default passphrase on any read failure, `UNLOCK` unthrottled, starts unlocked, `PASSWD` swaps before persisting, unbounded PBKDF2 iterations in the record (`dry_vault.rs`, `vault_proto.rs`). | OPEN |
+| AUD-U7 | P1 | Vault fails open: reseeds the default passphrase on any read failure, `UNLOCK` unthrottled, starts unlocked, `PASSWD` swaps before persisting, unbounded PBKDF2 iterations in the record (`dry_vault.rs`, `vault_proto.rs`). | **PARTIAL** — corrupt `/persist/vault.sec` fails closed (`unlocked=false`, no overwrite) and `pbkdf2_iters` bounded to `256..=65536` (`dry_vault.rs`, `vault_proto.rs`). |
 | AUD-U8 | P1 | Broker crash recovery can stick in `FAULTED`; untimed calls to the island; leaks on error paths (`dry_broker.rs`). | OPEN |
-| AUD-U9 | P2 | `BROKER_OP_SET_PARK_MODE` is not admin-gated; every client gets the same SPSC ring. Consumers keep their index in the shared page. On-disk `size_bytes` unchecked. Notify offset unbounded in `dry-blk`. | OPEN |
+| AUD-U9 | P2 | `BROKER_OP_SET_PARK_MODE` is not admin-gated; every client gets the same SPSC ring. Consumers keep their index in the shared page. On-disk `size_bytes` unchecked. Notify offset unbounded in `dry-blk`. | **PARTIAL** — `BROKER_OP_SET_PARK_MODE` now enforces `is_admin` (`dry_broker.rs`). |
 
 ## Verified as sound (by reading)
 
@@ -59,4 +59,4 @@ orderings, broker admin gates and revoke-before-respawn ordering, DRYFS single-c
 ## Reproduction
 
 `kernel/src/audit_tests.rs` runs in every positive SMP boot:
-`[DRY-AUDIT-REG] PASS: cpus=N cases=5/5 notif_rounds=200000 leaked_frames=0`.
+`[DRY-AUDIT-REG] PASS: cpus=N cases=6/6 notif_rounds=200000 leaked_frames=0`.

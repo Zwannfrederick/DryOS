@@ -18,6 +18,7 @@
 
 pub mod bench;
 pub mod elf;
+pub mod fault;
 pub mod supervisor;
 pub mod tests;
 
@@ -143,7 +144,7 @@ pub struct SpawnedProcessInfo {
 pub(crate) struct ProcessSlot {
     pub(crate) state: AtomicU8,
     trace_lifecycle: AtomicBool,
-    kill_requested: AtomicBool,
+    pub(crate) kill_requested: AtomicBool,
     launch_ready: AtomicBool,
     pub(crate) tcb_quiescent: AtomicBool,
     pub(crate) cspace_id: AtomicU16,
@@ -151,7 +152,11 @@ pub(crate) struct ProcessSlot {
     pub(crate) generation: AtomicU32,
     last_reclaimed_gen: AtomicU32,
     vspace_gen: AtomicU32,
-    in_flight_syscalls: AtomicU32,
+    pub(crate) in_flight_syscalls: AtomicU32,
+    pub(crate) fault_budget: AtomicU32,
+    pub(crate) fault_ep_cspace: AtomicU16,
+    pub(crate) fault_ep_cap_raw: AtomicU64,
+    pub(crate) fault_ep_label_raw: AtomicU64,
     pub(crate) syscall_entries: AtomicU64,
     exit_code: AtomicI32,
     pub(crate) subj_label_raw: AtomicU64,
@@ -190,6 +195,10 @@ impl ProcessSlot {
             last_reclaimed_gen: AtomicU32::new(0),
             vspace_gen: AtomicU32::new(0),
             in_flight_syscalls: AtomicU32::new(0),
+            fault_budget: AtomicU32::new(0),
+            fault_ep_cspace: AtomicU16::new(0),
+            fault_ep_cap_raw: AtomicU64::new(0),
+            fault_ep_label_raw: AtomicU64::new(0),
             syscall_entries: AtomicU64::new(0),
             exit_code: AtomicI32::new(0),
             subj_label_raw: AtomicU64::new(0),
@@ -389,6 +398,8 @@ where
     slot.vspace_id.store(vs_h.id, Ordering::Release);
     slot.vspace_gen.store(vs_h.generation, Ordering::Release);
     slot.in_flight_syscalls.store(0, Ordering::Release);
+    slot.fault_ep_cap_raw.store(0, Ordering::Release);
+    slot.fault_budget.store(0, Ordering::Release);
     slot.syscall_entries.store(0, Ordering::Release);
     slot.exit_code.store(0, Ordering::Release);
     slot.subj_label_raw
@@ -700,13 +711,17 @@ pub fn terminate_current_user_thread_bad_context(
 }
 
 /// Isolate hardware CPU exceptions originating in `CPL = 3` (`(frame.cs & 3) == 3`, `Stage E.1`).
-/// Never panics the kernel; records exact hardware trap registers and terminates only the faulting process.
-pub fn handle_user_exception(frame: &mut TrapFrame, cr2: u64) -> ! {
+/// Never panics the kernel. If the process has a bound `FaultEndpoint` the supervisor decides
+/// (returns to resume the thread); otherwise records the trap registers and terminates the process.
+pub fn handle_user_exception(frame: &mut TrapFrame, cr2: u64) {
     cli();
     let pcpu = current_percpu();
     pcpu.user_fault_count.fetch_add(1, Ordering::Relaxed);
     let cur_slot = current_slot_on_cpu(pcpu.cpu_idx as usize);
     let pid = tcb(cur_slot).process_id.load(Ordering::Acquire);
+    if fault::deliver_user_fault(frame, cr2, pid) {
+        return;
+    }
 
     if let Some(slot) = slot_ref(pid) {
         slot.fault_vec.store(frame.vector, Ordering::Release);

@@ -13,8 +13,8 @@ use crate::cspace::revoke::{
     attach_cap_mapping_record, detach_matching_cap_mapping_record, revoke_subtree_by_global_slot,
 };
 use crate::cspace::{
-    cspace_lookup_fast, cspace_owner_label, global_slot_id, insert_root_cap, slot_by_global,
-    with_pinned_cap, CSPACE_TABLE,
+    abort_root_slot, commit_root_slot, cspace_lookup_fast, cspace_owner_label, global_slot_id,
+    insert_root_cap, reserve_root_slot, slot_by_global, with_pinned_cap, CSPACE_TABLE,
 };
 use crate::pmm::meta::{frame_meta, pack_seclabel};
 use crate::pmm::untyped::{
@@ -712,7 +712,8 @@ pub fn cspace_spawn_tcb(
     }
 
     // Reserve a `CSpace` slot *before* publishing the runnable `TCB` so we never leak a live thread on `OutOfSlots`.
-    let tid = try_spawn_thread_bound(
+    let (slot_idx, sgen) = reserve_root_slot(cspace_id, CapRights::TCB_ROOT)?;
+    let Some(tid) = try_spawn_thread_bound(
         prio,
         target_cpu,
         vs_res.obj_id as u16,
@@ -721,11 +722,15 @@ pub fn cspace_spawn_tcb(
         entry,
         arg,
         preemptible,
-    )
-    .ok_or(CapError::OutOfSlots)?;
+    ) else {
+        abort_root_slot(cspace_id, slot_idx, sgen);
+        return Err(CapError::OutOfSlots);
+    };
 
-    let cap = insert_root_cap(
+    let cap = commit_root_slot(
         cspace_id,
+        slot_idx,
+        sgen,
         CapObjectKind::Tcb,
         tid.slot() as u32,
         tid.gen26(),
@@ -733,7 +738,7 @@ pub fn cspace_spawn_tcb(
         subj_label,
         vs_res.lease_epoch,
         0,
-    )?;
+    );
     Ok((cap, tid))
 }
 

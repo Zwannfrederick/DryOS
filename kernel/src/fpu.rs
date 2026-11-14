@@ -197,6 +197,10 @@ pub fn reset_slot(slot: usize) {
     if let Some(i) = worker_idx(slot) {
         USED[i].store(false, Ordering::Release);
         LAST_CPU[i].store(NO_CPU16, Ordering::Release);
+        let s = slot as u32;
+        for owner in &OWNER {
+            let _ = owner.compare_exchange(s, NO_SLOT, Ordering::AcqRel, Ordering::Acquire);
+        }
     }
 }
 
@@ -204,7 +208,7 @@ pub fn reset_slot(slot: usize) {
 unsafe fn save_area(ptr: *mut u8) {
     // SAFETY: Caller guarantees `CR0.TS == 0`, `CLI`, and exclusive 64-byte-aligned `ptr`.
     unsafe {
-        match MODE.load(Ordering::Relaxed) {
+        match MODE.load(Ordering::Acquire) {
             MODE_XSAVEOPT => asm!("xsaveopt64 [{p}]", p = in(reg) ptr,
                 in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags)),
             MODE_XSAVE => asm!("xsave64 [{p}]", p = in(reg) ptr,
@@ -218,7 +222,7 @@ unsafe fn save_area(ptr: *mut u8) {
 unsafe fn restore_area(ptr: *const u8) {
     // SAFETY: Caller guarantees `CR0.TS == 0`, `CLI`, and a kernel-written valid image at `ptr`.
     unsafe {
-        if MODE.load(Ordering::Relaxed) == MODE_FXSAVE {
+        if MODE.load(Ordering::Acquire) == MODE_FXSAVE {
             asm!("fxrstor64 [{p}]", p = in(reg) ptr, options(nostack, preserves_flags));
         } else {
             asm!("xrstor64 [{p}]", p = in(reg) ptr,
@@ -231,21 +235,21 @@ unsafe fn restore_area(ptr: *const u8) {
 #[inline]
 pub fn on_context_switch(cpu: usize, prev_slot: usize, next_slot: usize) {
     if let Some(p) = worker_idx(prev_slot) {
-        if USED[p].load(Ordering::Relaxed) {
+        if USED[p].load(Ordering::Acquire) {
             // SAFETY: `prev` ran with `CR0.TS == 0` on this CPU and still owns its area.
             unsafe { save_area(AREAS[p].0.get().cast()) };
         }
     }
     match worker_idx(next_slot) {
-        Some(n) if USED[n].load(Ordering::Relaxed) => {
+        Some(n) if USED[n].load(Ordering::Acquire) => {
             set_ts(cpu, false);
-            if OWNER[cpu].load(Ordering::Relaxed) != next_slot as u32
-                || LAST_CPU[n].load(Ordering::Relaxed) != cpu as u16
+            if OWNER[cpu].load(Ordering::Acquire) != next_slot as u32
+                || LAST_CPU[n].load(Ordering::Acquire) != cpu as u16
             {
                 // SAFETY: `next` is owned by this CPU; its area holds a complete saved image.
                 unsafe { restore_area(AREAS[n].0.get().cast()) };
-                OWNER[cpu].store(next_slot as u32, Ordering::Relaxed);
-                LAST_CPU[n].store(cpu as u16, Ordering::Relaxed);
+                OWNER[cpu].store(next_slot as u32, Ordering::Release);
+                LAST_CPU[n].store(cpu as u16, Ordering::Release);
             }
         }
         _ => set_ts(cpu, true),
@@ -258,7 +262,7 @@ pub fn on_device_not_available(cpu: usize, cur_slot: usize) -> bool {
     let Some(i) = worker_idx(cur_slot) else {
         return false;
     };
-    if USED[i].load(Ordering::Relaxed) || MODE.load(Ordering::Relaxed) == MODE_UNINIT {
+    if USED[i].load(Ordering::Acquire) || MODE.load(Ordering::Acquire) == MODE_UNINIT {
         return false;
     }
     set_ts(cpu, false);
@@ -270,9 +274,9 @@ pub fn on_device_not_available(cpu: usize, cur_slot: usize) -> bool {
         area[FXSAVE_OFF_MXCSR..FXSAVE_OFF_MXCSR + 4].copy_from_slice(&CLEAN_MXCSR.to_le_bytes());
         restore_area(area.as_ptr());
     }
-    USED[i].store(true, Ordering::Relaxed);
-    OWNER[cpu].store(cur_slot as u32, Ordering::Relaxed);
-    LAST_CPU[i].store(cpu as u16, Ordering::Relaxed);
+    USED[i].store(true, Ordering::Release);
+    OWNER[cpu].store(cur_slot as u32, Ordering::Release);
+    LAST_CPU[i].store(cpu as u16, Ordering::Release);
     NM_TRAPS.fetch_add(1, Ordering::Relaxed);
     true
 }

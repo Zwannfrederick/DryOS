@@ -287,6 +287,11 @@ impl PersistMount {
                 Ok((false, self.sb.tx_seq))
             }
             (false, false) => {
+                // `AUD-U2`: refuse to wipe and reformat if an existing `DRYFS_V1` magic is
+                // present on either superblock (indicating corruption / partial disk error).
+                if self.sb.magic == DRYFS_MAGIC || self.staging_sb.magic == DRYFS_MAGIC {
+                    return Err(crate::ioring::EIO_RING);
+                }
                 self.format_fresh(ring, max_blocks)?;
                 Ok((true, self.sb.tx_seq))
             }

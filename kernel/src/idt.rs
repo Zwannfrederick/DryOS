@@ -438,6 +438,7 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
         }
         let cr2 = if frame.vector == 14 { read_cr2() } else { 0 };
         crate::proc::handle_user_exception(frame, cr2);
+        return;
     }
 
     crate::enter_fatal_or_halt();

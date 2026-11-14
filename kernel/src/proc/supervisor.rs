@@ -15,6 +15,7 @@ use crate::cspace::cap::{CSpaceId, CapError, CapObjectKind, CapPtr};
 use crate::cspace::{cspace_transfer, insert_root_cap, with_pinned_cap};
 use crate::ipc::{check_blocking_ipc_allowed, map_cap_err_to_sys};
 use crate::limine::{find_boot_module_index, get_boot_module_by_index};
+use crate::proc::fault::{bind_fault_endpoint, check_fault_ep_cap, SPAWN_FLAG_FAULT_EP};
 use crate::proc::{
     kill_process, reclaim_process, slot_ref, spawn_elf_process_with, ProcError, ProcessHandle,
     ProcessOutcome, ProcessState, ReclaimStatus, SpawnOptions, MAX_PROCESSES,
@@ -114,6 +115,14 @@ pub fn sys_proc_spawn(
         _ => return Err(SysError::Perm),
     };
     let child_label = SecLabel::new(child_domain, child_flags, child_comp, 1);
+    // `FaultEndpoint`: `grant_cap1` stays in the parent's `CSpace` and is bound, not transferred.
+    let fault_ep = if (domain_and_comp & SPAWN_FLAG_FAULT_EP) != 0 {
+        check_fault_ep_cap(parent_cspace, parent_subj, CapPtr(grant_cap1_raw))
+            .map_err(map_cap_err_to_sys)?;
+        Some(CapPtr(grant_cap1_raw))
+    } else {
+        None
+    };
 
     let now_epoch = current_lease_epoch();
     let req_mod = CapRights(CapRights::READ.0 | CapRights::SPAWN.0);
@@ -177,7 +186,7 @@ pub fn sys_proc_spawn(
             } else {
                 0
             };
-            let arg1 = if grant_cap1_raw != 0 {
+            let arg1 = if grant_cap1_raw != 0 && fault_ep.is_none() {
                 let rights1 = CapRights((grant1_rights & 0xffff) as u16);
                 let rcpt1 = cspace_transfer(
                     parent_cspace,
@@ -201,6 +210,9 @@ pub fn sys_proc_spawn(
         Ok(info) => {
             if let Some(slot) = slot_ref(info.handle.pid) {
                 slot.parent_pid.store(parent_pid, Ordering::Release);
+            }
+            if let Some(cap) = fault_ep {
+                bind_fault_endpoint(info.handle.pid, parent_cspace, parent_subj, cap);
             }
             let packed = pack_proc_handle(info.handle.pid, info.handle.generation);
             Ok((packed as isize, info.handle.pid as u64))

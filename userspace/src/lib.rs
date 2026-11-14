@@ -211,23 +211,6 @@ pub const POWER_OP_SHUTDOWN_S5: u64 = 1;
 pub const POWER_OP_REBOOT: u64 = 2;
 pub const POWER_OP_SUSPEND_S3: u64 = 3;
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserPowerInfo {
-    pub idle_hlt_calls: u64,
-    pub idle_hlt_tsc: u64,
-    pub elapsed_tsc: u64,
-    pub fadt_present: u8,
-    pub s5_supported: u8,
-    pub reset_supported: u8,
-    pub s3_aml_present: u8,
-    pub s3_supported: u8,
-    pub _pad: [u8; 3],
-    pub denied_ops: u64,
-}
-
-const _: () = assert!(size_of::<UserPowerInfo>() == 40);
-
 pub const BOOT_MANIFEST_OFFSET: u64 = 0x0100;
 
 /// Boot capability table mapped read-only into `dry-init` at `arg0` (`0x0070_0000`).
@@ -269,113 +252,7 @@ pub struct BootModManifestEntry {
     pub size_bytes: u64,
 }
 
-/// Sanitized 24-byte per-process snapshot POD returned by `SYS_PROC_LIST` (`0` kernel pointers/PFNs).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserProcInfo {
-    pub pid: u32,
-    pub state: u8,
-    pub domain: u8,
-    pub compartment_id: u16,
-    pub mapped_pages_4k: u32,
-    pub pt_frames_4k: u32,
-    pub syscall_entries: u64,
-}
-
-const _: () = assert!(size_of::<UserProcInfo>() == 24);
-
 pub const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954; // "DRY_INIT"
-
-/// Sanitized capability metadata returned by `SYS_CAP_QUERY` (`32` bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserCapInfo {
-    pub obj_kind: u8,
-    pub domain: u8,
-    pub flags: u16,
-    pub rights_bits: u32,
-    pub compartment_id: u16,
-    pub _pad: u16,
-    pub lease_epoch: u32,
-    pub badge: u64,
-    pub abi_reserved: u64,
-}
-
-const _: () = assert!(size_of::<UserCapInfo>() == 32);
-
-/// Sanitized linear framebuffer metadata returned by `SYS_FB_MAP`.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserFbInfo {
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u16,
-    pub memory_model: u8,
-    pub red_shift: u8,
-    pub green_shift: u8,
-    pub blue_shift: u8,
-    pub red_size: u8,
-    pub green_size: u8,
-    pub blue_size: u8,
-    pub _pad: [u8; 3],
-    pub mapped_bytes: u64,
-}
-
-/// Sanitized 104-byte system telemetry POD returned by `SYS_SYSINFO` (zero kernel pointers/PFNs).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserSysInfo {
-    pub abi_version: u64,
-    pub online_cpus: u32,
-    pub apic_mode: u8,
-    pub ioapic_present: u8,
-    pub fb_present: u8,
-    pub _pad0: u8,
-    pub tsc_mhz: u64,
-    pub uptime_ms: u64,
-    pub elapsed_tsc: u64,
-    pub timer_irqs: u64,
-    pub total_ext_irqs: u64,
-    pub total_syscalls: u64,
-    pub total_ctx_switches: u64,
-    pub usable_frames_4k: u32,
-    pub free_frames_4k: u32,
-    pub irq1_delivered: u64,
-    pub irq12_delivered: u64,
-    pub total_ipc_msgs: u64,
-}
-
-const _: () = assert!(size_of::<UserSysInfo>() == 104);
-
-/// Extended IPC send/grant descriptor (`48` bytes POD, matches `kernel::ipc::UserIpcSendExt`).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserIpcSendExt {
-    pub extra_buf_ptr: u64,
-    pub grant_cap: u64,
-    pub grant_rights: u16,
-    pub _pad: u16,
-    pub grant_lease: u32,
-    pub grant_badge: u64,
-    pub shared_region_cap: u64,
-    pub shared_offset_and_len: u64,
-}
-
-const _: () = assert!(size_of::<UserIpcSendExt>() == 48);
-
-/// Extended IPC receive descriptor (`40` bytes POD, matches `kernel::ipc::UserIpcRecvExt`).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct UserIpcRecvExt {
-    pub extra_buf_ptr: u64,
-    pub extra_buf_cap: u64,
-    pub sender_badge: u64,
-    pub reply_token: u64,
-    pub transferred_cap: u64,
-}
-
-const _: () = assert!(size_of::<UserIpcRecvExt>() == 40);
 
 #[inline(always)]
 pub const fn pack_msg_tag(label: u32, flags: u8, words: u8, extra_len: u16) -> u64 {

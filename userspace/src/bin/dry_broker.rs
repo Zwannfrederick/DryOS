@@ -388,6 +388,11 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                 );
             }
             BROKER_OP_SET_PARK_MODE => {
+                if !is_admin {
+                    denied_ops = denied_ops.wrapping_add(1);
+                    reply_err(broker_ep, tok, IPC_OP_ERR_PERM, EPERM, denied_ops);
+                    continue;
+                }
                 let target_mode = if mrs[0] != 0 { 1 } else { 0 };
                 island.wake_if_ring_parked();
                 match sys_ipc_call_inline(

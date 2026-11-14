@@ -390,6 +390,17 @@ fn try_resolve_ipc_wait(
     cur_slot: usize,
     deadline: u64,
 ) -> Option<Result<(), SysError>> {
+    // `AUD-K15`: a killed process must leave an untimed wait (`kill_process` wakes it); treat
+    // the kill exactly like an expired deadline so its queue links and donations are undone.
+    let pid = tcb(cur_slot).process_id.load(Ordering::Relaxed);
+    let killed = pid != 0 && crate::proc::is_process_kill_requested(pid);
+    let abort = if killed {
+        Some(SysError::Canceled)
+    } else if deadline != 0 && rdtsc() >= deadline {
+        Some(SysError::TimedOut)
+    } else {
+        None
+    };
     match slots[cur_slot].wait_phase {
         WaitPhase::Delivered => {
             slots[cur_slot].wait_phase = WaitPhase::Idle;
@@ -400,37 +411,25 @@ fn try_resolve_ipc_wait(
             slots[cur_slot].wait_phase = WaitPhase::Idle;
             Some(Err(e))
         }
-        WaitPhase::WaitingSend => {
-            if deadline != 0 && rdtsc() >= deadline {
-                unlink_send_q(inner, slots, cur_slot as u16);
-                slots[cur_slot].call_seq = next_seq16(slots[cur_slot].call_seq);
-                slots[cur_slot].wait_phase = WaitPhase::Idle;
-                let _ = revert_donation_for_caller(cur_slot);
-                Some(Err(SysError::TimedOut))
-            } else {
-                None
-            }
-        }
-        WaitPhase::WaitingRecv => {
-            if deadline != 0 && rdtsc() >= deadline {
-                unlink_recv_q(inner, slots, cur_slot as u16);
-                slots[cur_slot].wait_phase = WaitPhase::Idle;
-                Some(Err(SysError::TimedOut))
-            } else {
-                None
-            }
-        }
-        WaitPhase::WaitingReply => {
-            if deadline != 0 && rdtsc() >= deadline {
-                slots[cur_slot].call_seq = next_seq16(slots[cur_slot].call_seq);
-                slots[cur_slot].replier_slot = NO_SLOT;
-                slots[cur_slot].wait_phase = WaitPhase::Idle;
-                let _ = revert_donation_for_caller(cur_slot);
-                Some(Err(SysError::TimedOut))
-            } else {
-                None
-            }
-        }
+        WaitPhase::WaitingSend => abort.map(|e| {
+            unlink_send_q(inner, slots, cur_slot as u16);
+            slots[cur_slot].call_seq = next_seq16(slots[cur_slot].call_seq);
+            slots[cur_slot].wait_phase = WaitPhase::Idle;
+            let _ = revert_donation_for_caller(cur_slot);
+            Err(e)
+        }),
+        WaitPhase::WaitingRecv => abort.map(|e| {
+            unlink_recv_q(inner, slots, cur_slot as u16);
+            slots[cur_slot].wait_phase = WaitPhase::Idle;
+            Err(e)
+        }),
+        WaitPhase::WaitingReply => abort.map(|e| {
+            slots[cur_slot].call_seq = next_seq16(slots[cur_slot].call_seq);
+            slots[cur_slot].replier_slot = NO_SLOT;
+            slots[cur_slot].wait_phase = WaitPhase::Idle;
+            let _ = revert_donation_for_caller(cur_slot);
+            Err(e)
+        }),
         WaitPhase::Idle => Some(Err(SysError::Canceled)),
     }
 }
@@ -446,16 +445,16 @@ pub(super) fn wait_on_endpoint_slot(
     loop {
         if !first_iter {
             prepare_park_current();
-            let done = with_ep_lock(ep, |inner, slots| {
-                try_resolve_ipc_wait(inner, slots, cur_slot, deadline)
-            });
-            if let Some(res) = done {
-                cancel_park_current();
-                tcb(cur_slot).ipc_deadline_tsc.store(0, Ordering::Release);
-                return res;
-            }
         }
         first_iter = false;
+        let done = with_ep_lock(ep, |inner, slots| {
+            try_resolve_ipc_wait(inner, slots, cur_slot, deadline)
+        });
+        if let Some(res) = done {
+            cancel_park_current();
+            tcb(cur_slot).ipc_deadline_tsc.store(0, Ordering::Release);
+            return res;
+        }
 
         if deadline != 0 {
             tcb(cur_slot)

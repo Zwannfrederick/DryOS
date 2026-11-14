@@ -331,6 +331,7 @@ extern "C" fn bsp_kmain() -> ! {
         proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
         fpu::verify_fpu_isolation(smp.cpu_count);
         audit_tests::verify_audit_regressions(smp.cpu_count);
+        proc::fault::verify_fault_endpoint(smp.cpu_count);
         ipc::tests::verify_ipc_services_and_display(cmdline, smp.cpu_count);
         irq::tests::verify_irq_and_ioport_security(cmdline, smp.cpu_count);
     }

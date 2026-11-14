@@ -5,9 +5,131 @@
 use core::mem::size_of;
 
 use crate::{
-    pack_msg_tag, raw_ipc_syscall, raw_syscall6, UserIpcSendExt, MSG_FLAG_GRANT_CAP, SYS_IPC_REPLY,
-    SYS_PROC_SPAWN,
+    pack_msg_tag, raw_ipc_syscall, raw_syscall6, MSG_FLAG_GRANT_CAP, SYS_IPC_REPLY, SYS_PROC_SPAWN,
 };
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserPowerInfo {
+    pub idle_hlt_calls: u64,
+    pub idle_hlt_tsc: u64,
+    pub elapsed_tsc: u64,
+    pub fadt_present: u8,
+    pub s5_supported: u8,
+    pub reset_supported: u8,
+    pub s3_aml_present: u8,
+    pub s3_supported: u8,
+    pub _pad: [u8; 3],
+    pub denied_ops: u64,
+}
+
+const _: () = assert!(size_of::<UserPowerInfo>() == 40);
+
+/// Sanitized 24-byte per-process snapshot POD returned by `SYS_PROC_LIST` (`0` kernel pointers/PFNs).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserProcInfo {
+    pub pid: u32,
+    pub state: u8,
+    pub domain: u8,
+    pub compartment_id: u16,
+    pub mapped_pages_4k: u32,
+    pub pt_frames_4k: u32,
+    pub syscall_entries: u64,
+}
+
+const _: () = assert!(size_of::<UserProcInfo>() == 24);
+
+/// Sanitized capability metadata returned by `SYS_CAP_QUERY` (`32` bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserCapInfo {
+    pub obj_kind: u8,
+    pub domain: u8,
+    pub flags: u16,
+    pub rights_bits: u32,
+    pub compartment_id: u16,
+    pub _pad: u16,
+    pub lease_epoch: u32,
+    pub badge: u64,
+    pub abi_reserved: u64,
+}
+
+const _: () = assert!(size_of::<UserCapInfo>() == 32);
+
+/// Sanitized linear framebuffer metadata returned by `SYS_FB_MAP`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserFbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u16,
+    pub memory_model: u8,
+    pub red_shift: u8,
+    pub green_shift: u8,
+    pub blue_shift: u8,
+    pub red_size: u8,
+    pub green_size: u8,
+    pub blue_size: u8,
+    pub _pad: [u8; 3],
+    pub mapped_bytes: u64,
+}
+
+/// Sanitized 104-byte system telemetry POD returned by `SYS_SYSINFO` (zero kernel pointers/PFNs).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserSysInfo {
+    pub abi_version: u64,
+    pub online_cpus: u32,
+    pub apic_mode: u8,
+    pub ioapic_present: u8,
+    pub fb_present: u8,
+    pub _pad0: u8,
+    pub tsc_mhz: u64,
+    pub uptime_ms: u64,
+    pub elapsed_tsc: u64,
+    pub timer_irqs: u64,
+    pub total_ext_irqs: u64,
+    pub total_syscalls: u64,
+    pub total_ctx_switches: u64,
+    pub usable_frames_4k: u32,
+    pub free_frames_4k: u32,
+    pub irq1_delivered: u64,
+    pub irq12_delivered: u64,
+    pub total_ipc_msgs: u64,
+}
+
+const _: () = assert!(size_of::<UserSysInfo>() == 104);
+
+/// Extended IPC send/grant descriptor (`48` bytes POD, matches `kernel::ipc::UserIpcSendExt`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserIpcSendExt {
+    pub extra_buf_ptr: u64,
+    pub grant_cap: u64,
+    pub grant_rights: u16,
+    pub _pad: u16,
+    pub grant_lease: u32,
+    pub grant_badge: u64,
+    pub shared_region_cap: u64,
+    pub shared_offset_and_len: u64,
+}
+
+const _: () = assert!(size_of::<UserIpcSendExt>() == 48);
+
+/// Extended IPC receive descriptor (`40` bytes POD, matches `kernel::ipc::UserIpcRecvExt`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserIpcRecvExt {
+    pub extra_buf_ptr: u64,
+    pub extra_buf_cap: u64,
+    pub sender_badge: u64,
+    pub reply_token: u64,
+    pub transferred_cap: u64,
+}
+
+const _: () = assert!(size_of::<UserIpcRecvExt>() == 40);
 
 pub const SYS_DEV_MAP: u64 = 29;
 pub const SYS_DMA_ALLOC: u64 = 30;
@@ -212,5 +334,38 @@ pub fn sys_ipc_reply_with_grant_lease(
         Err(r0)
     } else {
         Ok(())
+    }
+}
+
+/// `SYS_PROC_SPAWN` flag (`domain_and_comp` bit 48): `grant1` is bound as the child's
+/// `FaultEndpoint` (kept in the parent's `CSpace`, not transferred).
+pub const SPAWN_FLAG_FAULT_EP: u64 = 1 << 48;
+/// Label of a kernel-originated fault message: `mr0 = vector | error_code << 16`, `mr1 = rip`,
+/// `mr2 = cr2`, `mr3 = rsp`. Authenticate it by the badge of the bound capability, not the label.
+pub const FAULT_MSG_LABEL: u32 = 0x7fa1;
+/// Reply label resuming the faulting thread (`mr0 != 0` = new `RIP`); any other label terminates.
+pub const FAULT_REPLY_RESUME: u32 = 0x7fa2;
+pub const FAULT_REPLY_KILL: u32 = 0x7fa3;
+
+/// Spawn a child whose Ring 3 CPU exceptions are delivered to `fault_ep_cap` (`SEND | CALL`).
+#[inline]
+pub fn sys_proc_spawn_with_fault_ep(
+    boot_mod_cap: u64,
+    domain_code: u8,
+    compartment_id: u16,
+    grant0: (u64, u16, u64),
+    fault_ep_cap: u64,
+) -> Result<(u64, u64), isize> {
+    let dom_comp = (domain_code as u64)
+        | ((compartment_id as u64) << 16)
+        | (0xffffu64 << 32)
+        | SPAWN_FLAG_FAULT_EP;
+    let g0_rb = (grant0.1 as u64) | (grant0.2 << 16);
+    let (r0, pid) =
+        raw_syscall6(SYS_PROC_SPAWN, boot_mod_cap, dom_comp, grant0.0, g0_rb, fault_ep_cap, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok((r0 as u64, pid))
     }
 }

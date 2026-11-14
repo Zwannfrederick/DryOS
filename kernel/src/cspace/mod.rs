@@ -399,18 +399,11 @@ pub fn destroy_cspace(cspace_id: CSpaceId) -> Result<(), CapError> {
     Ok(())
 }
 
-/// Insert a root capability (not derived from an existing `CapSlot`) into `cspace_id`.
-#[allow(clippy::too_many_arguments)]
-pub fn insert_root_cap(
+/// Reserve an empty capability slot in `cspace_id` (`AUD-K9`) before publishing a kernel object.
+pub(crate) fn reserve_root_slot(
     cspace_id: CSpaceId,
-    kind: CapObjectKind,
-    obj_id: u32,
-    expected_obj_gen: u32,
     rights: CapRights,
-    obj_label: SecLabel,
-    lease_epoch: u32,
-    badge: u64,
-) -> Result<CapPtr, CapError> {
+) -> Result<(u16, u32), CapError> {
     if (cspace_id as usize) >= MAX_CSPACES {
         return Err(CapError::InvalidHandle);
     }
@@ -421,8 +414,31 @@ pub fn insert_root_cap(
     if rights.contains(CapRights::WRITE) && rights.contains(CapRights::EXEC) {
         return Err(CapError::RightsAmplification);
     }
+    claim_empty_slot(cnode)
+}
 
-    let (slot_idx, sgen) = claim_empty_slot(cnode)?;
+/// Release a reserved `SlotState::Building` slot when object creation fails (`AUD-K9`).
+pub(crate) fn abort_root_slot(cspace_id: CSpaceId, slot_idx: u16, sgen: u32) {
+    if (cspace_id as usize) < MAX_CSPACES {
+        abort_building_slot(&CSPACE_TABLE[cspace_id as usize], slot_idx, sgen);
+    }
+}
+
+/// Populate and publish (`SlotState::Building -> Live`) a pre-reserved root slot (`AUD-K9`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_root_slot(
+    cspace_id: CSpaceId,
+    slot_idx: u16,
+    sgen: u32,
+    kind: CapObjectKind,
+    obj_id: u32,
+    expected_obj_gen: u32,
+    rights: CapRights,
+    obj_label: SecLabel,
+    lease_epoch: u32,
+    badge: u64,
+) -> CapPtr {
+    let cnode = &CSPACE_TABLE[cspace_id as usize];
     let slot = &cnode.slots[slot_idx as usize];
     slot.obj_meta
         .store(pack_obj_meta(obj_id, expected_obj_gen), Ordering::Relaxed);
@@ -436,17 +452,42 @@ pub fn insert_root_cap(
     slot.cdt_next_sib.store(CDT_NONE, Ordering::Relaxed);
     slot.first_map_idx.store(MAP_REC_NONE, Ordering::Relaxed);
     slot.origin_cspace.store(cspace_id, Ordering::Relaxed);
-
     slot.state_gen.store(
         pack_state_gen(SlotState::Live, kind, rights, sgen),
         Ordering::Release,
     );
-
-    Ok(CapPtr::pack(
+    CapPtr::pack(
         cnode.guard.load(Ordering::Relaxed),
         cnode.radix_bits.load(Ordering::Relaxed),
         sgen,
         slot_idx,
+    )
+}
+
+/// Insert a root capability (not derived from an existing `CapSlot`) into `cspace_id`.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_root_cap(
+    cspace_id: CSpaceId,
+    kind: CapObjectKind,
+    obj_id: u32,
+    expected_obj_gen: u32,
+    rights: CapRights,
+    obj_label: SecLabel,
+    lease_epoch: u32,
+    badge: u64,
+) -> Result<CapPtr, CapError> {
+    let (slot_idx, sgen) = reserve_root_slot(cspace_id, rights)?;
+    Ok(commit_root_slot(
+        cspace_id,
+        slot_idx,
+        sgen,
+        kind,
+        obj_id,
+        expected_obj_gen,
+        rights,
+        obj_label,
+        lease_epoch,
+        badge,
     ))
 }
 

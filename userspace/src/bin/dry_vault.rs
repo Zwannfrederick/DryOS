@@ -151,6 +151,14 @@ impl VaultBroker {
                 log_line(&lb);
                 return;
             }
+            // `AUD-U7`: never silently overwrite a corrupt on-disk vault record with defaults.
+            scrub_bytes(&mut raw);
+            self.unlocked = false;
+            self.persistent_backed = true;
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-VAULT-ERR] Corrupt /persist/vault.sec; failing closed");
+            log_line(&lb);
+            return;
         }
         scrub_bytes(&mut raw);
         if let Err(e) = self.persist_record() {

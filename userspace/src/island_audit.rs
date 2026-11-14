@@ -187,7 +187,18 @@ pub fn run_island_poc_lifecycle_audit(
             unauth_denied += 1;
         }
     }
-    if unauth_denied < 4 {
+    // `AUD-U9`: non-admin client MUST NOT change global park mode (`-EPERM`).
+    if let Ok((rt, _, _)) = sys_ipc_call_inline(
+        bh.client_cap,
+        pack_msg_tag(BROKER_OP_SET_PARK_MODE, 0, 1, 0),
+        [1, 0, 0, 0],
+        0,
+    ) {
+        if msg_tag_label(rt) == IPC_OP_ERR_PERM {
+            unauth_denied += 1;
+        }
+    }
+    if unauth_denied < 5 {
         return Err(225);
     }
 
@@ -214,13 +225,16 @@ pub fn run_island_poc_lifecycle_audit(
 
     let (gen1_ring_cap, gen1_sq_notif, gen1_cq_notif, ring) =
         acquire_client_ring(bh.client_cap, CLIENT_ISLAND_RING_VADDR)?;
-    let _ = sys_ipc_call_inline(
-        bh.client_cap,
+    let (ptag, _, _) = sys_ipc_call_inline(
+        bh.admin_cap,
         pack_msg_tag(BROKER_OP_SET_PARK_MODE, 0, 1, 0),
         [1, 0, 0, 0],
         0,
     )
     .map_err(|_| 229)?;
+    if msg_tag_label(ptag) != IPC_OP_PONG {
+        return Err(229);
+    }
 
     let mut ring_batch_ok = true;
     for i in 0..8u64 {
@@ -513,13 +527,16 @@ pub fn run_island_poc_benchmarks(boot: &RootInitBootInfo) -> Result<(), i32> {
     let elapsed_tsc_delta = ipw1.elapsed_tsc.saturating_sub(ipw0.elapsed_tsc).max(1);
 
     // 4. `IoRingSharedPage` unbatched (`batch=1`) vs batched (`batch=16`, `batch=32`) `cyc/op`.
-    let _ = sys_ipc_call_inline(
-        bh.client_cap,
+    let (ptag, _, _) = sys_ipc_call_inline(
+        bh.admin_cap,
         pack_msg_tag(BROKER_OP_SET_PARK_MODE, 0, 1, 0),
         [1, 0, 0, 0],
         0,
     )
     .map_err(|_| 245)?;
+    if msg_tag_label(ptag) != IPC_OP_PONG {
+        return Err(245);
+    }
 
     let mut ring_res = [(0u64, 0u64, 0u64); 3];
     for (b_idx, batch) in [1usize, 16, 32].into_iter().enumerate() {
@@ -547,7 +564,7 @@ pub fn run_island_poc_benchmarks(boot: &RootInitBootInfo) -> Result<(), i32> {
     }
 
     let _ = sys_ipc_call_inline(
-        bh.client_cap,
+        bh.admin_cap,
         pack_msg_tag(BROKER_OP_SET_PARK_MODE, 0, 1, 0),
         [0, 0, 0, 0],
         0,

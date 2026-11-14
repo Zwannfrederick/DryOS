@@ -508,10 +508,16 @@ pub fn sys_dev_map(
         if res.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(res.obj_id, res.expected_obj_gen) {
             return Err(CapError::WrongObjectKind);
         }
-        let owner = PCI_BLK.owner_cspace.load(Ordering::Acquire);
-        if owner != 0 && owner != cspace_id {
-            return Err(CapError::BusyActiveObject);
-        }
+        let claimed_new = match PCI_BLK.owner_cspace.compare_exchange(
+            0,
+            cspace_id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(cur) if cur == cspace_id => false,
+            Err(_) => return Err(CapError::BusyActiveObject),
+        };
 
         let pages = vdev.num_pages as usize;
         for p in 0..pages {
@@ -520,6 +526,9 @@ pub fn sys_dev_map(
             if map_mmio_4k(vs_h, va, pa, VmProt::USER_MMIO_UC).is_err() {
                 for rb in 0..p {
                     let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
+                }
+                if claimed_new {
+                    PCI_BLK.owner_cspace.store(0, Ordering::Release);
                 }
                 return Err(CapError::PagingError);
             }
@@ -536,10 +545,12 @@ pub fn sys_dev_map(
             for rb in 0..pages {
                 let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
             }
+            if claimed_new {
+                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+            }
             return Err(e);
         }
 
-        PCI_BLK.owner_cspace.store(cspace_id, Ordering::Release);
         let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
         pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, cmd | 0x0406);
         Ok(())
@@ -635,18 +646,29 @@ pub fn sys_dma_alloc(
     }
 
     let pinned_ok = with_dma_lock(|pins| {
-        let cur_owner = PCI_BLK.owner_cspace.load(Ordering::Acquire);
-        if cur_owner != 0 && cur_owner != cspace_id {
-            return Err(SysError::Busy);
-        }
+        let claimed_new = match PCI_BLK.owner_cspace.compare_exchange(
+            0,
+            cspace_id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(cur) if cur == cspace_id => false,
+            Err(_) => return Err(SysError::Busy),
+        };
         let Some(free_slot) = pins.iter_mut().find(|s| s.is_none()) else {
+            if claimed_new {
+                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+            }
             return Err(SysError::NoMem);
         };
         if adjust_frame_iommu_pin(fh, 1).is_err() {
+            if claimed_new {
+                PCI_BLK.owner_cspace.store(0, Ordering::Release);
+            }
             return Err(SysError::NoMem);
         }
         *free_slot = Some(fh);
-        PCI_BLK.owner_cspace.store(cspace_id, Ordering::Release);
         Ok(())
     });
     if let Err(e) = pinned_ok {
