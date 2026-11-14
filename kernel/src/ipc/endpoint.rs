@@ -340,6 +340,24 @@ pub fn ep_send_or_call(
     Ok(out)
 }
 
+/// Queue a wakeup to run after the endpoint lock is dropped. `AUD-K5`: when the small deferred
+/// array is full the thread is woken immediately instead of being silently dropped (`wake_thread`
+/// takes no endpoint lock, so this cannot deadlock; the woken thread just spins on `ep.lock`).
+#[inline]
+fn defer_wake(
+    wakes: &mut [Option<(ThreadId, usize)>; 4],
+    wake_cnt: &mut usize,
+    tid: ThreadId,
+    cpu: usize,
+) {
+    if *wake_cnt < wakes.len() {
+        wakes[*wake_cnt] = Some((tid, cpu));
+        *wake_cnt += 1;
+    } else {
+        let _ = wake_thread(tid, cpu);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn recv_locked(
     inner: &mut EndpointInner,
@@ -368,10 +386,7 @@ fn recv_locked(
         if snd_is_call && donate_on_call(snd_slot, cur_slot) == Err(DonateError::CycleDetected) {
             slots[snd_slot].fail_err = SysError::Deadlock;
             slots[snd_slot].wait_phase = WaitPhase::Failed;
-            if *wake_cnt < wakes.len() {
-                wakes[*wake_cnt] = Some((ThreadId::new(snd_slot, snd_gen26), snd_cpu));
-                *wake_cnt += 1;
-            }
+            defer_wake(wakes, wake_cnt, ThreadId::new(snd_slot, snd_gen26), snd_cpu);
             continue;
         }
 
@@ -387,10 +402,7 @@ fn recv_locked(
                         let _ = revert_donation_for_caller(snd_slot);
                         slots[snd_slot].fail_err = map_cap_err_to_sys(ce);
                         slots[snd_slot].wait_phase = WaitPhase::Failed;
-                        if *wake_cnt < wakes.len() {
-                            wakes[*wake_cnt] = Some((ThreadId::new(snd_slot, snd_gen26), snd_cpu));
-                            *wake_cnt += 1;
-                        }
+                        defer_wake(wakes, wake_cnt, ThreadId::new(snd_slot, snd_gen26), snd_cpu);
                         continue;
                     }
                 }
@@ -415,10 +427,7 @@ fn recv_locked(
             pack_reply_token(ep_idx as u16, snd_slot as u16, snd_gen26, seq)
         } else {
             slots[snd_slot].wait_phase = WaitPhase::Delivered;
-            if *wake_cnt < wakes.len() {
-                wakes[*wake_cnt] = Some((ThreadId::new(snd_slot, snd_gen26), snd_cpu));
-                *wake_cnt += 1;
-            }
+            defer_wake(wakes, wake_cnt, ThreadId::new(snd_slot, snd_gen26), snd_cpu);
             0
         };
 

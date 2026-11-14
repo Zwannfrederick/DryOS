@@ -61,6 +61,7 @@ USERSPACE_MODS = (
     ("dry-vault", "dry-vault.elf"),
     ("dry-broker", "dry-broker.elf"),
     ("dry-mock-drv", "dry-mock-drv.elf"),
+    ("dry-fpu-test", "dry-fpu-test.elf"),
 )
 
 
@@ -413,6 +414,8 @@ def assert_positive_smp_boot(
                 "Hello from DRY OS!",
                 f"[DRY-USER-SEC] PASS: cpus={smp}",
                 f"[DRY-USER-BENCH] PASS: cpus={smp}",
+                f"[DRY-FPU] PASS: cpus={smp}",
+                f"[DRY-AUDIT-REG] PASS: cpus={smp} cases=5/5",
                 f"[DRY-SERVICES] PASS: cpus={smp}",
                 f"[DRY-IPC-SEC] PASS: cpus={smp}",
                 f"[DRY-IPC-BENCH] PASS: cpus={smp}",
@@ -536,6 +539,17 @@ def main() -> None:
         smp=2,
         cmdline="console=com1 apic_mode=xapic",
         expected_apic_mode="xapic-mmio",
+    )
+
+    # FPU fallback verification (`Milestone 2A-4a`): force `FXSAVE64` (no `XSAVE`/AVX) on 2 vCPUs.
+    assert_boot_case(
+        name="boot_2cpu_fpu_fxsave_fallback",
+        kernel_elf=kernel_elf,
+        cmdline="console=com1 fpu_mode=fxsave",
+        smp=2,
+        expected_rc=EXIT_CODE_SUCCESS,
+        must_contain=["[DRY-FPU] PASS: cpus=2 mode=fxsave xcr0=0x3 area_bytes=512", "[DRY-BOOT-OK]"],
+        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]"],
     )
 
     # Headless fallback verification (`Stage E.4`): boot without GOP (`-vga none`) and confirm graceful serial-only boot.
@@ -957,8 +971,8 @@ def main() -> None:
     n_p5 = run_p5_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        f"\n[QEMU-TEST] ALL {79 + n_p3 + n_p4 + n_p5} DETERMINISTIC QEMU CHECKS "
-        f"(56 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
+        f"\n[QEMU-TEST] ALL {80 + n_p3 + n_p4 + n_p5} DETERMINISTIC QEMU CHECKS "
+        f"(57 LEGACY MILESTONE 0-1C + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0) PASSED."
     )
 

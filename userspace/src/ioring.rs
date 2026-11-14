@@ -102,7 +102,9 @@ impl IoRingSharedPage {
     pub fn pop_sqe(&self) -> Option<IoSqe> {
         let head = self.sq_head.load(Ordering::Relaxed);
         let tail = self.sq_tail.load(Ordering::Acquire);
-        if head == tail {
+        // `AUD-U5`: a hostile producer may publish `tail - head > CAP`; treat it as empty rather
+        // than letting the consumer spin over up to `2^32` bogus entries.
+        if head == tail || tail.wrapping_sub(head) > (IORING_RING_CAP as u32) {
             return None;
         }
         let idx = (head & IORING_RING_MASK) as usize;

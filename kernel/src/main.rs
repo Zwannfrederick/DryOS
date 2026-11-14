@@ -7,8 +7,10 @@
 mod acpi;
 mod apic;
 mod arch;
+mod audit_tests;
 mod cspace;
 mod display;
+mod fpu;
 mod gdt_tss;
 mod idt;
 mod ipc;
@@ -104,6 +106,9 @@ extern "C" fn bsp_kmain() -> ! {
 
     let cmdline = latch_cmdline_to_static_bss();
     let boot_mods = latch_boot_modules_to_static_bss();
+    if cmdline.contains("fpu_mode=fxsave") {
+        fpu::force_fxsave_fallback();
+    }
     let _fb_latched = latch_framebuffer_to_static_bss();
 
     let bsp_lapic_id = {
@@ -324,6 +329,8 @@ extern "C" fn bsp_kmain() -> ! {
         assert!(boot_mods >= 5, "Expected >=5 Limine userspace ELF64 boot modules, got {}", boot_mods);
         syscall::init_all_cpus_syscall_and_smap(smp.cpu_count);
         proc::tests::verify_userspace_and_syscalls(smp.cpu_count, apic_cal.tsc_mhz, cmdline);
+        fpu::verify_fpu_isolation(smp.cpu_count);
+        audit_tests::verify_audit_regressions(smp.cpu_count);
         ipc::tests::verify_ipc_services_and_display(cmdline, smp.cpu_count);
         irq::tests::verify_irq_and_ioport_security(cmdline, smp.cpu_count);
     }

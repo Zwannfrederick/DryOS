@@ -784,6 +784,11 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     );
                 }
             }
+            IPC_OP_EXIT_CLEAN if ext.sender_badge != BADGE_SUPERVISOR => {
+                // `AUD-U6`: only the root supervisor may shut the VFS down.
+                st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
+                reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
+            }
             IPC_OP_EXIT_CLEAN => {
                 if st.persist.mounted {
                     let _ = st.ring.flush();

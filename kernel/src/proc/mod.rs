@@ -790,7 +790,11 @@ pub fn reclaim_process(handle: ProcessHandle) -> Result<ReclaimStatus, ProcError
     let vs_cap = CapPtr(slot.vs_cap_raw.load(Ordering::Acquire));
 
     // 1. Destroy quiescent `TCB` capability (`now_epoch = 0` so rotated Vault epochs never block reaping).
-    cspace_destroy_object(cspace_id, subj_label, tcb_cap, 0).map_err(ProcError::Cap)?;
+    // Never bail out after the `Reaping` CAS (`AUD-K1`): fall back to releasing the dead `TCB`
+    // slot directly so the process slot, `VSpace` and `CSpace` are always reclaimed.
+    if cspace_destroy_object(cspace_id, subj_label, tcb_cap, 0).is_err() {
+        let _ = crate::sched::release_dead_tcb_slot(tid.slot(), tid.gen26());
+    }
     // 2 & 3. Destroy `VSpace` + all owned `Frame4K`/`Frame2M`/`Untyped` caps + `CSpace`.
     destroy_cspace_owned_resources(cspace_id, subj_label, vs_cap);
 

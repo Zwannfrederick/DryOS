@@ -359,6 +359,11 @@ pub fn cspace_vspace_unmap_4k(
             return Err(CapError::WrongObjectKind);
         }
         with_pinned_cap(cspace_id, subj_label, frame_cap, CapRights::MAP, now_epoch, |fr_res| {
+            // `AUD-K2`: only a `Frame4K` record may be detached here; `Frame2M`/MMIO range
+            // records must stay attached so revocation still unmaps them.
+            if fr_res.obj_kind != CapObjectKind::Frame4K {
+                return Err(CapError::WrongObjectKind);
+            }
             let vs_h = VSpaceHandle {
                 id: vs_res.obj_id as u16,
                 generation: vs_res.expected_obj_gen,

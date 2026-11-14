@@ -35,6 +35,9 @@ use crate::{
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
 
+/// Upper bound (`~2 s` at `3 GHz`) for reaping a crashed `dry-input` before refusing a restart.
+const INPUT_REAP_TIMEOUT_TSC: u64 = 6_000_000_000;
+
 #[inline]
 pub const fn is_action_badge_authorized(badge: u64) -> bool {
     matches!(
@@ -514,12 +517,21 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                 }
             }
             IPC_OP_SUP_RECONNECT_INPUT => {
-                let (w_kind, w_detail) = match sys_proc_wait(input_handle, 0, 0) {
-                    Ok(v) => v,
-                    Err(_) => sys_exit(150),
-                };
-                if w_kind != 1 || (w_detail & 0xff) != 6 {
-                    sys_exit(151);
+                // `AUD-U1`: only trusted desktop badges may request an input restart, and a live
+                // `dry-input` must never block or terminate the root supervisor (bounded reap).
+                let reaped = is_action_badge_authorized(ext.sender_badge)
+                    && sys_proc_wait(input_handle, 0, INPUT_REAP_TIMEOUT_TSC).is_ok();
+                if !reaped {
+                    ctx.unauth_rejects = ctx.unauth_rejects.wrapping_add(1);
+                    if reply_tok != 0 {
+                        let _ = sys_ipc_reply_inline(
+                            sup_ep,
+                            reply_tok,
+                            pack_msg_tag(IPC_OP_ERR_PERM, 0, 1, 0),
+                            [0; 4],
+                        );
+                    }
+                    continue;
                 }
                 if ctx.input_sup_cap != 0 {
                     let _ = sys_cap_revoke(ctx.input_sup_cap, 1);

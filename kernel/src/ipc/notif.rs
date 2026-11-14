@@ -331,7 +331,10 @@ pub fn notif_wait(
                     inner_res = Ok(Some(word));
                     return;
                 }
-                if n.waiter_slot.load(Ordering::Acquire) != NO_WAITER {
+                // `AUD-K4b`: a delivered-but-not-yet-resumed waiter still owns `wait_state`.
+                if n.waiter_slot.load(Ordering::Acquire) != NO_WAITER
+                    || n.wait_state.load(Ordering::Acquire) != WAIT_IDLE
+                {
                     inner_res = Err(SysError::Busy);
                     return;
                 }
@@ -342,6 +345,16 @@ pub fn notif_wait(
                 n.waiter_cap_gslot.store(res.global_slot, Ordering::Release);
                 n.wait_state.store(WAIT_BLOCKED, Ordering::Release);
                 n.waiter_slot.store(cur_slot as u16, Ordering::SeqCst);
+                // `AUD-K4`: Dekker re-check. A signaller that set `pending_bits` after the swap
+                // above but read `waiter_slot` before this store saw no waiter and skipped the
+                // wake; publish-then-recheck guarantees one side observes the other.
+                fence(Ordering::SeqCst);
+                let late = n.pending_bits.swap(0, Ordering::AcqRel);
+                if late != 0 {
+                    n.waiter_slot.store(NO_WAITER, Ordering::Release);
+                    n.wait_state.store(WAIT_IDLE, Ordering::Release);
+                    inner_res = Ok(Some(late));
+                }
             });
             Ok((res.obj_id as usize, inner_res))
         },

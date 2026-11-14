@@ -68,6 +68,10 @@ path = "src/bin/dry_broker.rs"
 name = "dry-mock-drv"
 path = "src/bin/dry_mock_drv.rs"
 
+[[bin]]
+name = "dry-fpu-test"
+path = "src/bin/dry_fpu_test.rs"
+
 [profile.dev]
 panic = "abort"
 

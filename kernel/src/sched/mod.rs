@@ -429,6 +429,7 @@ pub fn try_spawn_thread_bound(
         w.user_gs_base.store(0, Ordering::Release);
         w.ipc_deadline_tsc.store(0, Ordering::Release);
         w.notif.reset();
+        crate::fpu::reset_slot(slot);
 
         // SAFETY: `slot_free` CAS + `Dead` state + `stack_owner == NO_CPU` guarantee exclusive stack access.
         unsafe {
@@ -532,6 +533,8 @@ pub(crate) fn complete_post_switch_from_asm(prev_slot: usize, post_kind: PostSwi
     // always vacate `VSpace.active_cpus` prior to epoch completion.
     let next_vs = cur_tcb.vspace_id.load(Ordering::Acquire);
     switch_cpu_vspace_if_needed(cpu_idx, next_vs);
+    // Save `prev`'s / load `next`'s FPU state before `prev`'s stack (and slot) can be released.
+    crate::fpu::on_context_switch(cpu_idx, prev_slot, cur_slot);
 
     // Lazy `FS_BASE` / user `GS_BASE` (`IA32_KERNEL_GS_BASE` in Ring 0) switch: zero `wrmsr` on
     // Kernel->Kernel switches or when TLS bases match (`Stage A.8 & A.9`).

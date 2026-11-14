@@ -318,6 +318,23 @@ pub(crate) fn revoke_subtree_by_global_slot(root_global_slot: u32) -> usize {
     revoked_count
 }
 
+/// Kinds whose root capability is the sole owner of a reclaimable kernel object.
+#[inline]
+fn kind_owns_object(kind: CapObjectKind) -> bool {
+    matches!(
+        kind,
+        CapObjectKind::Frame4K
+            | CapObjectKind::Frame2M
+            | CapObjectKind::VSpace
+            | CapObjectKind::Tcb
+            | CapObjectKind::Untyped
+            | CapObjectKind::Endpoint
+            | CapObjectKind::Notification
+            | CapObjectKind::IrqLine
+            | CapObjectKind::IoPort
+    )
+}
+
 /// Delete a single leaf capability slot (`Empty`, bumping `slot_gen` to prevent ABA reuse).
 pub fn cspace_delete_cap(
     cspace_id: CSpaceId,
@@ -334,6 +351,12 @@ pub fn cspace_delete_cap(
             return Err(CapError::Revoked);
         }
         if slot.cdt_first_child.load(Ordering::Relaxed) != CDT_NONE {
+            return Err(CapError::BusyActiveObject);
+        }
+        // `AUD-K1`: a root capability is the only handle that can ever reclaim its object.
+        // Deleting it would leak the object (and make a process un-reapable when it is the
+        // `TCB`/`VSpace` root), so root caps of owning kinds must go through `destroy`.
+        if slot.cdt_parent.load(Ordering::Relaxed) == CDT_NONE && kind_owns_object(kind) {
             return Err(CapError::BusyActiveObject);
         }
         unlink_node_from_parent_locked(resolved.global_slot);
@@ -376,6 +399,14 @@ pub fn cspace_destroy_object(
 
     // Revoke all derived child capabilities (and auto-unmap any mappings made via children).
     let _ = revoke_subtree_by_global_slot(resolved.global_slot);
+
+    // `AUD-K3`: only the root capability may reclaim the object. Revocation waits for in-flight
+    // users of *descendants* only, so destroying through a derived capability would free or
+    // recycle the object under its still-`Live` root/siblings. A non-root holder merely drops
+    // its own reference.
+    if slot_by_global(resolved.global_slot).cdt_parent.load(Ordering::Acquire) != CDT_NONE {
+        return cspace_delete_cap(cspace_id, subj_label, manage_ptr, now_epoch);
+    }
 
     // Enforce active-use / pin / map quiescence BEFORE invalidating `manage_ptr` or freeing memory!
     match resolved.obj_kind {

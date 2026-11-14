@@ -112,7 +112,8 @@ pub fn set_inject_corrupt_return_mode(mode: u8) {
 }
 
 /// Enable `SYSCALL` MSRs (`SCE`, `STAR`, `LSTAR`, `FMASK`) and `CR4.SMAP` on `cpu_idx`.
-pub fn init_cpu_syscall_and_smap(_cpu_idx: usize) {
+pub fn init_cpu_syscall_and_smap(cpu_idx: usize) {
+    crate::fpu::init_on_current_cpu(cpu_idx);
     init_syscall_msrs_on_current_cpu();
     let _ = enable_smap_on_current_cpu();
 }

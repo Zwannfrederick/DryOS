@@ -427,6 +427,15 @@ extern "C" fn rust_exception_dispatch(frame: &mut TrapFrame) {
     }
 
     if (frame.cs & 3) == 3 {
+        if frame.vector == 7 {
+            // `#NM`: first FPU/SIMD use of this thread (`CR0.TS = 1` first-use trap).
+            if let Some(cpu) = pcpu {
+                let idx = cpu.cpu_idx as usize;
+                if crate::fpu::on_device_not_available(idx, crate::sched::current_slot_on_cpu(idx)) {
+                    return;
+                }
+            }
+        }
         let cr2 = if frame.vector == 14 { read_cr2() } else { 0 };
         crate::proc::handle_user_exception(frame, cr2);
     }
