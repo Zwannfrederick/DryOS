@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "linux_tag": "v6.18",
+  "linux_commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "drivers": {
+    "virtio_rng": {
+      "upstream_path": "drivers/char/hw_random/virtio-rng.c",
+      "local_path": "vendor/linux-drivers/v6.18/virtio_rng/virtio-rng.c",
+      "sha256": "720433a85ce0ce6f84e85842b54d23c7c8e9bad792c66b1066accbaa7fb95a75",
+      "bytes": 5481,
+      "lines": 259,
+      "license": "GPL-2.0-only",
+      "pci_ids": ["1af4:1005", "1af4:1044"],
+      "pci_class": "0x00ff00",
+      "runtime_island": "dry-lx-rng",
+      "compartment_id": "0x0210",
+      "managed_slot": 1,
+      "capabilities": ["pci_mmio", "dma_pinned", "msix_notif", "fault_ep"],
+      "cflags": ["-DKBUILD_MODNAME=\"virtio_rng\""],
+      "status": "active_verified"
+    },
+    "drm_bochs": {
+      "upstream_path": "drivers/gpu/drm/tiny/bochs.c",
+      "local_path": "vendor/linux-drivers/v6.18/drm_bochs/bochs.c",
+      "sha256": "93f5c4bc2811ad1e0961a4e3d5c0410ac4b2336b2bdc96cc2c40802cc439ffe3",
+      "bytes": 22785,
+      "lines": 829,
+      "license": "GPL-2.0-or-later",
+      "pci_ids": ["1234:1111", "4321:1111"],
+      "pci_class": "0x038000",
+      "runtime_island": "dry-lx-drm-bochs",
+      "compartment_id": "0x0212",
+      "managed_slot": 6,
+      "capabilities": ["pci_mmio_bar0_wc", "pci_mmio_bar2_uc", "prime_dmabuf_frame_cap", "fault_ep"],
+      "cflags": ["-DCONFIG_HAS_IOPORT=0", "-DKBUILD_MODNAME=\"bochs\""],
+      "status": "active_verified"
+    },
+    "intel_i915_tgl": {
+      "upstream_path": "drivers/gpu/drm/i915/",
+      "local_path": "",
+      "sha256": "",
+      "license": "MIT",
+      "pci_ids": ["8086:9a49"],
+      "pci_class": "0x030000",
+      "runtime_island": "planned-i915-tgl",
+      "firmware_blobs": [
+        "/lib/firmware/i915/tgl_guc_70.1.1.bin.zst",
+        "/lib/firmware/i915/tgl_dmc_ver2_12.bin.zst"
+      ],
+      "capabilities": ["pci_mmio_64bit_gt4g", "vtd_iommu_slpt", "msi_irq", "guc_dmc_firmware", "gem_ttm_shmem"],
+      "status": "profile_audit_only"
+    },
+    "nvidia_open_ga107": {
+      "upstream_path": "drivers/nvidia/kernel-open/",
+      "local_path": "",
+      "sha256": "",
+      "license": "MIT",
+      "pci_ids": ["10de:25a0"],
+      "pci_class": "0x030000",
+      "runtime_island": "planned-nv-open-ga107",
+      "firmware_blobs": [
+        "/lib/firmware/nvidia/615.78.08/gsp_ga10x.bin"
+      ],
+      "shim_check_source": "drivers/lx-nv-open-shim/nv_os_shim_check.c",
+      "capabilities": ["pci_mmio_64bit_gt4g", "vtd_iommu_slpt", "msix_irq", "gsp_rpc_firmware", "nvidia_os_interface"],
+      "status": "shim_compile_only"
+    }
+  }
+}

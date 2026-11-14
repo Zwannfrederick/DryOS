@@ -76,9 +76,12 @@ struct P1InitBootInfo {
     pci_gpu_cap: u64,
     editor_mod_cap: u64,
     calc_mod_cap: u64,
+    lx_drm_mod_cap: u64,
+    pci_disp_aux_cap: u64,
+    boot_pci_func_count: u64,
 }
 
-const _: () = assert!(size_of::<P1InitBootInfo>() <= BOOT_MANIFEST_OFFSET);
+const _: () = assert!(size_of::<P1InitBootInfo>() == BOOT_MANIFEST_OFFSET);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,6 +92,11 @@ struct BootModManifestEntry {
 
 const _: () = assert!(
     BOOT_MANIFEST_OFFSET + MAX_LATCHED_MODULES * size_of::<BootModManifestEntry>()
+        <= crate::pci::BOOT_PCI_ENUM_OFFSET
+);
+const _: () = assert!(
+    crate::pci::BOOT_PCI_ENUM_OFFSET
+        + crate::pci::MAX_BOOT_PCI_FUNCS * size_of::<crate::pci::BootPciFuncRecord>()
         <= crate::pmm::PAGE_SIZE
 );
 
@@ -124,6 +132,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             27u64
         } else if cmdline.contains("gpu_test=1") {
             28u64
+        } else if cmdline.contains("lx_drm=1") {
+            29u64
         } else {
             20u64
         }
@@ -199,6 +209,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-editor.elf").unwrap_or(CapPtr::NULL);
             let calc_mod_cap =
                 mint_boot_module_cap(cs, lbl, "dry-calc.elf").unwrap_or(CapPtr::NULL);
+            let lx_drm_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-lx-drm-bochs.elf").unwrap_or(CapPtr::NULL);
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -236,6 +248,13 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             } else {
                 CapPtr::NULL
             };
+            let pci_disp_aux_cap = if session_mode >= 20
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_DISPLAY_AUX)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_DISPLAY_AUX)?
+            } else {
+                CapPtr::NULL
+            };
             let vault_ctrl_cap = if session_mode >= 20 {
                 crate::vault_ctrl::mint_root_vault_cap(cs, lbl)?
             } else {
@@ -245,6 +264,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             let (info_fr_cap, info_fh) =
                 cspace_alloc_frame(cs, lbl, lbl, PageOrder::Order4KiB, false, 0)?;
             let mod_count = latched_boot_module_count().min(MAX_LATCHED_MODULES);
+            let (pci_recs, pci_func_count) = crate::pci::latched_boot_pci_funcs();
             let boot_info = P1InitBootInfo {
                 magic: ROOT_INIT_BOOT_MAGIC,
                 echo_mod_cap: echo_cap.0,
@@ -275,8 +295,12 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 pci_gpu_cap: pci_gpu_cap.0,
                 editor_mod_cap: editor_mod_cap.0,
                 calc_mod_cap: calc_mod_cap.0,
+                lx_drm_mod_cap: lx_drm_mod_cap.0,
+                pci_disp_aux_cap: pci_disp_aux_cap.0,
+                boot_pci_func_count: pci_func_count as u64,
             };
-            // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header, `0x100..` manifest).
+            // SAFETY: `info_fh` is a freshly allocated, zeroed 4 KiB frame (`0x000..0x100` header,
+            // `0x100..0x700` manifest, `0x800..0x1000` PCI function enumeration records).
             unsafe {
                 copy_nonoverlapping(
                     (&raw const boot_info).cast::<u8>(),
@@ -307,6 +331,13 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                         );
                         m_idx += 1;
                     }
+                }
+                if pci_func_count > 0 {
+                    copy_nonoverlapping(
+                        pci_recs.as_ptr().cast::<u8>(),
+                        info_fh.hhdm_ptr().add(crate::pci::BOOT_PCI_ENUM_OFFSET),
+                        pci_func_count * size_of::<crate::pci::BootPciFuncRecord>(),
+                    );
                 }
             }
             map_4k(vs_h, BOOT_INFO_VADDR, info_fh, VmProt::USER_RO)

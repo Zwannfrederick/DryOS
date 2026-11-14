@@ -1,6 +1,6 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 14 Kasım 2026 (`Project Ascension 3.0`: `Milestone 2C-2` Donanım Temelleri + `Track B DRY Glass` Desktop Kapanışı)  
+> **Son Güncelleme:** 14 Kasım 2026 (`Project Ascension 4.0`: `DRY Glass 2.1` + `libdry-lx-compat` DRM Runtime + Hedef GPU Doğrulaması + `Live USB`)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
 > **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
@@ -59,9 +59,9 @@
 - **Azaltma:** Çekirdek ve native servisler `MIT OR GPL-2.0-only`; Linux sürücü adaları ayrı süreç sınırında `GPL-2.0-only`; saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları yasak.
 
 ### R-12: `DRY Glass` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Güncelleme — 14 Kasım 2026)
-- **Durum:** `MITIGATED (QEMU — Ascension 3.0 Track B)` / `OPEN (Bare-Metal iGPU)` (`ADR-009`, `ADR-020`, `P2`).
-- **Teknik Mekanizma:** Buzlu cam arka plan bulanıklığı, yuvarlatılmış yarı saydam kartlar ve `Floating + Tiling + Stacking/Tabbed` geçişlerinin yazılımsal GOP veya düşük uç donanımda kare süresini uzatması ya da UI mantığının çekirdeğe sızması.
-- **Uygulanan Savunma:** Tüm görsel/cam/WM mantığı Ring 3 `dry-display` (`userspace/src/glass/*`, `compositor.rs`) içinde tutuldu (`0` çekirdek UI satırı); `1024x768`..`1920x1080` arası `DirtyRegion` + `expand_blur_damage` kırpma, canlı `Quick Settings` / `Settings [9]` **`low_overhead_glass` (`Solid Fallback`)** anahtarı ve donanım `VirtIO-GPU` `#UD` -> anlık `UEFI GOP` fallback (`--p9-only`) ile doğrulandı (`10` PNG kanıtı).
+- **Durum:** `MITIGATED (QEMU — DRY Glass v1 / 2.0 / 2.1)` / `OPEN (Bare-Metal iGPU)` (`ADR-009`, `ADR-020`, `ADR-021`, `P2`).
+- **Teknik Mekanizma:** Buzlu cam arka plan bulanıklığı, yuvarlatılmış yarı saydam kartlar, `Floating + Tiling + Stacking/Tabbed` geçişleri ve `100%/125%/150%` HiDPI yeniden ölçeklemenin yazılımsal GOP veya düşük uç donanımda kare süresini uzatması ya da UI mantığının çekirdeğe sızması.
+- **Uygulanan Savunma:** Tüm görsel/cam/WM/TrueType AA mantığı Ring 3 `dry-display` (`userspace/src/{ttf,ui,glass}/*`, `compositor.rs`) içinde tutuldu (`0` çekirdek UI satırı); `DirtyRegion` + `expand_blur_damage` kırpma, `Adaptive Window Strip` + `Alt+W` önizleme ile üst çubuk taşmasının önlenmesi (`DRY Glass 2.1`), `low_overhead_glass` (`Solid Fallback`) anahtarı ve donanım `VirtIO-GPU` `#UD` -> anlık `UEFI GOP` fallback (`--p9/p10/p11-only`) ile doğrulandı (`9` PNG `DRY Glass 2.1`).
 
 ### R-13: `drypkg` Runtime Şişmesi ve Linux/Windows Uyumluluğunda Aşırı Vaat Riski (Yeni)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).
@@ -89,7 +89,12 @@
 - **Teknik Mekanizma:** (a) Uyuyan bir GPU MicroVM'in vCPU'ları `HLT` durumunda `%1.3` CPU tüketse bile VFIO/IOMMU DMA eşlemesinin misafir RAM'ini kalıcı sabitlemesi (`Exp-B2`: `256 MiB` misafir için `309.41 MiB` `VmRSS`); (b) TigerLake-H dizüstünde `01:00.0` RTX 3050 Ti Mobile cihazının muxless (`0302`) olması, IOMMU Grup 13'ü `00:01.0` PCIe Kök Portuyla paylaşması ve `D0` boşta bırakıldığında `~8–15 W` pil tüketmesi.
 - **Azaltma:** `Kademe 4` GPU MicroVM varsayılan açılışta kesinlikle çalıştırılmaz (*opt-in / on-demand*); birincil ekran taraması her zaman Intel `00:02.0` üzerinde yerel `dry-display` mülkiyetinde kalır; GPU kiralaması sona erdiğinde MicroVM kapatılıp cihaz `FLR` + ACPI `RTD3 D3cold` durumuna indirilir (`P5` fiziksel silikon kabul kapısı).
 
-### R-18: Önyükleme Modül Tablosu Tavanı (`MAX_LATCHED_MODULES = 16/16`) ve `Mock` vs Gerçek Linux Sürücü Adası Sınırları (Yeni — 12 Kasım 2026)
-- **Durum:** `OPEN / PLANNED` (`Milestone 2A-4a` #1 Önkoşulu -> `Milestone 2C-1` Gerçek Linux Island PoC).
-- **Teknik Mekanizma:** (a) `Milestone 2C-0` ile eklenen `dry-broker.elf` (`15`) ve `dry-mock-drv.elf` (`16`) sonrasında Limine önyükleme modül dizisi `16/16` dolu kapasiteye ulaşmıştır (`kernel/src/limine.rs:429` `MAX_LATCHED_MODULES = 16`, `kernel/src/irq/session.rs:202` `[CAP_NULL; 16]`, `userspace/src/vfs_mem.rs:14` `MAX_BOOT_ENTRIES = 20`); tavan artırılmadan 17. ELF64 modülü eklenirse modül önyüklemede sessizce kırpılır; (b) `dry-mock-drv.elf` kontrol/veri düzlemi (`unauth_denied=4`, `stale_revoked=5`) kanıtı olup saf CPU dönüşümü yapar (`0` `libdry_lx_*`, `0` `PciDev`/DMA/MSI-X/FLR) ve `IoRing` kontrol kapı zilinde hatalı istemciye karşı `50 ms` bekçi zaman aşımı kullanır.
-- **Azaltma:** Kesinleştirilen sırayla önce **`Milestone 2A-4a`** içinde `MAX_LATCHED_MODULES` (`16 -> 32`), `MAX_BOOT_ENTRIES` (`20 -> 36`) + önyükleme taşma assertion'ı, `XSAVEOPT` FPU/SIMD izolasyonu ve `FaultEndpoint` + `TCB`-bağlı birleşik `Endpoint + Notification` beklemesi tamamlanacak; ardından **`Milestone 2C-1`** içinde en küçük gerçek Linux sürücü bileşeni tamamen Ring 3 `libdry_lx_*` üzerinde (`0` çekirdek Linux ABI kodu) devreye alınacaktır.
+### R-18: Önyükleme Modül Tablosu Tavanı (`MAX_LATCHED_MODULES = 16 -> 32`) ve `Mock` vs Gerçek Linux Sürücü Adası Sınırları (Güncelleme — 14 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU — 2A-4a / 2C-1 / Ascension 4.0)` (`ADR-017`, `ADR-022`).
+- **Teknik Mekanizma:** (a) Önyükleme modül dizisinin `16` yuvada doyup sessiz kırpma yapması; (b) `dry-mock-drv.elf` (`2C-0`) yalnızca CPU düzlemi PoC iken gerçek `virtio-rng` ve `drm/tiny/bochs` sürücü adalarının `PCI`/`DMA`/IRQ/kurtarma ile çalışması gerekiyordu.
+- **Uygulanan Savunma:** `MAX_LATCHED_MODULES = 32` (`24/32` modül aktif) ve `MAX_BOOT_ENTRIES = 36` artırıldı; `dry-lx-rng.elf` (`1af4:1044`, `v6.18` `virtio-rng.c`) ve `dry-lx-drm-bochs.elf` (`1234:1111`, `v6.18` `bochs.c`) gerçek QEMU aygıtları üzerinde tam `quiesce=3` + `gen=2` yeniden bağlanmayla doğrulandı (`--p6-only`, `--p12-only`, `leaked_frames=0`).
+
+### R-19: İkili Linux `.ko` ABI Kayması, Çoklu-GPU BAR0 Çakışması ve Fiziksel Iris Xe / GSP Karmaşıklığı (Yeni — 14 Kasım 2026)
+- **Durum:** `.ko` Reddi & BAR0 Koruması `MITIGATED (QEMU — Ascension 4.0)` / Fiziksel `i915`/`xe` & `NVIDIA GSP` `OPEN / PLANNED (P5)` (`ADR-022`).
+- **Teknik Mekanizma:** (a) Ham `.ko` yükleme girişimleri çekirdek içi Linux modül sembol/struct ABI kaymasına yol açar; (b) İkincil bir DRM sürücü adasının (`PCI_OBJ_DISPLAY_AUX = 6`) birincil UEFI `GOP` çerçeve tamponu `BAR0`'ına yazması masaüstünü bozabilir; (c) Konak fiziksel GPU'lar (`8086:9a49` `Iris Xe`, `10de:25a0` `RTX 3050 Ti`) henüz bare-metal KMS/GEM/TTM veya `27.04 MB` `gsp_ga10x.bin` RPC katmanına sahip değildir.
+- **Uygulanan Savunma & Açık Sınır:** `lx_driver_manager.py` ve `COMPAT_CATALOG.json` ham `.ko` paketlerini açıkça reddederek kaynak bazlı `libdry-lx-compat` statik derlemesini ve SHA-256 doğrulamasını zorunlu kılar (`4/4` birim testi, `54` kaynak dosyası); çekirdek `pci.rs` ve `vtd.rs` ikinci DRM adası için `PCI_OBJ_DISPLAY_AUX = 6` + GOP çakışma koruması uygular (`--p12-only`: `800x600` Bochs + `1280x800` GOP masaüstü eş-varoluş `PASS`). Fiziksel `8086:9a49` (`GuC`/`GEM`/`TTM`) ve `10de:25a0` (`gsp_ga10x.bin` + `RTD3`) yalnızca `DRY_HOST_ONLY` salt-okunur doğrulama + `nv_os_shim_check.c` ön-derleme aşamasındadır ve bare-metal `modeset` iddiası yapılmaz.

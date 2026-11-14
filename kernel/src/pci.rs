@@ -29,6 +29,9 @@ use crate::iommu::{attach_device_domain, detach_and_scrub_domain, map_dma_range,
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci_bar::{
     DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW, DEV_MAP_OP_MASK, DEV_MAP_OP_QUERY_BARS,
+    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G, PCI_BAR_FLAG_IO, PCI_BAR_FLAG_MMIO,
+    PCI_BAR_FLAG_PREFETCHABLE, PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_VIRTIO,
+    PciBarDesc, PciBarKind,
 };
 use crate::pmm::{
     adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
@@ -48,7 +51,7 @@ mod pci_cfg;
 mod pci_window;
 
 pub use pci_cfg::{
-    UserVirtioPciInfo, PCI_OBJ_IOMMU_TEST, PCI_OBJ_IVSHMEM, PCI_OBJ_QEMU_EDU,
+    UserVirtioPciInfo, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IOMMU_TEST, PCI_OBJ_IVSHMEM, PCI_OBJ_QEMU_EDU,
     PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG,
 };
 pub(crate) use pci_cfg::{
@@ -145,11 +148,98 @@ pub fn pci_dma_telemetry() -> (u64, u64) {
     (denied, quiesces)
 }
 
+pub const BOOT_PCI_ENUM_OFFSET: usize = 0x0800;
+pub const MAX_BOOT_PCI_FUNCS: usize = 64;
+
+/// Sanitized 32-byte PCI function descriptor published read-only in boot info (0 phys addrs).
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct BootPciFuncRecord {
+    pub bus_dev_fn: u16,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub subsys_vendor_id: u16,
+    pub subsys_id: u16,
+    pub revision_id: u8,
+    pub prog_if: u8,
+    pub subclass: u8,
+    pub class_code: u8,
+    pub managed_slot: u8,
+    pub dev_flags: u8,
+    pub bar_flags: [u8; 6],
+    pub irq_pin: u8,
+    pub _pad: u8,
+    pub bar0_size_bytes: u64,
+}
+
+const _: () = assert!(size_of::<BootPciFuncRecord>() == 32);
+
+struct BootPciEnumTable {
+    recs: UnsafeCell<[BootPciFuncRecord; MAX_BOOT_PCI_FUNCS]>,
+    count: AtomicU32,
+}
+
+// SAFETY: Populated once on BSP during `init_pci_devices()` before Ring-3 launch.
+unsafe impl Sync for BootPciEnumTable {}
+
+static BOOT_PCI_ENUM: BootPciEnumTable = BootPciEnumTable {
+    recs: UnsafeCell::new([BootPciFuncRecord {
+        bus_dev_fn: 0,
+        vendor_id: 0,
+        device_id: 0,
+        subsys_vendor_id: 0,
+        subsys_id: 0,
+        revision_id: 0,
+        prog_if: 0,
+        subclass: 0,
+        class_code: 0,
+        managed_slot: 0xff,
+        dev_flags: 0,
+        bar_flags: [0; 6],
+        irq_pin: 0,
+        _pad: 0,
+        bar0_size_bytes: 0,
+    }; MAX_BOOT_PCI_FUNCS]),
+    count: AtomicU32::new(0),
+};
+
+#[inline]
+pub fn latched_boot_pci_funcs() -> (&'static [BootPciFuncRecord], usize) {
+    let cnt = (BOOT_PCI_ENUM.count.load(Ordering::Acquire) as usize).min(MAX_BOOT_PCI_FUNCS);
+    // SAFETY: Immutable after `init_pci_devices()` on BSP.
+    let recs = unsafe {
+        core::slice::from_raw_parts(BOOT_PCI_ENUM.recs.get().cast::<BootPciFuncRecord>(), cnt)
+    };
+    (recs, cnt)
+}
+
+#[inline]
+fn encode_bar_desc_flags(bar: PciBarDesc) -> u8 {
+    match bar.kind {
+        PciBarKind::IoPort => PCI_BAR_FLAG_IO as u8,
+        PciBarKind::Mem32 | PciBarKind::Mem64 => {
+            let mut f = PCI_BAR_FLAG_MMIO as u8;
+            if bar.kind == PciBarKind::Mem64 {
+                f |= PCI_BAR_FLAG_64BIT as u8;
+            }
+            if bar.prefetchable {
+                f |= PCI_BAR_FLAG_PREFETCHABLE as u8;
+            }
+            if bar.above_4g {
+                f |= PCI_BAR_FLAG_ABOVE_4G as u8;
+            }
+            f
+        }
+        _ => 0,
+    }
+}
+
 /// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover VirtIO and test controllers.
 #[inline(never)]
 pub fn init_pci_devices() -> bool {
     crate::pci_bar::run_bar64_unit_tests();
     let mut found = 0usize;
+    let mut rec_cnt = 0usize;
     for bus in 0..=4u8 {
         for dev in 0..32u8 {
             let id0 = pci_read_u32(bus, dev, 0, 0x00);
@@ -159,57 +249,129 @@ pub fn init_pci_devices() -> bool {
             let hdr = pci_read_u8(bus, dev, 0, 0x0e);
             let max_fn = if (hdr & 0x80) != 0 { 8u8 } else { 1u8 };
             for func in 0..max_fn {
-                let Some((slot_idx, vdev)) = probe_pci_function(bus, dev, func) else {
-                    continue;
-                };
-                if PCI_DEVS[slot_idx].present.load(Ordering::Relaxed) {
+                let id = pci_read_u32(bus, dev, func, 0x00);
+                let vid = (id & 0xffff) as u16;
+                if vid == 0xffff {
                     continue;
                 }
-                // SAFETY: Single-threaded BSP init before `present = true`.
-                unsafe {
-                    *PCI_DEVS[slot_idx].dev_inner.get() = vdev;
-                }
-                PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
-                found += 1;
-                let label = match slot_idx {
-                    PCI_OBJ_VIRTIO_BLK => "virtio-blk",
-                    PCI_OBJ_VIRTIO_RNG => "virtio-rng",
-                    PCI_OBJ_VIRTIO_GPU => "virtio-gpu",
-                    PCI_OBJ_QEMU_EDU => "qemu-edu",
-                    PCI_OBJ_IVSHMEM => "ivshmem",
-                    PCI_OBJ_IOMMU_TEST => "iommu-testdev",
-                    _ => "pci",
+                let did = (id >> 16) as u16;
+                let class_rev = pci_read_u32(bus, dev, func, 0x08);
+                let fn_hdr = pci_read_u8(bus, dev, func, 0x0e) & 0x7f;
+                let subsys = if fn_hdr == 0 {
+                    pci_read_u32(bus, dev, func, 0x2c)
+                } else {
+                    0
                 };
-                let bar64_cnt = vdev
-                    .bars
-                    .iter()
-                    .filter(|b| b.kind == crate::pci_bar::PciBarKind::Mem64)
-                    .count();
-                let above_4g = vdev.bars.iter().any(|b| b.is_mmio() && b.above_4g);
-                serial_println!(
-                    "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x} bar64={} above4g={} msi={:#x} msix={:#x}({})",
-                    label,
-                    vdev.bus,
-                    vdev.dev,
-                    vdev.func,
-                    vdev.info.vendor_id,
-                    vdev.info.device_id,
-                    vdev.bar_idx,
-                    vdev.phys_base,
-                    vdev.num_pages,
-                    vdev.info.common_off,
-                    vdev.info.notify_off,
-                    vdev.info.notify_mult,
-                    vdev.info.device_off,
-                    bar64_cnt,
-                    above_4g as u8,
-                    vdev.msi_cap_off,
-                    vdev.msix_cap_off,
-                    vdev.msix_table_len,
-                );
+                let irq_pin = pci_read_u8(bus, dev, func, 0x3d);
+                let bdf = ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
+
+                let mut rec = BootPciFuncRecord {
+                    bus_dev_fn: bdf,
+                    vendor_id: vid,
+                    device_id: did,
+                    subsys_vendor_id: (subsys & 0xffff) as u16,
+                    subsys_id: (subsys >> 16) as u16,
+                    revision_id: (class_rev & 0xff) as u8,
+                    prog_if: ((class_rev >> 8) & 0xff) as u8,
+                    subclass: ((class_rev >> 16) & 0xff) as u8,
+                    class_code: (class_rev >> 24) as u8,
+                    managed_slot: 0xff,
+                    dev_flags: 0,
+                    bar_flags: [0; 6],
+                    irq_pin,
+                    _pad: 0,
+                    bar0_size_bytes: 0,
+                };
+                if fn_hdr == 0 {
+                    for bi in 0..6usize {
+                        let raw = pci_read_u32(bus, dev, func, (0x10 + bi * 4) as u8);
+                        if raw != 0 && (raw & 1) != 0 {
+                            rec.bar_flags[bi] = PCI_BAR_FLAG_IO as u8;
+                        } else if (raw & !0xf) != 0 {
+                            let mut f = PCI_BAR_FLAG_MMIO as u8;
+                            if (raw & 0x6) == 0x4 {
+                                f |= PCI_BAR_FLAG_64BIT as u8;
+                            }
+                            if (raw & 0x8) != 0 {
+                                f |= PCI_BAR_FLAG_PREFETCHABLE as u8;
+                            }
+                            rec.bar_flags[bi] = f;
+                        }
+                    }
+                }
+
+                if let Some((slot_idx, vdev)) = probe_pci_function(bus, dev, func) {
+                    rec.managed_slot = slot_idx as u8;
+                    rec.bar0_size_bytes = vdev.bars[0].size_bytes;
+                    for (bi, b) in vdev.bars.iter().enumerate() {
+                        rec.bar_flags[bi] = encode_bar_desc_flags(*b);
+                    }
+                    if vdev.is_virtio {
+                        rec.dev_flags |= PCI_DEV_FLAG_VIRTIO as u8;
+                    }
+                    if vdev.msi_cap_off != 0 {
+                        rec.dev_flags |= PCI_DEV_FLAG_MSI as u8;
+                    }
+                    if vdev.msix_cap_off != 0 {
+                        rec.dev_flags |= PCI_DEV_FLAG_MSIX as u8;
+                    }
+                    if !PCI_DEVS[slot_idx].present.load(Ordering::Relaxed) {
+                        // SAFETY: Single-threaded BSP init before `present = true`.
+                        unsafe {
+                            *PCI_DEVS[slot_idx].dev_inner.get() = vdev;
+                        }
+                        PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
+                        found += 1;
+                        let label = match slot_idx {
+                            PCI_OBJ_VIRTIO_BLK => "virtio-blk",
+                            PCI_OBJ_VIRTIO_RNG => "virtio-rng",
+                            PCI_OBJ_VIRTIO_GPU => "virtio-gpu",
+                            PCI_OBJ_QEMU_EDU => "qemu-edu",
+                            PCI_OBJ_IVSHMEM => "ivshmem",
+                            PCI_OBJ_IOMMU_TEST => "iommu-testdev",
+                            PCI_OBJ_DISPLAY_AUX => "display-aux",
+                            _ => "pci",
+                        };
+                        let bar64_cnt = vdev
+                            .bars
+                            .iter()
+                            .filter(|b| b.kind == crate::pci_bar::PciBarKind::Mem64)
+                            .count();
+                        let above_4g = vdev.bars.iter().any(|b| b.is_mmio() && b.above_4g);
+                        serial_println!(
+                            "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x} bar64={} above4g={} msi={:#x} msix={:#x}({})",
+                            label,
+                            vdev.bus,
+                            vdev.dev,
+                            vdev.func,
+                            vdev.info.vendor_id,
+                            vdev.info.device_id,
+                            vdev.bar_idx,
+                            vdev.phys_base,
+                            vdev.num_pages,
+                            vdev.info.common_off,
+                            vdev.info.notify_off,
+                            vdev.info.notify_mult,
+                            vdev.info.device_off,
+                            bar64_cnt,
+                            above_4g as u8,
+                            vdev.msi_cap_off,
+                            vdev.msix_cap_off,
+                            vdev.msix_table_len,
+                        );
+                    }
+                }
+                if rec_cnt < MAX_BOOT_PCI_FUNCS {
+                    // SAFETY: Single-threaded BSP init before `BOOT_PCI_ENUM.count` publish.
+                    unsafe {
+                        (*BOOT_PCI_ENUM.recs.get())[rec_cnt] = rec;
+                    }
+                    rec_cnt += 1;
+                }
             }
         }
     }
+    BOOT_PCI_ENUM.count.store(rec_cnt as u32, Ordering::Release);
     if found == 0 {
         serial_println!("[DRY-PCI] No managed PCI controllers attached");
     }

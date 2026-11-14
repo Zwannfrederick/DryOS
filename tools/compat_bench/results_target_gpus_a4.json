@@ -1,0 +1,275 @@
+{
+  "audit_mode": "strictly_read_only_host_and_shim_compile",
+  "intel_iris_xe_8086_9a49": {
+    "pci": {
+      "found": true,
+      "bdf": "0000:00:02.0",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a49",
+      "class_code": "0x30000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3a5b",
+      "host_driver": "i915",
+      "iommu_group": null,
+      "bars": [
+        {
+          "bar": 0,
+          "start": "0x6104000000",
+          "end": "0x6104ffffff",
+          "size_bytes": 16777216,
+          "size_mib": 16.0,
+          "flags": "0x140204",
+          "is_io": false,
+          "is_mem": true,
+          "is_64bit": false,
+          "is_prefetchable": false,
+          "above_4g": true
+        },
+        {
+          "bar": 2,
+          "start": "0x4000000000",
+          "end": "0x400fffffff",
+          "size_bytes": 268435456,
+          "size_mib": 256.0,
+          "flags": "0x14220c",
+          "is_io": false,
+          "is_mem": true,
+          "is_64bit": false,
+          "is_prefetchable": true,
+          "above_4g": true
+        },
+        {
+          "bar": 4,
+          "start": "0x5000",
+          "end": "0x503f",
+          "size_bytes": 64,
+          "size_mib": 0.0,
+          "flags": "0x40101",
+          "is_io": true,
+          "is_mem": false,
+          "is_64bit": false,
+          "is_prefetchable": false,
+          "above_4g": false
+        }
+      ],
+      "has_bar_above_4g": true,
+      "catalog_match": {
+        "query": "8086:9a49",
+        "matched": true,
+        "matches": [
+          {
+            "driver": "intel_i915_tgl",
+            "pci_id": "8086:9a49",
+            "status": "profile_audit_only",
+            "runtime_island": "planned-i915-tgl",
+            "compartment_id": "",
+            "capabilities": [
+              "pci_mmio_64bit_gt4g",
+              "vtd_iommu_slpt",
+              "msi_irq",
+              "guc_dmc_firmware",
+              "gem_ttm_shmem"
+            ]
+          }
+        ]
+      }
+    },
+    "tgl_firmware_count": 15,
+    "tgl_firmware_sample": [
+      {
+        "path": "/lib/firmware/i915/tgl_dmc_ver2_04.bin.zst",
+        "bytes": 4704
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_dmc_ver2_06.bin.zst",
+        "bytes": 4800
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_dmc_ver2_08.bin.zst",
+        "bytes": 4865
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_dmc_ver2_12.bin.zst",
+        "bytes": 5141
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_guc_35.2.0.bin.zst",
+        "bytes": 122906
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_guc_49.0.1.bin.zst",
+        "bytes": 114102
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_guc_62.0.0.bin.zst",
+        "bytes": 117479
+      },
+      {
+        "path": "/lib/firmware/i915/tgl_guc_69.0.3.bin.zst",
+        "bytes": 130302
+      }
+    ],
+    "execution_status": "read_only_host_inventory_and_bar_vt_d_alignment_verified",
+    "live_modeset_verified_on_dryos": false,
+    "missing_for_full_modeset": [
+      "Linux v6.18 drm/i915 Multi-File GEM/TTM/Display Engine Shims",
+      "GuC (`tgl_guc_70.1.1`) & DMC (`tgl_dmc_ver2_12`) Blob Loader + Zstd Streamer",
+      "Hardware Iris Xe Display Engine MMIO bring-up on bare metal"
+    ]
+  },
+  "nvidia_rtx_3050_ti_10de_25a0": {
+    "pci": {
+      "found": true,
+      "bdf": "0000:01:00.0",
+      "vendor_id": "0x10de",
+      "device_id": "0x25a0",
+      "class_code": "0x30200",
+      "revision": "0xa1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3a5b",
+      "host_driver": "nvidia",
+      "iommu_group": null,
+      "bars": [
+        {
+          "bar": 0,
+          "start": "0x54000000",
+          "end": "0x54ffffff",
+          "size_bytes": 16777216,
+          "size_mib": 16.0,
+          "flags": "0x40200",
+          "is_io": false,
+          "is_mem": true,
+          "is_64bit": false,
+          "is_prefetchable": false,
+          "above_4g": false
+        },
+        {
+          "bar": 1,
+          "start": "0x6000000000",
+          "end": "0x60ffffffff",
+          "size_bytes": 4294967296,
+          "size_mib": 4096.0,
+          "flags": "0x14220c",
+          "is_io": false,
+          "is_mem": true,
+          "is_64bit": false,
+          "is_prefetchable": true,
+          "above_4g": true
+        },
+        {
+          "bar": 3,
+          "start": "0x6100000000",
+          "end": "0x6101ffffff",
+          "size_bytes": 33554432,
+          "size_mib": 32.0,
+          "flags": "0x14220c",
+          "is_io": false,
+          "is_mem": true,
+          "is_64bit": false,
+          "is_prefetchable": true,
+          "above_4g": true
+        },
+        {
+          "bar": 5,
+          "start": "0x4000",
+          "end": "0x407f",
+          "size_bytes": 128,
+          "size_mib": 0.0,
+          "flags": "0x40101",
+          "is_io": true,
+          "is_mem": false,
+          "is_64bit": false,
+          "is_prefetchable": false,
+          "above_4g": false
+        }
+      ],
+      "has_bar_above_4g": true,
+      "catalog_match": {
+        "query": "10de:25a0",
+        "matched": true,
+        "matches": [
+          {
+            "driver": "nvidia_open_ga107",
+            "pci_id": "10de:25a0",
+            "status": "shim_compile_only",
+            "runtime_island": "planned-nv-open-ga107",
+            "compartment_id": "",
+            "capabilities": [
+              "pci_mmio_64bit_gt4g",
+              "vtd_iommu_slpt",
+              "msix_irq",
+              "gsp_rpc_firmware",
+              "nvidia_os_interface"
+            ]
+          }
+        ]
+      }
+    },
+    "firmware_615": [
+      {
+        "path": "/lib/firmware/nvidia/615.78.08/gsp_ga10x.bin",
+        "bytes": 27043992
+      },
+      {
+        "path": "/lib/firmware/nvidia/615.78.08/gsp_tu10x.bin",
+        "bytes": 22901632
+      },
+      {
+        "path": "/lib/firmware/nvidia/615.78.08/ucodes_ga10x.bin",
+        "bytes": 58215936
+      },
+      {
+        "path": "/lib/firmware/nvidia/615.78.08/ucodes_tu10x.bin",
+        "bytes": 8837632
+      }
+    ],
+    "firmware_ga107_gsp": [
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/booter_load-535.113.01.bin.zst",
+        "bytes": 33114
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/booter_load-570.144.bin.zst",
+        "bytes": 35095
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/booter_unload-535.113.01.bin.zst",
+        "bytes": 18906
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/booter_unload-570.144.bin.zst",
+        "bytes": 20302
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/bootloader-535.113.01.bin.zst",
+        "bytes": 16468
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin.zst",
+        "bytes": 17843
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/gsp-535.113.01.bin.zst",
+        "bytes": 26285961
+      },
+      {
+        "path": "/lib/firmware/nvidia/ga107/gsp/gsp-570.144.bin.zst",
+        "bytes": 51762663
+      }
+    ],
+    "os_interface_shim": {
+      "shim_source": "drivers/lx-nv-open-shim/nv_os_shim_check.c",
+      "fallback_build_ok": true,
+      "nvidia_header_dir": "/usr/src/nvidia-615.78.08/kernel-open/common/inc",
+      "nvidia_header_build_ok": true
+    },
+    "execution_status": "read_only_host_inventory_and_os_interface_compile_verified",
+    "live_modeset_verified_on_dryos": false,
+    "missing_for_full_modeset": [
+      "NVIDIA OpenRM Core + libspdm + GSP RPC Queue Bring-up",
+      "27 MiB GSP Firmware Loader (`gsp_ga10x.bin`) over DMA Page Tables",
+      "NVIDIA OpenRM 64-bit >4 GiB BAR1 4 GiB Window / MSI-X Runtime Integration"
+    ]
+  }
+}

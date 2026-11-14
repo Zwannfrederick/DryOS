@@ -12,6 +12,7 @@ use crate::gpu_audit::{
     run_gpu_scanout_audit, spawn_live_gpu, teardown_live_gpu, trigger_live_gpu_fault_and_recover,
     LiveGpuSession,
 };
+use crate::lx_drm_audit::{run_lx_drm_bochs_audit, teardown_live_lx_drm, LxDrmLiveSession};
 use crate::lx_island_audit::run_lx_island_audit;
 use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
@@ -143,16 +144,17 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     }
 
     let mut sec_audit_done =
-        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28);
+        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28 | 29);
     let mut gpu_live: Option<LiveGpuSession> =
         if boot.pci_gpu_cap != 0
             && boot.gpu_mod_cap != 0
-            && !matches!(boot.session_mode, 25..=28)
+            && !matches!(boot.session_mode, 25..=29)
         {
             spawn_live_gpu(boot, disp_sup_cap).ok()
         } else {
             None
         };
+    let mut lx_drm_live: Option<LxDrmLiveSession> = None;
     let mut restarts = 0u64;
 
     loop {
@@ -245,6 +247,22 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         Err(code) => {
                             let mut elb = LineBuilder::new();
                             elb.push_bytes(b"[DRY-GPU-FAIL] code=");
+                            elb.push_u64(code as u64);
+                            log_line(&elb);
+                            sys_exit(code);
+                        }
+                    }
+                } else if boot.session_mode == 29 {
+                    match run_lx_drm_bochs_audit(
+                        boot_info_addr,
+                        boot,
+                        vfs_sup_cap,
+                        vault_sup_cap,
+                    ) {
+                        Ok(live) => lx_drm_live = Some(live),
+                        Err(code) => {
+                            let mut elb = LineBuilder::new();
+                            elb.push_bytes(b"[DRY-LX-DRM-FAIL] code=");
                             elb.push_u64(code as u64);
                             log_line(&elb);
                             sys_exit(code);
@@ -684,6 +702,10 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     blb.push_bytes(b" inval_rej=");
     blb.push_u64(ctx.inval_rejects);
     log_line(&blb);
+
+    if let Some(live_drm) = lx_drm_live.take() {
+        teardown_live_lx_drm(live_drm);
+    }
 
     if let Some(live) = gpu_live.take() {
         teardown_live_gpu(live, disp_sup_cap);

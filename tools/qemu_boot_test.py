@@ -3,6 +3,7 @@
 """Build x86-64 `dry-kernel` offline and verify QEMU UEFI boot via serial + exit code."""
 
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -34,12 +35,14 @@ from qemu_p8_hw_validators import run_p8_hw_suite
 from qemu_p9_glass_validators import run_p9_glass_suite
 from qemu_p10_glass2_validators import run_p10_glass2_suite
 from qemu_p11_glass21_validators import run_p11_glass21_suite
+from qemu_p12_lx_compat_validators import run_p12_lx_compat_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
 USERSPACE_DIR = ROOT / "userspace"
 LX_ISLAND_DIR = ROOT / "drivers" / "lx-virtio-rng-island"
+LX_DRM_ISLAND_DIR = ROOT / "drivers" / "lx-drm-bochs-island"
 BUILD_DIR = KERNEL_DIR / "build"
 TC_DIR = ROOT / ".toolchains"
 SYSROOT = TC_DIR / "sysroot"
@@ -76,6 +79,7 @@ USERSPACE_MODS = (
     ("dry-hw-test", "dry-hw-test.elf"),
     ("dry-editor", "dry-editor.elf"),
     ("dry-calc", "dry-calc.elf"),
+    ("dry-lx-drm-bochs", "dry-lx-drm-bochs.elf"),
 )
 
 
@@ -229,6 +233,78 @@ def build_lx_rng_island() -> pathlib.Path:
     return dst_bin
 
 
+def build_lx_drm_bochs_island() -> pathlib.Path:
+    """Verify upstream SHA-256, build cached `liblx_drm_bochs.a`, and link `dry-lx-drm-bochs`."""
+    mgr = ROOT / "tools" / "lx_compat" / "lx_driver_manager.py"
+    subprocess.check_call([sys.executable, str(mgr), "verify", "--all"])
+    meta_json = subprocess.check_output(
+        [sys.executable, str(mgr), "build-cache", "--driver", "drm_bochs"],
+        text=True,
+    )
+    archive_dir = pathlib.Path(json.loads(meta_json)["archive_path"]).parent
+    linker_script = LX_DRM_ISLAND_DIR / "linker.ld"
+    lx_env = {
+        **os.environ,
+        "RUSTC_BOOTSTRAP": "1",
+        "CARGO_HOME": str(CARGO_HOME),
+        "__CARGO_TESTS_ONLY_SRC_ROOT": str(SYSROOT / "lib" / "rustlib" / "src" / "rust" / "library"),
+        "RUSTFLAGS": " ".join(
+            [
+                f"--sysroot={SYSROOT}",
+                "-C",
+                "relocation-model=static",
+                "-C",
+                "target-feature=-sse,-sse2,-avx",
+                "-C",
+                f"link-arg=-T{linker_script}",
+                "-C",
+                "link-arg=-zmax-page-size=0x1000",
+                "-L",
+                f"native={archive_dir}",
+            ]
+        ),
+    }
+    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-lx-drm-bochs...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "clippy",
+            "--offline",
+            "--manifest-path",
+            str(LX_DRM_ISLAND_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        env=lx_env,
+    )
+    print("[QEMU-TEST] Building release ELF64 dry-lx-drm-bochs (GPL-2.0-or-later isolated crate)...")
+    subprocess.check_call(
+        [
+            "cargo",
+            "build",
+            "--offline",
+            "--manifest-path",
+            str(LX_DRM_ISLAND_DIR / "Cargo.toml"),
+            "-Z",
+            "build-std=core,compiler_builtins",
+            "--target",
+            "x86_64-unknown-none",
+            "--release",
+        ],
+        env=lx_env,
+    )
+    lx_bin = LX_DRM_ISLAND_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-drm-bochs"
+    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-drm-bochs"
+    dst_bin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(lx_bin, dst_bin)
+    return dst_bin
+
+
 def build_userspace() -> list[pathlib.Path]:
     env = userspace_cargo_env()
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
@@ -270,6 +346,7 @@ def build_userspace() -> list[pathlib.Path]:
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
     build_lx_rng_island()
+    build_lx_drm_bochs_island()
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():
@@ -609,6 +686,7 @@ def main() -> None:
     parser.add_argument("--p9-only", action="store_true", help="Run only DRY Glass Desktop, Multi-Res VirtIO-GPU & Native Apps suite")
     parser.add_argument("--p10-only", action="store_true", help="Run only DRY Glass 2.0 TrueType UI, 6 Native Apps, Multi-DPI & Multi-Res suite")
     parser.add_argument("--p11-only", action="store_true", help="Run only DRY Glass 2.1 Adaptive Window Strip, Overview & HiDPI Sidebar suite")
+    parser.add_argument("--p12-only", action="store_true", help="Run only Ascension 4.0 Linux DRM (bochs.c) Runtime Compatibility suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -667,6 +745,11 @@ def main() -> None:
     if args.p11_only:
         n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p11} DRY GLASS 2.1 CHECKS PASSED.")
+        return
+
+    if args.p12_only:
+        n_p12 = run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p12} LINUX DRM COMPATIBILITY CHECKS PASSED.")
         return
 
     if args.p3_matrix:
@@ -752,13 +835,14 @@ def main() -> None:
     n_p9 = run_p9_glass_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p10 = run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p12 = run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11} DETERMINISTIC QEMU CHECKS "
+        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12} DETERMINISTIC QEMU CHECKS "
         f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
         f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW + "
-        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1) PASSED."
+        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1 + {n_p12} LX DRM) PASSED."
     )
 
 

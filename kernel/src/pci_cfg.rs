@@ -32,7 +32,8 @@ pub const PCI_OBJ_VIRTIO_GPU: usize = 2;
 pub const PCI_OBJ_QEMU_EDU: usize = 3;
 pub const PCI_OBJ_IVSHMEM: usize = 4;
 pub const PCI_OBJ_IOMMU_TEST: usize = 5;
-pub(crate) const PCI_DEV_COUNT: usize = 6;
+pub const PCI_OBJ_DISPLAY_AUX: usize = 6;
+pub(crate) const PCI_DEV_COUNT: usize = 7;
 
 const PCI_CAP_ID_MSI: u8 = 0x05;
 const PCI_CAP_ID_VNDR: u8 = 0x09;
@@ -254,7 +255,34 @@ pub(crate) fn probe_pci_function(
     let id = pci_read_u32(bus, dev, func, 0x00);
     let vendor_id = (id & 0xffff) as u16;
     let device_id = (id >> 16) as u16;
-    let (slot_idx, is_virtio) = match_managed_pci_slot(vendor_id, device_id)?;
+    let (slot_idx, is_virtio) = if let Some(slot) = match_managed_pci_slot(vendor_id, device_id) {
+        slot
+    } else {
+        // Generic display auxiliary controller discovery (`class_code == 0x03`, zero vendor IDs in kernel).
+        let class_rev = pci_read_u32(bus, dev, func, 0x08);
+        if ((class_rev >> 24) as u8) != 0x03 {
+            return None;
+        }
+        let subclass = ((class_rev >> 16) & 0xff) as u8;
+        let raw0 = pci_read_u32(bus, dev, func, 0x10);
+        if (raw0 & 0x1) != 0 {
+            return None;
+        }
+        let bar0_phys = if (raw0 & 0x6) == 0x4 {
+            let raw1 = pci_read_u32(bus, dev, func, 0x14);
+            ((raw1 as u64) << 32) | ((raw0 as u64) & !0xfu64)
+        } else {
+            (raw0 as u64) & !0xfu64
+        };
+        if let Some(fb) = crate::display::framebuffer_summary() {
+            if bar0_phys != 0 && bar0_phys == fb.phys_base {
+                return None;
+            }
+        } else if subclass == 0x00 {
+            return None;
+        }
+        (PCI_OBJ_DISPLAY_AUX, false)
+    };
 
     let bars = probe_function_bars(bus, dev, func);
     let status = pci_read_u16(bus, dev, func, 0x06);

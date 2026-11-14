@@ -1,7 +1,7 @@
 # DRY OS & DRY Kernel — Sistem Mimarisi
 
-> **Durum Tarihi:** 14 Kasım 2026 (`Project Ascension 3.0`: `Milestone 2C-2` Donanım Temelleri + `Track B: DRY Glass` Masaüstü)  
-> **Aşama:** Faz 1..2 (`1df3842..9f9c575`), `Ascension 2.0` (`2A-4a` + `2C-1` + `Priority C`: `1879128`), `Milestone 2C-2` (`8d230df`) ve **`Track B: DRY Glass` Masaüstü** Tamamlandı (`ADR-001` .. `ADR-020` Yürürlükte)  
+> **Durum Tarihi:** 14 Kasım 2026 (`Project Ascension 4.0`: `DRY Glass 2.1` + `libdry-lx-compat` `bochs.c` DRM Adası + GPU Doğrulama + Live USB)  
+> **Aşama:** Faz 1..2, `Ascension 2.0`, `Ascension 3.0`, `DRY Glass 2.0/2.1` ve `libdry-lx-compat` (`bochs.c` + Live USB) Tamamlandı (`ADR-001` .. `ADR-022` Yürürlükte)  
 > **Epistemik Etiketler:** Bu belgedeki her kritik iddia aşağıdakilerden biriyle işaretlenmiştir:  
 > - `[DOĞRULANDI]` — Birincil kaynak, ikili (binary) sembol analizi veya otomatik testlerle kanıtlandı.  
 > - `[HİPOTEZ]` — Teknik olarak tutarlı ancak deney/bare-metal ile yanlışlanmaya açık tasarım iddiası.  
@@ -191,7 +191,13 @@
 
 - **Tipografi (`userspace/src/ttf/*`, `assets/fonts/`):** Dış sandık veya heap olmadan çalışan SFNT ayrıştırıcısı, `24.8` sabit-nokta 256-seviyeli analitik gri-ton rasterleştirici ve `96 KiB` `.bss` (`512` yuva) glif önbelleği (`DrySans`/`DryMono`, SIL OFL 1.1, Türkçe dahil Latin Extended-A + `100%/125%/150%` `scale_px`). Eski `glyph_8x16` (`gfx.rs`) yalnızca tanılama fallback'i olarak tutulur.
 - **Ortak UI Kiti (`userspace/src/ui/*`) & Compositor (`userspace/src/glass/*`, `compositor.rs`):** `canvas.rs` SDF AA ilkelleri, `theme.rs` (`Obsidian Dark`/`Frosted Daylight`/`High Contrast`), `widgets.rs`, `text_edit.rs`, `containers.rs` (`sidebar_nav`, `tab_bar`, `metric_card`, `list_row`, vb.), prosedürel duvar kağıdı, çift-geçişli kutu bulanıklığı (`BLUR_R = 4`), topbar, `Dock` ve cam paneller (`Launcher`, `Quick Settings`, `Notification Center`, `Lock Shield`).
-- **Çoklu Çözünürlük `VirtIO-GPU` & 6 Uygulama (`23/32` modül):** `MAX_BACKBUF_2M = 8` ve `MAX_GPU_SCANOUT_2M = 5` ile `1024x768`, `1280x800` ve `1920x1080` desteklenir; `PixelAppWindow` + `ui/` üzerindeki `6` uygulama (`Terminal`, `Life Station`, `Files`, `Settings`, `Editor`, `Calculator`) `tools/qemu_p10_glass2_validators.py` (`3/3 PASS`, `12` PNG `docs/screenshots/glass2_*.png`, `leaked_frames = 0`) ve tam `101/101` paketle kanıtlanmıştır (`docs/DRY_GLASS_2_0_REPORT.md`, `ADR-021`).
+- **Çoklu Çözünürlük `VirtIO-GPU` & 6 Uygulama (`24/32` modül):** `MAX_BACKBUF_2M = 8` ve `MAX_GPU_SCANOUT_2M = 5` ile `1024x768`, `1280x800` ve `1920x1080` desteklenir; `PixelAppWindow` + `ui/` üzerindeki `6` uygulama (`Terminal`, `Life Station`, `Files`, `Settings`, `Editor`, `Calculator`), `DRY Glass 2.1` adaptif pencere şeridi + `Alt+W` genel bakış (`userspace/src/glass/{window_strip,overview}.rs`, `docs/DRY_GLASS_2_1_REPORT.md`, `9` PNG `--p11-only`) ve `DRY Glass 2.0` (`--p10-only`, `12` PNG) ile tam `105/105` regresyonda (`leaked_frames = 0`) kanıtlanmıştır (`ADR-021`, `ADR-022`).
+
+### 2.12. `Project Ascension 4.0` (`Track C/D/E`): Kaynak-Düzeyi `libdry-lx-compat`, `bochs.c` DRM Adası & Live USB
+
+- **Çoklu-GPU PCI Keşfi (`kernel/src/{pci,pci_cfg,iommu/vtd,irq/session}.rs`):** `PCI_DEV_COUNT = 7` (`PCI_OBJ_DISPLAY_AUX = 6` `"display-aux"`) birincil UEFI GOP BAR0 adresini atlayarak ikincil ekran denetleyicisini ayırır ve `BootPciFuncRecord` (`boot_info + 0x0800`) dizisini süpervizöre aktarır (`0` yeni syscall, `rust_syscall_dispatch = 248 B`).
+- **Kaynak-Düzeyi `libdry-lx-compat` & 2. Linux `v6.18` Adası (`drivers/{libdry-lx-compat,lx-drm-bochs-island}/`, `tools/lx_compat/`):** `.ko`/`ET_REL` ikilileri reddedilir; değiştirilmemiş `v6.18` `bochs.c` (`829` satır, `sha256=93f5c4bc...`) `dry-lx-drm-bochs.elf` (`0x0212`) içinde `SYS_DEV_MAP` BAR0/BAR2, `VSPACE_MAP_OP_2M_RO` PRIME `FrameCap`, `IoRing` (`OP_DRM_FLUSH = 18`) ve `#UD` (`vec=6`, `BME=0`) `gen=2` kurtarması ile `800x600` tarama üretir (`--p12-only`, `docs/LINUX_COMPAT_RUNTIME_REPORT.md`).
+- **Hedef Fiziksel GPU & Bootable Live USB:** `validate_target_gpus.py` (`8086:9a49` + `10de:25a0` `os-interface.h` `-Werror` shim) ve `build_live_usb_image.py` (`96 MiB` FAT32, `qemu-xhci + usb-storage` önyükleme doğrulamalı, `24` modül) eklendi.
 
 ---
 

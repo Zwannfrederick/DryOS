@@ -29,8 +29,8 @@ use dry_userspace::island_proto::{
     POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1,
 };
 use dry_userspace::lx_drv_proto::{
-    lx_fault_badge, BADGE_BROKER_LX_MODE, BROKER_OP_BIND_PCI_DEV, COMP_ID_LX_RNG_ISLAND,
-    LX_OP_BIND_PCI, LX_OP_READ_ENTROPY,
+    lx_fault_badge, BADGE_BROKER_LX_MODE, BROKER_OP_BIND_PCI_DEV, COMP_ID_LX_DRM_BOCHS_ISLAND,
+    COMP_ID_LX_RNG_ISLAND, LX_DRM_OP_QUERY_MODE, LX_OP_BIND_PCI, LX_OP_READ_ENTROPY,
 };
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
@@ -542,10 +542,15 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     continue;
                 }
                 island.wake_if_ring_parked();
+                let lx_probe_op = if saved_comp_id == COMP_ID_LX_DRM_BOCHS_ISLAND {
+                    LX_DRM_OP_QUERY_MODE
+                } else {
+                    LX_OP_READ_ENTROPY
+                };
                 let fwd_res = if lx_mode && saved_pci_cap != 0 {
                     sys_ipc_call_inline(
                         island.drv_broker_cap,
-                        pack_msg_tag(LX_OP_READ_ENTROPY, 0, 4, 0),
+                        pack_msg_tag(lx_probe_op, 0, 4, 0),
                         [24, 0, 0, island.generation],
                         ipc_timeout_tsc,
                     )
@@ -735,10 +740,15 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     }
                 };
                 // Readiness probe on freshly restarted generation before declaring recovery complete.
+                let lx_probe_op = if saved_comp_id == COMP_ID_LX_DRM_BOCHS_ISLAND {
+                    LX_DRM_OP_QUERY_MODE
+                } else {
+                    LX_OP_READ_ENTROPY
+                };
                 let probe_ok = if lx_mode && saved_pci_cap != 0 {
                     sys_ipc_call_inline(
                         island.drv_broker_cap,
-                        pack_msg_tag(LX_OP_READ_ENTROPY, 0, 4, 0),
+                        pack_msg_tag(lx_probe_op, 0, 4, 0),
                         [16, 0, 0, island.generation],
                         ipc_timeout_tsc,
                     )

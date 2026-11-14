@@ -977,3 +977,10 @@ Konuk Linux çekirdeğinde **hiçbir NIC sürücüsü yüklü olmadan**, salt us
   1. **`p10a` (`1280x800`, `11.751 s`):** `Launcher`, `dry-calc` (`6*7=42`), `dry-editor` (`/persist/notes.txt` `120 B`), `Quick Settings` (`light=1`), `Settings` `100->125->150->100%` DPI (`b27bc32`), `High Contrast`, `Notifications`, `DRY Vault` kilidi (`irq12=30`).
   2. **`p10b` (`1920x1080`, `5.169 s`):** 4-uygulamalı `Tiled` + canlı `#UD` `gpufault` -> `GOP` fallback -> `VirtIO-GPU` `gen=2` kurtarma (`back_2m=4`, `pci_quiesce=3`).
   3. **`p10c` (`1024x768`, `3.869 s`):** Kompakt üst çubukta `6/6` eşzamanlı uygulama (`Stacked`, `8*9=72`) ve toplam `12/12` denetlenmiş PNG (`docs/screenshots/glass2_*.png`).
+
+---
+
+## Bölüm T (`EXP-A40`) — Project Ascension 4.0 (`DRY Glass 2.1`, `libdry-lx-compat` `bochs.c`, Donanım GPU & Live USB)
+
+- **Ayrıntılı Kanıt Dosyası:** [`docs/EXPERIMENTS_ASCENSION_4_0.md`](docs/EXPERIMENTS_ASCENSION_4_0.md) (`ADR-022`, `105/105` QEMU + `5/5` Matris + `leaked_frames = 0`)
+- **Özet Bulgular:** `DRY Glass 2.1` (`2ed966b`, `--p11-only`, `Alt+W`, `+N`, `100/125/150%` HiDPI + `9` PNG); değiştirilmemiş Linux `v6.18` `bochs.c` (`--p12-only`, `800x600`, RO PRIME `FrameCap`, `#UD gen=2`, `2` PNG); salt-okunur `Iris Xe` (`8086:9a49`) + `RTX 3050 Ti` (`10de:25a0` + `os-interface.h` `-Werror` shim); `96 MiB` Live USB `qemu-xhci` UEFI önyüklemesi (`exit=33`).

@@ -342,5 +342,15 @@
     "bytes": 5481,
     "lines": 259,
     "sha256": "720433a85ce0ce6f84e85842b54d23c7c8e9bad792c66b1066accbaa7fb95a75"
+  },
+  "drm_bochs": {
+    "upstream_path": "drivers/gpu/drm/tiny/bochs.c",
+    "tag": "v6.18",
+    "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "license": "GPL-2.0-or-later",
+    "local_path": "vendor/linux-drivers/v6.18/drm_bochs/bochs.c",
+    "bytes": 22785,
+    "lines": 829,
+    "sha256": "93f5c4bc2811ad1e0961a4e3d5c0410ac4b2336b2bdc96cc2c40802cc439ffe3"
   }
 }

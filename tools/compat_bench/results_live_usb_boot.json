@@ -1,0 +1,10 @@
+{
+  "image_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/kernel/build/dryos-ascension4-live-usb.img",
+  "image_sha256": "478f3901826b246eabc2fcce136e5a7d42e57fc0e5fb9b09d507a69e12c4dc34",
+  "module_count": 24,
+  "image_size_mib": 96,
+  "boot_transport": "qemu-xhci + usb-storage",
+  "leaked_frames": 0,
+  "exit_code": 33,
+  "boot_to_shutdown_sec": 4.54
+}

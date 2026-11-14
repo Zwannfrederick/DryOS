@@ -18,6 +18,8 @@ pub mod ioring;
 pub mod island_audit;
 pub mod island_proto;
 pub mod keymap;
+pub mod lx_compat_meta;
+pub mod lx_drm_audit;
 pub mod lx_drv_proto;
 pub mod lx_island_audit;
 pub mod persist_fs;
@@ -264,9 +266,38 @@ pub struct RootInitBootInfo {
     pub pci_gpu_cap: u64,
     pub editor_mod_cap: u64,
     pub calc_mod_cap: u64,
+    pub lx_drm_mod_cap: u64,
+    pub pci_disp_aux_cap: u64,
+    pub boot_pci_func_count: u64,
 }
 
-const _: () = assert!(size_of::<RootInitBootInfo>() <= BOOT_MANIFEST_OFFSET as usize);
+const _: () = assert!(size_of::<RootInitBootInfo>() == BOOT_MANIFEST_OFFSET as usize);
+
+pub const BOOT_PCI_ENUM_OFFSET: u64 = 0x0800;
+pub const MAX_BOOT_PCI_FUNCS: usize = 64;
+
+/// Sanitized 32-byte PCI function descriptor published read-only at `boot_info_addr + 0x0800`.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct BootPciFuncRecord {
+    pub bus_dev_fn: u16,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub subsys_vendor_id: u16,
+    pub subsys_id: u16,
+    pub revision_id: u8,
+    pub prog_if: u8,
+    pub subclass: u8,
+    pub class_code: u8,
+    pub managed_slot: u8,
+    pub dev_flags: u8,
+    pub bar_flags: [u8; 6],
+    pub irq_pin: u8,
+    pub _pad: u8,
+    pub bar0_size_bytes: u64,
+}
+
+const _: () = assert!(size_of::<BootPciFuncRecord>() == 32);
 
 #[repr(C)]
 #[derive(Clone, Copy)]

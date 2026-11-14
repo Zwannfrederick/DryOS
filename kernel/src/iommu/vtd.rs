@@ -73,6 +73,7 @@ impl VtdEngineState {
                 DomainState::empty(4),
                 DomainState::empty(5),
                 DomainState::empty(6),
+                DomainState::empty(7),
             ],
         }
     }
