@@ -1,0 +1,13 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#4F46E5"/><stop offset="100%" stop-color="#241E72"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <path d="M 18 28 A 14.5 14.5 0 0 1 44 23" fill="none" stroke="#E0E7FF" stroke-width="3.2" stroke-linecap="round"/>
+  <polyline points="40,19 45,23.5 39,26" fill="none" stroke="#E0E7FF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 46 36 A 14.5 14.5 0 0 1 20 41" fill="none" stroke="#38BDF8" stroke-width="3.2" stroke-linecap="round"/>
+  <polyline points="24,45 19,40.5 25,38" fill="none" stroke="#38BDF8" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="32" y1="38" x2="32" y2="26" stroke="#34D399" stroke-width="3.0" stroke-linecap="round"/>
+  <polyline points="27,30 32,25 37,30" fill="none" stroke="#34D399" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

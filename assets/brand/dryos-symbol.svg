@@ -1,0 +1,16 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- DRY OS Primary Brand Mark: Iso-Kernel Prism (3 interlocked capability blades + 15-deg precision channels + hex microkernel core) -->
+  <polygon points="29.01,21.86 18.19,11.05 39.12,5.44 58.56,24.88 57.8,27.73 43.02,31.69 43.78,28.84 35.16,20.22" fill="#2563EB"/>
+  <polyline points="25.8,16.1 37.07,13.07 49.8,25.8" fill="none" stroke="#38BDF8" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" data-optical="large-only"/>
+  <polygon points="42.28,34.47 57.05,30.52 51.45,51.45 24.88,58.56 22.8,56.48 26.76,41.7 28.84,43.78 40.63,40.63" fill="#1D4ED8"/>
+  <polyline points="48.9,34.5 45.86,45.86 28.6,50.45" fill="none" stroke="#60A5FA" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" data-optical="large-only"/>
+  <polygon points="24.72,39.66 20.76,54.44 5.44,39.12 12.55,12.55 15.4,11.79 26.22,22.61 23.37,23.37 20.22,35.16" fill="#0284C7"/>
+  <polyline points="21.3,45.3 13.07,37.07 17.65,19.9" fill="none" stroke="#7DD3FC" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" data-optical="large-only"/>
+  <polygon points="34.33,23.31 40.69,29.67 38.36,38.36 29.67,40.69 23.31,34.33 25.64,25.64" fill="#38BDF8"/>
+  <polyline points="25.8,25.8 34.33,23.31 40.5,29.5" fill="none" stroke="#E0F2FE" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="32" y1="32" x2="34.1" y2="24.2" stroke="#E0F2FE" stroke-width="1.1" stroke-linecap="round" data-optical="large-only"/>
+  <line x1="32" y1="32" x2="39.8" y2="29.9" stroke="#E0F2FE" stroke-width="1.1" stroke-linecap="round" data-optical="large-only"/>
+  <line x1="32" y1="32" x2="24.2" y2="34.1" stroke="#1E40AF" stroke-width="1.1" stroke-linecap="round" data-optical="large-only"/>
+  <circle cx="32" cy="32" r="2.2" fill="#FFFFFF"/>
+</svg>

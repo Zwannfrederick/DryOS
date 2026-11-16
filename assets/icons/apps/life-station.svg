@@ -1,0 +1,11 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#065F46"/><stop offset="100%" stop-color="#032D24"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <rect x="11" y="16" width="42" height="32" rx="6" fill="#04241D" stroke="#34D399" stroke-opacity="0.5" stroke-width="1.2"/>
+  <line x1="14" y1="34" x2="50" y2="34" stroke="#065F46" stroke-width="1.2" data-optical="large-only"/>
+  <polyline points="14,34 21,34 25,21 31,44 37,26 41,34 48,34" fill="none" stroke="#34D399" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="48" cy="34" r="2.6" fill="#ECFDF5"/>
+</svg>

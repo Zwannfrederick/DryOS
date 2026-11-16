@@ -1,0 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="7" y="8" width="10" height="12" rx="2" stroke="#E2E8F0" stroke-width="1.8"/>
+  <rect x="8.5" y="4" width="7" height="4" rx="1" stroke="#38BDF8" stroke-width="1.7"/>
+  <line x1="12" y1="12" x2="12" y2="16" stroke="#38BDF8" stroke-width="1.8"/>
+</svg>

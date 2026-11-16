@@ -1,0 +1,9 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="4.5" y1="7" x2="19.5" y2="7" stroke="#94A3B8" stroke-width="1.7"/>
+  <circle cx="9" cy="7" r="2.2" fill="#38BDF8"/>
+  <line x1="4.5" y1="12" x2="19.5" y2="12" stroke="#94A3B8" stroke-width="1.7"/>
+  <circle cx="15.5" cy="12" r="2.2" fill="#E2E8F0"/>
+  <line x1="4.5" y1="17" x2="19.5" y2="17" stroke="#94A3B8" stroke-width="1.7"/>
+  <circle cx="10.5" cy="17" r="2.2" fill="#34D399"/>
+</svg>

@@ -1,0 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M 7 15.5 V 10.5 A 5 5 0 0 1 17 10.5 V 15.5 L 19 17.5 H 5 Z" stroke="#E2E8F0" stroke-width="1.7"/>
+  <circle cx="12" cy="19.5" r="1.4" fill="#38BDF8"/>
+  <circle cx="17.5" cy="6.5" r="2.6" fill="#FBBF24"/>
+</svg>

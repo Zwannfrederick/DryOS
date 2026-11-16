@@ -1,0 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <polyline points="4,5.5 20,5.5 14,12.5 14,18.5 10,19.5 10,12.5 4,5.5" stroke="#E2E8F0" stroke-width="1.8"/>
+  <line x1="7" y1="8.5" x2="17" y2="8.5" stroke="#38BDF8" stroke-width="1.5" data-optical="large-only"/>
+</svg>

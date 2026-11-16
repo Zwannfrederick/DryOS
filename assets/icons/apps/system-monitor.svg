@@ -1,0 +1,12 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#0F4C5C"/><stop offset="100%" stop-color="#07232C"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <rect x="12" y="15" width="40" height="34" rx="5" fill="#061921" stroke="#38BDF8" stroke-opacity="0.4" stroke-width="1.2"/>
+  <rect x="17" y="33" width="6" height="11" rx="2" fill="#38BDF8"/>
+  <rect x="26" y="26" width="6" height="18" rx="2" fill="#34D399"/>
+  <rect x="35" y="21" width="6" height="23" rx="2" fill="#FBBF24"/>
+  <polyline points="17,29 27,23 36,19 46,24" fill="none" stroke="#ECFDF5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

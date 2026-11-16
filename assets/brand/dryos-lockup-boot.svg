@@ -1,0 +1,38 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80" width="320" height="80">
+  <defs>
+    <linearGradient id="bootbg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#172033"/>
+      <stop offset="100%" stop-color="#0B101B"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="316" height="76" rx="16" fill="url(#bootbg)" stroke="#334155" stroke-width="1"/>
+  <rect x="3" y="3" width="314" height="74" rx="15" fill="none" stroke="#60A5FA" stroke-opacity="0.28" stroke-width="1"/>
+  <g transform="translate(18,12) scale(0.875)">
+    <polygon points="29.01,21.86 18.19,11.05 39.12,5.44 58.56,24.88 57.8,27.73 43.02,31.69 43.78,28.84 35.16,20.22" fill="#2563EB"/>
+    <polygon points="42.28,34.47 57.05,30.52 51.45,51.45 24.88,58.56 22.8,56.48 26.76,41.7 28.84,43.78 40.63,40.63" fill="#1D4ED8"/>
+    <polygon points="24.72,39.66 20.76,54.44 5.44,39.12 12.55,12.55 15.4,11.79 26.22,22.61 23.37,23.37 20.22,35.16" fill="#0284C7"/>
+    <polygon points="34.33,23.31 40.69,29.67 38.36,38.36 29.67,40.69 23.31,34.33 25.64,25.64" fill="#38BDF8"/>
+    <circle cx="32" cy="32" r="2.4" fill="#FFFFFF"/>
+  </g>
+  <g transform="translate(36,11)">
+    <g fill="none" stroke="#F1F5F9" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 58 14 H 65 C 72 14 75 18 75 24 C 75 30 72 34 65 34 H 58 Z"/>
+      <path d="M 87 34 V 14 H 97 A 5 5 0 0 1 102 19 A 5 5 0 0 1 97 24 H 87"/>
+      <line x1="95" y1="24" x2="103" y2="34"/>
+      <polyline points="114,14 123,24.5 132,14"/>
+      <line x1="123" y1="24.5" x2="123" y2="34"/>
+    </g>
+    <line x1="144" y1="15" x2="144" y2="33" stroke="#475569" stroke-width="1.6" stroke-linecap="round"/>
+    <g fill="none" stroke="#38BDF8" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="156" y="14" width="19" height="20" rx="8"/>
+      <path d="M 204 17.5 C 203 14.5 199.5 14 196 14 C 191.5 14 188 16 188 19 C 188 22.2 191 23.4 196 24 C 201 24.6 204.5 26 204.5 29.2 C 204.5 32.2 201 34 196 34 C 192 34 189 32.8 187.5 30.5"/>
+    </g>
+  </g>
+  <rect x="94" y="55" width="76" height="4" rx="2" fill="#2563EB"/>
+  <rect x="174" y="55" width="44" height="4" rx="2" fill="#10B981"/>
+  <rect x="222" y="55" width="26" height="4" rx="2" fill="#F59E0B"/>
+  <circle cx="278" cy="35" r="3" fill="#38BDF8"/>
+  <circle cx="288" cy="35" r="3" fill="#34D399"/>
+  <circle cx="298" cy="35" r="3" fill="#A78BFA"/>
+</svg>

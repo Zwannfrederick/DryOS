@@ -1,0 +1,14 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#374151"/><stop offset="100%" stop-color="#171F2C"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <line x1="32" y1="32" x2="20" y2="20" stroke="#94A3B8" stroke-width="2.4" stroke-linecap="round"/>
+  <line x1="32" y1="32" x2="45" y2="21" stroke="#94A3B8" stroke-width="2.4" stroke-linecap="round"/>
+  <line x1="32" y1="32" x2="32" y2="47" stroke="#94A3B8" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="6.5" fill="#60A5FA"/>
+  <circle cx="20" cy="20" r="4.2" fill="#E2E8F0"/>
+  <circle cx="45" cy="21" r="4.2" fill="#34D399"/>
+  <circle cx="32" cy="47" r="4.2" fill="#FBBF24"/>
+</svg>

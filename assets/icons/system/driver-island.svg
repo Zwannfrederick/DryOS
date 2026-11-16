@@ -1,0 +1,9 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <polyline points="4,8 4,4 8,4" stroke="#38BDF8" stroke-width="1.8"/>
+  <polyline points="16,4 20,4 20,8" stroke="#38BDF8" stroke-width="1.8"/>
+  <polyline points="4,16 4,20 8,20" stroke="#38BDF8" stroke-width="1.8"/>
+  <polyline points="16,20 20,20 20,16" stroke="#38BDF8" stroke-width="1.8"/>
+  <rect x="7.5" y="7.5" width="9" height="9" rx="1.5" stroke="#E2E8F0" stroke-width="1.7"/>
+  <circle cx="12" cy="12" r="1.8" fill="#34D399"/>
+</svg>

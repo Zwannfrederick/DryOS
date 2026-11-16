@@ -1,0 +1,13 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="6" y="6" width="12" height="12" rx="2" stroke="#E2E8F0" stroke-width="1.8"/>
+  <rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="#38BDF8"/>
+  <line x1="9.5" y1="3" x2="9.5" y2="6" stroke="#94A3B8" stroke-width="1.6"/>
+  <line x1="14.5" y1="3" x2="14.5" y2="6" stroke="#94A3B8" stroke-width="1.6"/>
+  <line x1="9.5" y1="18" x2="9.5" y2="21" stroke="#94A3B8" stroke-width="1.6"/>
+  <line x1="14.5" y1="18" x2="14.5" y2="21" stroke="#94A3B8" stroke-width="1.6"/>
+  <line x1="3" y1="9.5" x2="6" y2="9.5" stroke="#94A3B8" stroke-width="1.6"/>
+  <line x1="3" y1="14.5" x2="6" y2="14.5" stroke="#94A3B8" stroke-width="1.6" data-optical="large-only"/>
+  <line x1="18" y1="9.5" x2="21" y2="9.5" stroke="#94A3B8" stroke-width="1.6" data-optical="large-only"/>
+  <line x1="18" y1="14.5" x2="21" y2="14.5" stroke="#94A3B8" stroke-width="1.6"/>
+</svg>

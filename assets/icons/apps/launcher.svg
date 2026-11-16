@@ -1,0 +1,13 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#2563EB"/><stop offset="100%" stop-color="#132A6B"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <rect x="15" y="15" width="14" height="14" rx="4" fill="#E0F2FE"/>
+  <rect x="35" y="15" width="14" height="14" rx="4" fill="#60A5FA"/>
+  <rect x="15" y="35" width="14" height="14" rx="4" fill="#38BDF8"/>
+  <rect x="35" y="35" width="14" height="14" rx="4" fill="#F8FAFC"/>
+  <circle cx="32" cy="32" r="3.4" fill="#0B132B"/>
+  <circle cx="32" cy="32" r="1.8" fill="#38BDF8"/>
+</svg>

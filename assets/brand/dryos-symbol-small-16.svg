@@ -1,0 +1,9 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Optically simplified 16x16 Iso-Kernel Prism with 1.5px stroke precision -->
+  <polygon points="9.65,1.85 14.15,6.35 12.5,12.5 6.35,14.15 1.85,9.65 3.5,3.5" fill="none" stroke="#38BDF8" stroke-width="1.6" stroke-linejoin="round"/>
+  <line x1="8" y1="8" x2="12.1" y2="4.9" stroke="#60A5FA" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="8" y1="8" x2="8.8" y2="13.2" stroke="#38BDF8" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="8" y1="8" x2="3.2" y2="6.2" stroke="#7DD3FC" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="8" cy="8" r="2.3" fill="#FFFFFF"/>
+</svg>

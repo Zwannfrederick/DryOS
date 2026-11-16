@@ -1,0 +1,11 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#B45309"/><stop offset="100%" stop-color="#6B2F08"/></linearGradient></defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="1"/>
+  <line x1="16" y1="5.5" x2="48" y2="5.5" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1" stroke-linecap="round" data-optical="large-only"/>
+  <path d="M 12 20 C 12 17.5 14 16 16.5 16 H 26 L 30 20 H 47.5 C 50 20 52 22 52 24.5 V 26 H 12 Z" fill="#FDE68A"/>
+  <rect x="12" y="23" width="40" height="26" rx="5" fill="#FBBF24"/>
+  <line x1="16" y1="30" x2="48" y2="30" stroke="#92400E" stroke-opacity="0.45" stroke-width="1.8" stroke-linecap="round" data-optical="large-only"/>
+  <rect x="26" y="36" width="12" height="3.5" rx="1.75" fill="#FEF3C7"/>
+</svg>

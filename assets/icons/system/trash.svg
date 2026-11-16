@@ -1,0 +1,8 @@
+<!-- SPDX-License-Identifier: Apache-2.0 OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="4.5" y1="7" x2="19.5" y2="7" stroke="#E2E8F0" stroke-width="1.8"/>
+  <line x1="9.5" y1="4" x2="14.5" y2="4" stroke="#38BDF8" stroke-width="1.8"/>
+  <rect x="6.5" y="7" width="11" height="13" rx="2" stroke="#E2E8F0" stroke-width="1.8"/>
+  <line x1="10" y1="11" x2="10" y2="16.5" stroke="#94A3B8" stroke-width="1.5" data-optical="large-only"/>
+  <line x1="14" y1="11" x2="14" y2="16.5" stroke="#94A3B8" stroke-width="1.5" data-optical="large-only"/>
+</svg>
