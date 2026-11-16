@@ -37,6 +37,8 @@ from qemu_p10_glass2_validators import run_p10_glass2_suite
 from qemu_p11_glass21_validators import run_p11_glass21_suite
 from qemu_p12_lx_compat_validators import run_p12_lx_compat_suite
 from qemu_p13_usb_persist_validators import run_p13_usb_persist_suite
+from qemu_p14_lx_net_validators import run_p14_lx_net_suite
+from qemu_p15_brand_icons_validators import run_p15_brand_icons_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -44,6 +46,7 @@ KERNEL_DIR = ROOT / "kernel"
 USERSPACE_DIR = ROOT / "userspace"
 LX_ISLAND_DIR = ROOT / "drivers" / "lx-virtio-rng-island"
 LX_DRM_ISLAND_DIR = ROOT / "drivers" / "lx-drm-bochs-island"
+LX_NET_ISLAND_DIR = ROOT / "drivers" / "lx-net-8139cp-island"
 BUILD_DIR = KERNEL_DIR / "build"
 TC_DIR = ROOT / ".toolchains"
 SYSROOT = TC_DIR / "sysroot"
@@ -83,6 +86,7 @@ USERSPACE_MODS = (
     ("dry-lx-drm-bochs", "dry-lx-drm-bochs.elf"),
     ("dry-usb", "dry-usb.elf"),
     ("dry-nvme", "dry-nvme.elf"),
+    ("dry-lx-net", "dry-lx-net.elf"),
 )
 
 
@@ -236,16 +240,16 @@ def build_lx_rng_island() -> pathlib.Path:
     return dst_bin
 
 
-def build_lx_drm_bochs_island() -> pathlib.Path:
-    """Verify upstream SHA-256, build cached `liblx_drm_bochs.a`, and link `dry-lx-drm-bochs`."""
+def build_lx_compat_island(island_dir: pathlib.Path, driver_key: str, bin_name: str) -> pathlib.Path:
+    """Verify upstream SHA-256, build cached static archive, and link standalone GPL island ELF."""
     mgr = ROOT / "tools" / "lx_compat" / "lx_driver_manager.py"
     subprocess.check_call([sys.executable, str(mgr), "verify", "--all"])
     meta_json = subprocess.check_output(
-        [sys.executable, str(mgr), "build-cache", "--driver", "drm_bochs"],
+        [sys.executable, str(mgr), "build-cache", "--driver", driver_key],
         text=True,
     )
     archive_dir = pathlib.Path(json.loads(meta_json)["archive_path"]).parent
-    linker_script = LX_DRM_ISLAND_DIR / "linker.ld"
+    linker_script = island_dir / "linker.ld"
     lx_env = {
         **os.environ,
         "RUSTC_BOOTSTRAP": "1",
@@ -267,14 +271,14 @@ def build_lx_drm_bochs_island() -> pathlib.Path:
             ]
         ),
     }
-    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-lx-drm-bochs...")
+    print(f"[QEMU-TEST] Running cargo clippy (-D warnings) on {bin_name}...")
     subprocess.check_call(
         [
             "cargo",
             "clippy",
             "--offline",
             "--manifest-path",
-            str(LX_DRM_ISLAND_DIR / "Cargo.toml"),
+            str(island_dir / "Cargo.toml"),
             "-Z",
             "build-std=core,compiler_builtins",
             "--target",
@@ -285,14 +289,14 @@ def build_lx_drm_bochs_island() -> pathlib.Path:
         ],
         env=lx_env,
     )
-    print("[QEMU-TEST] Building release ELF64 dry-lx-drm-bochs (GPL-2.0-or-later isolated crate)...")
+    print(f"[QEMU-TEST] Building release ELF64 {bin_name} (GPL-2.0 isolated crate)...")
     subprocess.check_call(
         [
             "cargo",
             "build",
             "--offline",
             "--manifest-path",
-            str(LX_DRM_ISLAND_DIR / "Cargo.toml"),
+            str(island_dir / "Cargo.toml"),
             "-Z",
             "build-std=core,compiler_builtins",
             "--target",
@@ -301,8 +305,8 @@ def build_lx_drm_bochs_island() -> pathlib.Path:
         ],
         env=lx_env,
     )
-    lx_bin = LX_DRM_ISLAND_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-drm-bochs"
-    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-lx-drm-bochs"
+    lx_bin = island_dir / "target" / "x86_64-unknown-none" / "release" / bin_name
+    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / bin_name
     dst_bin.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(lx_bin, dst_bin)
     return dst_bin
@@ -349,7 +353,8 @@ def build_userspace() -> list[pathlib.Path]:
     )
     out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
     build_lx_rng_island()
-    build_lx_drm_bochs_island()
+    build_lx_compat_island(LX_DRM_ISLAND_DIR, "drm_bochs", "dry-lx-drm-bochs")
+    build_lx_compat_island(LX_NET_ISLAND_DIR, "net_8139cp", "dry-lx-net")
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():
@@ -466,6 +471,7 @@ def run_qemu(
     smp: int,
     timeout_sec: int = 25,
     extra_args: list[str] | None = None,
+    mem: str = "512M",
 ) -> tuple[int, str, float]:
     vars_copy = BUILD_DIR / f"OVMF_VARS_{name}.4m.fd"
     shutil.copyfile(OVMF_VARS, vars_copy)
@@ -482,7 +488,7 @@ def run_qemu(
         "-smp",
         str(smp),
         "-m",
-        "256M",
+        mem,
         "-drive",
         f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive",
@@ -566,6 +572,7 @@ def assert_positive_smp_boot(
     expected_apic_mode: str | None = None,
     expect_fb: bool = True,
     extra_qemu_args: list[str] | None = None,
+    mem: str = "512M",
 ) -> None:
     expected_mask = hex((1 << smp) - 1)
     expected_ops = smp * 4096
@@ -578,6 +585,7 @@ def assert_positive_smp_boot(
         smp=smp,
         timeout_sec=75 if smp > 8 else 50,
         extra_args=extra_qemu_args,
+        mem=mem,
     )
 
     print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
@@ -691,6 +699,9 @@ def main() -> None:
     parser.add_argument("--p11-only", action="store_true", help="Run only DRY Glass 2.1 Adaptive Window Strip, Overview & HiDPI Sidebar suite")
     parser.add_argument("--p12-only", action="store_true", help="Run only Ascension 4.0 Linux DRM (bochs.c) Runtime Compatibility suite")
     parser.add_argument("--p13-only", action="store_true", help="Run only M2 xHCI USB HID/BOT Persist & Read-Only NVMe suite")
+    parser.add_argument("--p14-only", action="store_true", help="Run only M3 Universal Linux Network (8139cp.c+mii.c) SLIRP suite")
+    parser.add_argument("--p15-only", action="store_true", help="Run only DRY OS Brand Lockup, 21 App Icons & 200%% DPI suite")
+    parser.add_argument("--mem", default="512M", help="QEMU guest RAM size passed to positive SMP/boot runs (e.g. 512M, 4G)")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -761,6 +772,16 @@ def main() -> None:
         print(f"\n[QEMU-TEST] ALL {n_p13} M2 USB/PERSIST/NVME-RO CHECKS PASSED.")
         return
 
+    if args.p14_only:
+        n_p14 = run_p14_lx_net_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p14} M3 UNIVERSAL LINUX NET DRIVER ISLAND CHECKS PASSED.")
+        return
+
+    if args.p15_only:
+        n_p15 = run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p15} BRAND + ICONS VISUAL IDENTITY CHECKS PASSED.")
+        return
+
     if args.p3_matrix:
         esp_p3_std = BUILD_DIR / "esp_p3_desktop_std.img"
         write_mbr_esp_image(esp_p3_std, kernel_elf, "console=com1 desktop3=1")
@@ -776,15 +797,16 @@ def main() -> None:
             args.smp_only,
             cmdline=cmdline,
             irq_only=args.irq_only,
+            mem=args.mem,
         )
         return
 
     # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E..1B-C): 1 -> 2 -> 4 -> 8 -> 20 vCPUs.
-    assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1)
-    assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2)
-    assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4)
-    assert_positive_smp_boot("boot_8cpu_ok", kernel_elf, smp=8)
-    assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20)
+    assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1, mem=args.mem)
+    assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2, mem=args.mem)
+    assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4, mem=args.mem)
+    assert_positive_smp_boot("boot_8cpu_ok", kernel_elf, smp=8, mem=args.mem)
+    assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20, mem=args.mem)
 
     # Explicit hardware fallback verification: force xAPIC MMIO fallback (`0xFEE0_0000` UC via HHDM) on 2 vCPUs.
     assert_positive_smp_boot(
@@ -793,6 +815,7 @@ def main() -> None:
         smp=2,
         cmdline="console=com1 apic_mode=xapic",
         expected_apic_mode="xapic-mmio",
+        mem=args.mem,
     )
 
     # FPU fallback verification (`Milestone 2A-4a`): force `FXSAVE64` (no `XSAVE`/AVX) on 2 vCPUs.
@@ -814,6 +837,7 @@ def main() -> None:
         cmdline="console=com1",
         expect_fb=False,
         extra_qemu_args=["-vga", "none"],
+        mem=args.mem,
     )
 
     # Ring 3 GOP visual proof (`Stage E.2 & E.3`): QMP screendump -> PNG + pixel-level contrast verification.
@@ -845,13 +869,17 @@ def main() -> None:
     n_p10 = run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p12 = run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p13 = run_p13_usb_persist_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p14 = run_p14_lx_net_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p15 = run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
 
     print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12} DETERMINISTIC QEMU CHECKS "
+        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12 + n_p13 + n_p14 + n_p15} DETERMINISTIC QEMU CHECKS "
         f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
         f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW + "
-        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1 + {n_p12} LX DRM) PASSED."
+        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1 + {n_p12} LX DRM + "
+        f"{n_p13} M2 USB/NVME + {n_p14} M3 LX NET + {n_p15} BRAND/ICONS) PASSED."
     )
 
 

@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Standalone Driver Island package (`ADR-005` GPL isolation boundary):
+# Links unmodified Linux v6.18 `drivers/net/ethernet/realtek/8139cp.c` + `drivers/net/mii.c`
+# with `libdry-lx-compat` ONLY inside `dry-lx-net.elf`.
+
+[workspace]
+
+[package]
+name = "dry-lx-net"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "dry-lx-net"
+path = "src/main.rs"
+
+[dependencies]
+dry-userspace = { path = "../../userspace" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 1
+panic = "abort"

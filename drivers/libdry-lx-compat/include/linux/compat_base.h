@@ -2,24 +2,8 @@
 #ifndef _DRY_LINUX_COMPAT_BASE_H
 #define _DRY_LINUX_COMPAT_BASE_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
-typedef uint32_t __u32;
-typedef uint32_t __le32;
-typedef unsigned int uint;
-
-#define __iomem
-#define __always_inline inline __attribute__((always_inline))
+#include <linux/types.h>
+#include <linux/compiler.h>
 
 #ifndef offsetof
 #define offsetof(type, member) __builtin_offsetof(type, member)
@@ -32,7 +16,15 @@ typedef unsigned int uint;
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #define min(a, b) (((a) < (b)) ? (a) : (b))
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+#define min_t(type, x, y) ({        \
+    type __min1 = (x);              \
+    type __min2 = (y);              \
+    __min1 < __min2 ? __min1 : __min2; \
+})
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define DIV_ROUND_DOWN_ULL(ll, d) ((unsigned long long)(ll) / (unsigned long long)(d))
+#define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
 #define __ARG_PLACEHOLDER_1 0,
 #define __take_second_arg(__ignored, val, ...) val
@@ -44,9 +36,14 @@ typedef unsigned int uint;
 #define ENOENT 2
 #define EIO 5
 #define ENOMEM 12
+#define EFAULT 14
 #define EBUSY 16
 #define ENODEV 19
 #define EINVAL 22
+#define ENOSYS 38
+#define EOPNOTSUPP 95
+#define EADDRNOTAVAIL 99
+#define ETIMEDOUT 110
 
 #define MAX_ERRNO 4095
 #define IS_ERR_VALUE(x) ((unsigned long)(void *)(x) >= (unsigned long)-MAX_ERRNO)
@@ -56,11 +53,33 @@ static inline bool IS_ERR(const void *ptr) {
 static inline long PTR_ERR(const void *ptr) {
     return (long)ptr;
 }
+static inline void *ERR_PTR(long error) {
+    return (void *)error;
+}
 
-#define WARN_ON(cond) ({ int __w = !!(cond); __w; })
+static inline u16 swab16(u16 x) { return __builtin_bswap16(x); }
+static inline u32 swab32(u32 x) { return __builtin_bswap32(x); }
+static inline u16 cpu_to_le16(u16 x) { return x; }
+static inline u32 cpu_to_le32(u32 x) { return x; }
+static inline u64 cpu_to_le64(u64 x) { return x; }
+static inline u16 le16_to_cpu(u16 x) { return x; }
+static inline u32 le32_to_cpu(u32 x) { return x; }
+static inline u64 le64_to_cpu(u64 x) { return x; }
+static inline u16 htons(u16 x) { return __builtin_bswap16(x); }
+static inline u16 ntohs(u16 x) { return __builtin_bswap16(x); }
+static inline u32 htonl(u32 x) { return __builtin_bswap32(x); }
+static inline u32 ntohl(u32 x) { return __builtin_bswap32(x); }
 
 void dry_lx_log(const char *tag, const char *fmt, ...);
+void dry_lx_bug(const char *file, int line);
 
+#define BUG() dry_lx_bug(__FILE__, __LINE__)
+#define BUG_ON(cond) do { if (unlikely(cond)) BUG(); } while (0)
+#define WARN_ON(cond) ({ int __w = !!(cond); __w; })
+#define WARN_ONCE(cond, fmt, ...) ({ int __w = !!(cond); if (__w) dry_lx_log("WRN", fmt, ##__VA_ARGS__); __w; })
+
+#define pr_info(fmt, ...) dry_lx_log("INF", fmt, ##__VA_ARGS__)
+#define pr_info_once(fmt, ...) dry_lx_log("INF", fmt, ##__VA_ARGS__)
 #define DRM_ERROR(fmt, ...) dry_lx_log("ERR", fmt, ##__VA_ARGS__)
 #define DRM_WARN(fmt, ...) dry_lx_log("WRN", fmt, ##__VA_ARGS__)
 #define DRM_INFO(fmt, ...) dry_lx_log("INF", fmt, ##__VA_ARGS__)
@@ -89,25 +108,26 @@ static inline void writel(u32 val, volatile void __iomem *addr) {
     *(volatile u32 *)addr = val;
 }
 
-/* Unreachable when CONFIG_HAS_IOPORT=0; kept pure inline so compiler DCE drops port I/O cleanly. */
-static inline void outb(u8 val, u16 port) {
-    (void)val;
-    (void)port;
-}
-static inline u8 inb(u16 port) {
-    (void)port;
-    return 0xff;
-}
-static inline void outw(u16 val, u16 port) {
-    (void)val;
-    (void)port;
-}
-static inline u16 inw(u16 port) {
-    (void)port;
-    return 0xffff;
-}
+/* Unreachable when CONFIG_HAS_IOPORT=0; pure inline so DCE eliminates port I/O cleanly. */
+static inline void outb(u8 val, u16 port) { (void)val; (void)port; }
+static inline u8 inb(u16 port) { (void)port; return 0xff; }
+static inline void outw(u16 val, u16 port) { (void)val; (void)port; }
+static inline u16 inw(u16 port) { (void)port; return 0xffff; }
 
 void *dry_lx_memset(void *dst, int c, size_t n);
 void *dry_lx_memcpy(void *dst, const void *src, size_t n);
+int dry_lx_memcmp(const void *a, const void *b, size_t n);
+size_t dry_lx_strlen(const char *s);
+size_t strscpy(char *dest, const char *src, size_t count);
 
+#ifndef memset
+#define memset dry_lx_memset
 #endif
+#ifndef memcpy
+#define memcpy dry_lx_memcpy
+#endif
+#ifndef memcmp
+#define memcmp dry_lx_memcmp
+#endif
+
+#endif /* _DRY_LINUX_COMPAT_BASE_H */
