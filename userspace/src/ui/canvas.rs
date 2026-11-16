@@ -2,6 +2,7 @@
 //! Pure `#![no_std]`, integer-arithmetic anti-aliased 2D `Canvas` (`RGB888` & GOP `PixelFormat`).
 
 use crate::gfx::Rect;
+use crate::glass::theme::ThemeMode;
 use crate::ttf::{
     div255, draw_text_baseline_raw, draw_text_ellipsis_raw, draw_text_selected_raw,
     draw_text_top_raw, font_metrics, measure_text, FontId, PixelFormat,
@@ -607,5 +608,157 @@ impl Canvas {
         let y = r.y as i32 + ((r.h as i32 - (m.ascent + m.descent)) / 2);
         let mut clipped = self.sub_clip(r);
         let _ = clipped.draw_text(x, y, font, size_px, text, rgb);
+    }
+
+    /// Render a single Q12 `[0..=4096]` normalized SDF primitive into `r`.
+    pub fn draw_q12_shape(&mut self, r: Rect, s: Q12Shape, pal: VectorPalette, small: bool) {
+        if r.w < 2 || r.h < 2 || s.alpha == 0 {
+            return;
+        }
+        match s.optical {
+            VecOptical::SmallOnly if !small => return,
+            VecOptical::LargeOnly if small => return,
+            _ => {}
+        }
+        let rgb0 = pal.resolve(s.color, s.rgb_top);
+        let dw = r.w as i32;
+        let dh = r.h as i32;
+        match s.kind {
+            VecShapeKind::RRect | VecShapeKind::VGradRRect => {
+                let sx = r.x as i32 + (s.x as i32 * dw + 2048).div_euclid(4096);
+                let sy = r.y as i32 + (s.y as i32 * dh + 2048).div_euclid(4096);
+                let rw = ((s.w as i32 * dw + 2048).div_euclid(4096)).max(1);
+                let rh = ((s.h as i32 * dh + 2048).div_euclid(4096)).max(1);
+                let rx = sx.max(0) as usize;
+                let ry = sy.max(0) as usize;
+                let trim_x = rx as i32 - sx;
+                let trim_y = ry as i32 - sy;
+                if rw <= trim_x || rh <= trim_y {
+                    return;
+                }
+                let shape_r = Rect::new(rx, ry, (rw - trim_x) as usize, (rh - trim_y) as usize);
+                let rad = ((s.radius as i32 * dh + 2048).div_euclid(4096)).max(0) as usize;
+                if s.kind == VecShapeKind::VGradRRect {
+                    self.fill_vgrad_rrect_aa(shape_r, rad, rgb0, s.rgb_bot, s.alpha);
+                } else if s.thick == 0 {
+                    self.fill_rrect_aa(shape_r, rad, rgb0, s.alpha);
+                } else {
+                    self.stroke_rrect_aa(shape_r, rad, rgb0, s.alpha);
+                }
+            }
+            VecShapeKind::Circle => {
+                let cx = (r.x as i32) * 16 + (s.x as i32 * dw + 128).div_euclid(256);
+                let cy = (r.y as i32) * 16 + (s.y as i32 * dh + 128).div_euclid(256);
+                let rad = ((s.w as i32 * dh + 128).div_euclid(256)).max(12);
+                self.fill_circle_aa(cx, cy, rad, rgb0, s.alpha);
+            }
+            VecShapeKind::Ring => {
+                let cx = (r.x as i32) * 16 + (s.x as i32 * dw + 128).div_euclid(256);
+                let cy = (r.y as i32) * 16 + (s.y as i32 * dh + 128).div_euclid(256);
+                let rad = ((s.w as i32 * dh + 128).div_euclid(256)).max(12);
+                let th = ((s.thick as i32 * dh + 128).div_euclid(256)).max(12);
+                self.stroke_circle_aa(cx, cy, rad, th, rgb0, s.alpha);
+            }
+            VecShapeKind::Line => {
+                let x0 = (r.x as i32) * 16 + (s.x as i32 * dw + 128).div_euclid(256);
+                let y0 = (r.y as i32) * 16 + (s.y as i32 * dh + 128).div_euclid(256);
+                let x1 = (r.x as i32) * 16 + (s.w as i32 * dw + 128).div_euclid(256);
+                let y1 = (r.y as i32) * 16 + (s.h as i32 * dh + 128).div_euclid(256);
+                let th = ((s.thick as i32 * dh + 128).div_euclid(256)).max(12);
+                self.stroke_line_aa(x0, y0, x1, y1, th, rgb0, s.alpha);
+            }
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VecShapeKind { RRect = 0, VGradRRect = 1, Circle = 2, Ring = 3, Line = 4 }
+#[repr(u8)] #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VecOptical { Always = 0, SmallOnly = 1, LargeOnly = 2 }
+#[repr(u8)] #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VecColorSlot { Custom = 0, FgPrimary = 1, FgMuted = 2, Accent = 3, Ok = 4, Warn = 5, Danger = 6, BgSurface = 7, RimHighlight = 8 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct Q12Shape {
+    pub kind: VecShapeKind, pub optical: VecOptical, pub color: VecColorSlot, pub alpha: u8,
+    pub x: i16, pub y: i16, pub w: i16, pub h: i16, pub radius: i16, pub thick: i16,
+    pub rgb_top: u32, pub rgb_bot: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VectorPalette {
+    pub fg_primary: u32, pub fg_muted: u32, pub accent: u32, pub ok: u32,
+    pub warn: u32, pub danger: u32, pub bg_surface: u32, pub rim_highlight: u32,
+}
+
+impl VectorPalette {
+    pub const fn from_mode(mode: ThemeMode) -> Self {
+        match mode {
+            ThemeMode::ObsidianDark => Self {
+                fg_primary: 0x00F1_F5F9, fg_muted: 0x008E_9CB0, accent: 0x0038_BDF8,
+                ok: 0x0034_D399, warn: 0x00FB_BF24, danger: 0x00F8_7171,
+                bg_surface: 0x0017_1E2E, rim_highlight: 0x00FF_FFFF,
+            },
+            ThemeMode::FrostedDaylight => Self {
+                fg_primary: 0x000F_172A, fg_muted: 0x0052_6075, accent: 0x001D_4ED8,
+                ok: 0x0004_7857, warn: 0x00B4_5309, danger: 0x00B9_1C1C,
+                bg_surface: 0x00FF_FFFF, rim_highlight: 0x00FF_FFFF,
+            },
+            ThemeMode::HighContrast => Self {
+                fg_primary: 0x00FF_FFFF, fg_muted: 0x00CB_D5E1, accent: 0x00FF_E600,
+                ok: 0x004A_DE80, warn: 0x00FD_E047, danger: 0x00FC_A5A5,
+                bg_surface: 0x000C_1018, rim_highlight: 0x00FF_E600,
+            },
+        }
+    }
+
+    pub fn from_fg_accent(fg: u32, accent: u32) -> Self {
+        let luma = ((fg >> 16) & 0xFF) * 299 + ((fg >> 8) & 0xFF) * 587 + (fg & 0xFF) * 114;
+        if luma >= 128_000 {
+            Self {
+                fg_primary: fg, fg_muted: lerp_rgb24(fg, 0x0047_5569, 45, 100), accent,
+                ok: 0x0034_D399, warn: 0x00FB_BF24, danger: 0x00F8_7171,
+                bg_surface: 0x0017_1E2E, rim_highlight: 0x00FF_FFFF,
+            }
+        } else {
+            Self {
+                fg_primary: fg, fg_muted: lerp_rgb24(fg, 0x0064_748B, 35, 100), accent,
+                ok: 0x0004_7857, warn: 0x00B4_5309, danger: 0x00B9_1C1C,
+                bg_surface: 0x00FF_FFFF, rim_highlight: 0x00FF_FFFF,
+            }
+        }
+    }
+
+    #[inline]
+    pub const fn resolve(&self, slot: VecColorSlot, custom_rgb: u32) -> u32 {
+        match slot {
+            VecColorSlot::Custom => custom_rgb,
+            VecColorSlot::FgPrimary => self.fg_primary,
+            VecColorSlot::FgMuted => self.fg_muted,
+            VecColorSlot::Accent => self.accent,
+            VecColorSlot::Ok => self.ok,
+            VecColorSlot::Warn => self.warn,
+            VecColorSlot::Danger => self.danger,
+            VecColorSlot::BgSurface => self.bg_surface,
+            VecColorSlot::RimHighlight => self.rim_highlight,
+        }
+    }
+}
+
+/// Center-fit a `Rect` to preserve exact `vb_w : vb_h` aspect ratio without clipping.
+#[inline]
+pub fn fit_aspect_rect(r: Rect, vb_w: u16, vb_h: u16) -> Rect {
+    if r.is_empty() || vb_w == 0 || vb_h == 0 {
+        return r;
+    }
+    let sw = vb_w as usize;
+    let sh = vb_h as usize;
+    if r.w * sh > r.h * sw {
+        let fit_w = ((r.h * sw) / sh).max(1);
+        Rect::new(r.x + (r.w - fit_w) / 2, r.y, fit_w, r.h)
+    } else {
+        let fit_h = ((r.w * sh) / sw).max(1);
+        Rect::new(r.x, r.y + (r.h - fit_h) / 2, r.w, fit_h)
     }
 }

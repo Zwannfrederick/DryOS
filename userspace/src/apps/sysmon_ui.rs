@@ -6,6 +6,7 @@ use crate::apps::PixelAppWindow;
 use crate::gfx::Rect;
 use crate::shell::LineBuilder;
 use crate::ttf::{font_metrics, measure_text, FontId};
+use crate::ui::app_icons::{draw_app_icon, AppIconKind};
 use crate::ui::containers::{metric_card, status_badge, table_header};
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::layout::{h_cell, inset_rect, split_bot, split_top};
@@ -55,17 +56,16 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
     c.hline(head_r.x, head_r.y + head_r.h.saturating_sub(1), head_r.w, t.border_subtle, 220);
     let cap_m = font_metrics(FontId::SansSemiBold, t.caption_px);
     let h_ty = head_r.y as i32 + ((head_r.h as i32 - (cap_m.ascent + cap_m.descent)) / 2);
-    draw_vector_icon(
+    draw_app_icon(
         &mut c,
         Rect::new(
-            head_r.x + 12,
-            head_r.y + (head_r.h.saturating_sub(14)) / 2,
-            14,
-            14,
+            head_r.x + 10,
+            head_r.y + (head_r.h.saturating_sub(18)) / 2,
+            18,
+            18,
         ),
-        IconKind::LifeStation,
-        t.fg_primary,
-        t.accent_fg,
+        AppIconKind::LifeStation,
+        t.mode,
     );
     c.draw_text(
         (head_r.x + 32) as i32,
@@ -122,15 +122,23 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
     cpu_s.push_byte(b'.');
     cpu_s.push_u64_pad3(view.sys.uptime_ms % 1000);
     cpu_s.push_byte(b's');
+    let cpu_card_r = h_cell(kpi_r, 3, 0, t.sp_sm);
     metric_card(
         &mut c,
         t,
-        h_cell(kpi_r, 3, 0, t.sp_sm),
+        cpu_card_r,
         b"CPU & APIC",
         cpu_v.as_bytes(),
         cpu_s.as_bytes(),
         StatusKind::Ok,
         None,
+    );
+    draw_vector_icon(
+        &mut c,
+        Rect::new(cpu_card_r.x + cpu_card_r.w.saturating_sub(24), cpu_card_r.y + 8, 14, 14),
+        IconKind::Cpu,
+        t.ok_fg,
+        t.accent_fg,
     );
 
     let usable = view.sys.usable_frames_4k.max(1) as u64;
@@ -150,15 +158,23 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
     mem_s.push_u64(used_pct);
     mem_s.push_bytes(b"%)");
     let mem_kind = if used_pct >= 80 { StatusKind::Warn } else { StatusKind::Ok };
+    let mem_card_r = h_cell(kpi_r, 3, 1, t.sp_sm);
     metric_card(
         &mut c,
         t,
-        h_cell(kpi_r, 3, 1, t.sp_sm),
+        mem_card_r,
         b"PMM MEMORY",
         mem_v.as_bytes(),
         mem_s.as_bytes(),
         mem_kind,
         Some(used_pct as u8),
+    );
+    draw_vector_icon(
+        &mut c,
+        Rect::new(mem_card_r.x + mem_card_r.w.saturating_sub(24), mem_card_r.y + 8, 14, 14),
+        IconKind::Memory,
+        t.fg_secondary,
+        t.accent_fg,
     );
 
     let mut sys_v = LineBuilder::new();
@@ -170,15 +186,23 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
     sys_s.push_u64(view.d_ipc);
     sys_s.push_bytes(b" | HLT ");
     sys_s.push_u64(view.pwr.idle_hlt_calls);
+    let sys_card_r = h_cell(kpi_r, 3, 2, t.sp_sm);
     metric_card(
         &mut c,
         t,
-        h_cell(kpi_r, 3, 2, t.sp_sm),
+        sys_card_r,
         b"KERNEL TRAFFIC",
         sys_v.as_bytes(),
         sys_s.as_bytes(),
         StatusKind::Accent,
         None,
+    );
+    draw_vector_icon(
+        &mut c,
+        Rect::new(sys_card_r.x + sys_card_r.w.saturating_sub(24), sys_card_r.y + 8, 14, 14),
+        IconKind::DriverIsland,
+        t.accent_fg,
+        t.accent_fg,
     );
 
     // AA Syscall Delta Sparkline Card

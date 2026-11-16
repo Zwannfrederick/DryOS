@@ -68,7 +68,9 @@ pub struct UiTheme {
 
 impl UiTheme {
     pub const fn new(mode: ThemeMode, dpi_pct: u16) -> Self {
-        let dpi = if dpi_pct >= 140 {
+        let dpi = if dpi_pct >= 185 {
+            200
+        } else if dpi_pct >= 140 {
             150
         } else if dpi_pct >= 115 {
             125

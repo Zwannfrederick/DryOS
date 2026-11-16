@@ -26,6 +26,7 @@ use crate::keymap::{
 };
 use crate::shell::LineBuilder;
 use crate::ttf::{FontId, PixelFormat};
+use crate::ui::app_icons::draw_app_icon_for_app;
 use crate::ui::canvas::Canvas;
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::theme::UiTheme;
@@ -692,7 +693,7 @@ fn paint_overview_body(
             let row_w = list_r.w.saturating_sub(12);
             match row.kind {
                 OverviewRowKind::GroupHeader { app, count, min_count } => {
-                    draw_vector_icon(&mut lc, Rect::new(list_r.x + 6, ry + 5, 14, 14), IconKind::from_app(app), ui.accent_fg, ui.accent);
+                    draw_app_icon_for_app(&mut lc, Rect::new(list_r.x + 6, ry + 5, 14, 14), app, ui.mode);
                     lc.draw_text((list_r.x + 26) as i32, (ry + 4) as i32, FontId::SansSemiBold, 11, app_strip_name(app, false), ui.fg_secondary);
                     let mut gbuf = [0u8; 20];
                     let gn = write_u32_ascii(&mut gbuf, count as u32);
@@ -712,15 +713,9 @@ fn paint_overview_body(
                     let bg = if sel { ui.accent_subtle } else { ui.bg_card_alt };
                     let bd = if sel { ui.accent } else if it.focused { ui.border_strong } else { ui.border_subtle };
                     lc.fill_bordered_rrect_aa(row_r, 8, bg, bd);
-                    draw_vector_icon(
-                        &mut lc,
-                        Rect::new(row_r.x + 10, row_r.y + 8, 18, 18),
-                        IconKind::from_app(it.app),
-                        if sel { ui.accent_fg } else { ui.fg_primary },
-                        ui.accent,
-                    );
+                    draw_app_icon_for_app(&mut lc, Rect::new(row_r.x + 8, row_r.y + 6, 22, 22), it.app, ui.mode);
                     lc.draw_text(
-                        (row_r.x + 34) as i32,
+                        (row_r.x + 36) as i32,
                         (row_r.y + 8) as i32,
                         if sel || it.focused { FontId::SansSemiBold } else { FontId::SansRegular },
                         12,
@@ -745,7 +740,7 @@ fn paint_overview_body(
                     lc.fill_bordered_rrect_aa(min_r, 6, ui.bg_card, ui.border_subtle);
                     lc.draw_text_centered(min_r, FontId::SansSemiBold, 11, if it.minimized { b"+" } else { b"-" }, ui.fg_primary);
                     lc.fill_bordered_rrect_aa(close_r, 6, ui.bg_card, ui.border_subtle);
-                    draw_vector_icon(&mut lc, Rect::new(close_r.x + 7, close_r.y + 7, 10, 10), IconKind::Close, ui.fg_primary, ui.accent);
+                    draw_vector_icon(&mut lc, Rect::new(close_r.x + 7, close_r.y + 7, 10, 10), IconKind::WinClose, ui.fg_primary, ui.accent);
                 }
             }
         }

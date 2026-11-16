@@ -11,6 +11,8 @@ use crate::input::{InputEvent, InputEventKind, MOUSE_BTN_LEFT};
 use crate::keymap::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP};
 use crate::shell::LineBuilder;
 use crate::ttf::{FontId, PixelFormat};
+use crate::ui::app_icons::draw_app_icon_for_app;
+use crate::ui::brand::{draw_boot_lockup, draw_brand_symbol};
 use crate::ui::canvas::Canvas;
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::theme::UiTheme;
@@ -575,10 +577,7 @@ fn paint_launcher(
         let rr = launcher_app_rect(wm, row);
         let sel = row == wm.glass.launcher_sel.min(n - 1);
         c.fill_bordered_rrect_aa(rr, 8, if sel { ui.accent_subtle } else { ui.bg_card_alt }, if sel { ui.accent } else { ui.border_subtle });
-        draw_vector_icon(
-            &mut c, Rect::new(rr.x + 10, rr.y + 8, 20, 20), IconKind::from_app(app),
-            if sel { ui.accent_fg } else { ui.fg_primary }, ui.accent,
-        );
+        draw_app_icon_for_app(&mut c, Rect::new(rr.x + 8, rr.y + 6, 24, 24), app, tokens.mode);
         c.draw_text(
             (rr.x + 38) as i32, (rr.y + 9) as i32,
             if sel { FontId::SansSemiBold } else { FontId::SansRegular },
@@ -627,12 +626,12 @@ fn paint_qs(
         _ => b"100%",
     };
     let rows: [(IconKind, &[u8], &[u8], bool); 7] = [
-        (IconKind::Sun, b"Appearance", mode_val, wm.light_mode),
-        (IconKind::Sliders, b"Glass Blur", blur_val, !wm.low_overhead_glass),
-        (IconKind::Shield, b"High Contrast", hc_val, wm.high_contrast),
-        (IconKind::Info, b"Pointer Size", cur_val, wm.cursor_large),
-        (IconKind::LayoutTiled, b"Window Layout", lay_val, true),
-        (IconKind::Refresh, b"Display Scale", dpi_val, wm.dpi_scale != 0),
+        (if wm.light_mode { IconKind::Sun } else { IconKind::Moon }, b"Appearance", mode_val, wm.light_mode),
+        (IconKind::QuickSettings, b"Glass Blur", blur_val, !wm.low_overhead_glass),
+        (IconKind::Accessibility, b"High Contrast", hc_val, wm.high_contrast),
+        (IconKind::Mouse, b"Pointer Size", cur_val, wm.cursor_large),
+        (IconKind::WorkspaceGrid, b"Window Layout", lay_val, true),
+        (IconKind::Display, b"Display Scale", dpi_val, wm.dpi_scale != 0),
         (IconKind::Lock, b"Lock Session", b"Shield", false),
     ];
 
@@ -662,7 +661,13 @@ fn paint_notifs(
 ) {
     let r = notif_panel_rect(wm);
     let Some(mut c) = paint_frosted_panel(comp, tokens, ui, fmt, r, clip, blur) else { return };
-    draw_vector_icon(&mut c, Rect::new(r.x + 14, r.y + 12, 16, 16), IconKind::Bell, ui.accent, ui.accent);
+    draw_vector_icon(
+        &mut c,
+        Rect::new(r.x + 14, r.y + 12, 16, 16),
+        if wm.glass.notif_unread > 0 { IconKind::NotifUnread } else { IconKind::Bell },
+        ui.accent,
+        ui.accent,
+    );
     c.draw_text((r.x + 36) as i32, (r.y + 11) as i32, FontId::SansSemiBold, 14, b"Notifications", ui.fg_primary);
     let cr = notif_clear_rect(wm);
     c.fill_bordered_rrect_aa(cr, 6, ui.bg_card_alt, ui.border_subtle);
@@ -707,6 +712,10 @@ pub fn paint_lock_shield_glass(
     let (cw, ch) = (560usize.min(comp.w.saturating_sub(24)), 236usize);
     let cx = comp.w.saturating_sub(cw) / 2;
     let cy = comp.h.saturating_sub(ch) / 2;
+    if cy >= 76 {
+        let lw = 240usize.min(comp.w.saturating_sub(32));
+        draw_boot_lockup(&mut bgc, Rect::new(comp.w.saturating_sub(lw) / 2, cy - 68, lw, 60), tokens.mode);
+    }
     let card = Rect::new(cx, cy, cw, ch);
     let cclip = Rect::new(card.x.saturating_sub(6), card.y.saturating_sub(4), card.w + 12, card.h + 12)
         .intersect(clip)
@@ -723,6 +732,7 @@ pub fn paint_lock_shield_glass(
     let hdr = Rect::new(cx + 16, cy + 16, cw - 32, 32);
     c.fill_rrect_aa(hdr, 8, ui.bg_card_alt, 255);
     draw_vector_icon(&mut c, Rect::new(hdr.x + 10, hdr.y + 8, 16, 16), IconKind::Lock, ui.accent, ui.accent);
+    draw_brand_symbol(&mut c, Rect::new(hdr.x + hdr.w.saturating_sub(24), hdr.y + 8, 16, 16), tokens.mode, false);
     c.draw_text((hdr.x + 34) as i32, (hdr.y + 7) as i32, FontId::SansSemiBold, 14, b"DRY OS Session Lock Shield", ui.fg_primary);
     c.draw_text((cx + 20) as i32, (cy + 60) as i32, FontId::SansRegular, 12, b"Input routing isolated to CPL=3 compositor gate.", ui.ok);
 

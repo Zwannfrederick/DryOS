@@ -14,6 +14,8 @@ use crate::glass::GLASS_CORNER_R;
 use crate::shell::LineBuilder;
 use crate::surface::PIXEL_SURF_HEADER_BYTES;
 use crate::ttf::{measure_text, FontId, PixelFormat};
+use crate::ui::app_icons::draw_app_icon_for_app;
+use crate::ui::brand::draw_brand_symbol;
 use crate::ui::canvas::{rrect_cov, Canvas};
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::theme::UiTheme;
@@ -91,9 +93,9 @@ fn paint_p3_topbar_items(
     let br_bg = if br_active { ui.accent } else { ui.bg_card_alt };
     let br_fg = if br_active { ui.fg_on_accent } else { ui.fg_primary };
     c.fill_bordered_rrect_aa(br, 6, br_bg, if br_active { ui.accent } else { ui.border_subtle });
-    draw_vector_icon(&mut c, Rect::new(br.x + 6, br.y + 4, 12, 12), IconKind::Search, br_fg, ui.accent);
+    draw_brand_symbol(&mut c, Rect::new(br.x + 5, br.y + 2, 16, 16), tokens.mode, br_active);
     let blbl: &[u8] = if wm.screen_w < 1200 { b"Glass" } else { b"DRY Glass" };
-    c.draw_text((br.x + 22) as i32, (br.y + 3) as i32, FontId::SansSemiBold, 11, blbl, br_fg);
+    c.draw_text((br.x + 24) as i32, (br.y + 3) as i32, FontId::SansSemiBold, 11, blbl, br_fg);
 
     crate::glass::window_strip::paint_adaptive_window_strip(comp, wm, tokens, tb_clip);
 
@@ -129,7 +131,10 @@ fn paint_p3_topbar_items(
     let nfg = if n_open { ui.fg_on_accent } else { ui.fg_primary };
     c.fill_bordered_rrect_aa(notif_r, 6, nbg, if n_open { ui.accent } else { ui.border_subtle });
     draw_vector_icon(
-        &mut c, Rect::new(notif_r.x + 7, notif_r.y + 4, 12, 12), IconKind::Bell, nfg,
+        &mut c,
+        Rect::new(notif_r.x + 7, notif_r.y + 4, 12, 12),
+        if wm.glass.notif_unread > 0 { IconKind::NotifUnread } else { IconKind::Bell },
+        nfg,
         if n_open { ui.fg_on_accent } else if wm.glass.notif_unread > 0 { ui.accent } else { nfg },
     );
     let mut nlb = LineBuilder::new();
@@ -228,7 +233,7 @@ fn paint_tabstrip(comp: &mut DesktopCompositor, wm: &WindowManager, tokens: &Gla
                 c.fill_rrect_aa(Rect::new(tr.x + 8, tr.y + tr.h - 2, tr.w.saturating_sub(16), 2), 1, ui.accent, 255);
             }
             if let Some(app) = app_from_title_kind(w.title_kind) {
-                draw_vector_icon(&mut c, Rect::new(tr.x + 8, tr.y + 4, 14, 14), IconKind::from_app(app), fg, ui.accent);
+                draw_app_icon_for_app(&mut c, Rect::new(tr.x + 7, tr.y + 3, 14, 14), app, tokens.mode);
             }
             let lbl: &[u8] = match w.title_kind {
                 TITLE_KIND_TERMINAL => b"Terminal",
@@ -342,7 +347,7 @@ fn paint_p3_window(
     let title_fg = if win.focused { ui.fg_primary } else { ui.fg_muted };
     let mut title_x = wx + WIN_BORDER + 10;
     if let Some(app) = WindowManager::slot_app_id(win) {
-        draw_vector_icon(&mut c, Rect::new(title_x, wy + WIN_BORDER + 6, 16, 16), IconKind::from_app(app), title_fg, ui.accent);
+        draw_app_icon_for_app(&mut c, Rect::new(title_x, wy + WIN_BORDER + 6, 16, 16), app, tokens.mode);
         title_x += 22;
     }
     let min_r = win.minimize_btn_rect();
@@ -359,14 +364,15 @@ fn paint_p3_window(
     );
 
     c.fill_bordered_rrect_aa(min_r, 5, ui.bg_card_alt, ui.border_subtle);
-    c.fill_rect(Rect::new(min_r.x + 6, min_r.y + min_r.h / 2, min_r.w.saturating_sub(12), 2), title_fg);
+    let mi = Rect::new(min_r.x + (min_r.w.saturating_sub(10)) / 2, min_r.y + (min_r.h.saturating_sub(10)) / 2, 10, 10);
+    draw_vector_icon(&mut c, mi, IconKind::WinMin, title_fg, ui.accent);
 
     let close_r = win.close_btn_rect();
     let close_bg = if win.focused { 0xC83E44 } else { ui.bg_card_alt };
     let close_fg = if win.focused { 0xFFFFFF } else { ui.fg_muted };
     c.fill_rrect_aa(close_r, 5, close_bg, 255);
     let ci = Rect::new(close_r.x + (close_r.w.saturating_sub(10)) / 2, close_r.y + (close_r.h.saturating_sub(10)) / 2, 10, 10);
-    draw_vector_icon(&mut c, ci, IconKind::Close, close_fg, ui.accent);
+    draw_vector_icon(&mut c, ci, IconKind::WinClose, close_fg, ui.accent);
 
     if !win.is_pixel {
         let mut badge = [b' '; 20];

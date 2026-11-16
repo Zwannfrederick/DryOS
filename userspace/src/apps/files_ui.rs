@@ -57,13 +57,56 @@ pub struct FilesView<'a> {
 
 fn files_nav_items(persist_available: bool) -> [(&'static [u8], IconKind); 3] {
     [
-        (b"/boot", IconKind::Shield),
+        (b"/boot", IconKind::DriveNvme),
         (b"/ram", IconKind::Memory),
         (
             b"/persist",
-            if persist_available { IconKind::Folder } else { IconKind::Warning },
+            if persist_available { IconKind::DriveUsb } else { IconKind::StatusWarning },
         ),
     ]
+}
+
+fn ends_with_icase(haystack: &[u8], suffix: &[u8]) -> bool {
+    if haystack.len() < suffix.len() {
+        return false;
+    }
+    let start = haystack.len() - suffix.len();
+    haystack[start..].iter().zip(suffix.iter()).all(|(&a, &b)| a.to_ascii_lowercase() == b)
+}
+
+fn file_entry_icon(name: &[u8], is_priv: bool) -> IconKind {
+    if is_priv {
+        return IconKind::Lock;
+    }
+    if ends_with_icase(name, b".txt") || ends_with_icase(name, b".md") || ends_with_icase(name, b".log") {
+        IconKind::FileDoc
+    } else if ends_with_icase(name, b".rs")
+        || ends_with_icase(name, b".py")
+        || ends_with_icase(name, b".c")
+        || ends_with_icase(name, b".h")
+        || ends_with_icase(name, b".json")
+        || ends_with_icase(name, b".toml")
+        || ends_with_icase(name, b".cfg")
+        || ends_with_icase(name, b".sh")
+    {
+        IconKind::FileCode
+    } else if ends_with_icase(name, b".elf") || ends_with_icase(name, b".bin") || ends_with_icase(name, b".efi") {
+        IconKind::FileExec
+    } else if ends_with_icase(name, b".png")
+        || ends_with_icase(name, b".svg")
+        || ends_with_icase(name, b".bmp")
+        || ends_with_icase(name, b".jpg")
+    {
+        IconKind::FileImage
+    } else if ends_with_icase(name, b".tar") || ends_with_icase(name, b".gz") || ends_with_icase(name, b".zip") {
+        IconKind::FileArchive
+    } else if ends_with_icase(name, b".wav") || ends_with_icase(name, b".mp3") || ends_with_icase(name, b".ogg") {
+        IconKind::FileAudio
+    } else if ends_with_icase(name, b".mp4") || ends_with_icase(name, b".mkv") {
+        IconKind::FileVideo
+    } else {
+        IconKind::File
+    }
 }
 
 pub fn files_vis_rows(t: UiTheme, w: usize, h: usize) -> usize {
@@ -245,7 +288,7 @@ pub fn render_files(
 
             let e = &view.entries[idx];
             let is_priv = (e.flags & VFS_FLAG_PRIVATE) != 0;
-            let ic = if is_priv { IconKind::Lock } else { IconKind::File };
+            let ic = file_entry_icon(e.name_bytes(), is_priv);
             let ic_rgb = if is_priv { t.warn_fg } else if selected { t.accent_fg } else { t.fg_secondary };
             draw_vector_icon(
                 &mut rc,

@@ -7,15 +7,16 @@
 
 use dry_userspace::action::DesktopAction;
 use dry_userspace::apps::settings_ui::{
-    first_row_for_category, render_help_dialog, render_settings, settings_vis_rows, SettingsAction,
-    SettingsView, DLG_PIXEL_VADDR, DLG_WIN_H, DLG_WIN_W, ROW_COUNT, SET_PIXEL_VADDR, SET_WIN_H,
-    SET_WIN_W,
+    first_row_for_category, render_help_dialog, render_settings, settings_vis_rows,
+    showcase_grid_metrics, SettingsAction, SettingsView, DLG_PIXEL_VADDR, DLG_WIN_H, DLG_WIN_W,
+    ROW_COUNT, SET_PIXEL_VADDR, SET_WIN_H, SET_WIN_W,
 };
 use dry_userspace::apps::{app_log_line, app_poll_tsc, PixelAppWindow, PointerStep};
 use dry_userspace::input::{InputEvent, InputEventKind};
 use dry_userspace::keymap::{KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::sup_services::SupervisorPrefs;
+use dry_userspace::ui::theme::UiTheme;
 use dry_userspace::wm_types::{WindowRole, TITLE_KIND_DIALOG, TITLE_KIND_SETTINGS};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_ipc_call_inline,
@@ -41,11 +42,19 @@ struct SettingsApp {
     prefs: SupervisorPrefs,
     sel_row: usize,
     list_scroll: usize,
+    dpi_200: bool,
+    showcase_open: bool,
+    showcase_scroll: usize,
     status: [u8; 64],
     status_len: usize,
 }
 
 impl SettingsApp {
+    fn effective_theme(&self) -> UiTheme {
+        let base = self.main_win.theme();
+        UiTheme::new(base.mode, if self.dpi_200 { 200 } else { base.dpi_pct })
+    }
+
     fn set_status(&mut self, msg: &[u8]) {
         let n = msg.len().min(self.status.len());
         self.status[..n].copy_from_slice(&msg[..n]);
@@ -53,11 +62,8 @@ impl SettingsApp {
     }
 
     fn ensure_visible(&mut self) {
-        let vis = settings_vis_rows(
-            self.main_win.theme(),
-            self.main_win.w as usize,
-            self.main_win.h as usize,
-        );
+        let t = self.effective_theme();
+        let vis = settings_vis_rows(t, self.main_win.w as usize, self.main_win.h as usize);
         if self.sel_row < self.list_scroll {
             self.list_scroll = self.sel_row;
         } else if self.sel_row >= self.list_scroll + vis {
@@ -65,6 +71,22 @@ impl SettingsApp {
         }
         let max_scroll = ROW_COUNT.saturating_sub(vis);
         self.list_scroll = self.list_scroll.min(max_scroll);
+        let (_, sc_max) = showcase_grid_metrics(t, self.main_win.w as usize, self.main_win.h as usize);
+        self.showcase_scroll = self.showcase_scroll.min(sc_max);
+    }
+
+    fn render_main(&mut self, step: PointerStep) -> SettingsAction {
+        let v = SettingsView {
+            prefs: self.prefs,
+            sel_row: self.sel_row,
+            list_scroll: self.list_scroll,
+            dlg_open: self.dlg_win.is_some(),
+            dpi_200: self.dpi_200,
+            showcase_open: self.showcase_open,
+            showcase_scroll: self.showcase_scroll,
+            status_msg: &self.status[..self.status_len],
+        };
+        render_settings(&mut self.main_win, &v, step)
     }
 
     fn query_live_prefs(&mut self) {
@@ -112,6 +134,7 @@ impl SettingsApp {
     }
 
     fn apply_scale_bits(&mut self, bits: u8) -> bool {
+        self.dpi_200 = false;
         let next_bits = bits.min(2);
         let next_flags = (self.prefs.theme_flags & 0x0f) | (next_bits << 4);
         if self.send_action(DesktopAction::SetThemeContrast(next_flags)) {
@@ -248,6 +271,38 @@ impl SettingsApp {
         }
     }
 
+    fn apply_dpi_200(&mut self, enable: bool) {
+        self.dpi_200 = enable;
+        self.ensure_visible();
+        if enable {
+            Self::log_apply_u64(b"dpi_pct", 200);
+            self.set_status(b"Display Scale -> 200% HiDPI");
+        } else {
+            let bits = ((self.prefs.theme_flags >> 4) & 3).min(2);
+            let pct: u64 = match bits {
+                1 => 125,
+                2 => 150,
+                _ => 100,
+            };
+            Self::log_apply_u64(b"dpi_pct", pct);
+            self.set_status(b"Restored supervisor Display Scale");
+        }
+    }
+
+    fn set_showcase(&mut self, open: bool) {
+        self.showcase_open = open;
+        self.showcase_scroll = 0;
+        let mut lb = LineBuilder::new();
+        lb.push_bytes(b"[DRY-SETTINGS] VIEW showcase=");
+        lb.push_u64(u64::from(open));
+        app_log_line(&lb);
+        self.set_status(if open {
+            b"Visual Identity & Icons Showcase (21 Apps)"
+        } else {
+            b"Live DRY Glass 2.1 Settings"
+        });
+    }
+
     fn open_help_dialog(&mut self) {
         if self.dlg_win.is_some() {
             return;
@@ -308,8 +363,15 @@ impl SettingsApp {
         match act {
             SettingsAction::None => {}
             SettingsAction::SelectCategory(cat) => {
-                self.sel_row = first_row_for_category(cat).min(ROW_COUNT - 1);
-                self.ensure_visible();
+                if cat >= 4 {
+                    self.set_showcase(true);
+                } else {
+                    if self.showcase_open {
+                        self.set_showcase(false);
+                    }
+                    self.sel_row = first_row_for_category(cat).min(ROW_COUNT - 1);
+                    self.ensure_visible();
+                }
                 dirty_main = true;
             }
             SettingsAction::SelectRow(row) => {
@@ -346,8 +408,12 @@ impl SettingsApp {
             }
             SettingsAction::SetScaleBits(bits) => {
                 self.sel_row = 9;
-                self.ensure_visible();
-                let _ = self.apply_scale_bits(bits);
+                if bits >= 3 {
+                    self.apply_dpi_200(true);
+                } else {
+                    self.ensure_visible();
+                    let _ = self.apply_scale_bits(bits);
+                }
                 dirty_main = true;
                 dirty_dlg = self.dlg_win.is_some();
             }
@@ -357,6 +423,10 @@ impl SettingsApp {
             }
             SettingsAction::TriggerGpuTest => {
                 self.trigger_gpu_test();
+                dirty_main = true;
+            }
+            SettingsAction::ToggleShowcase => {
+                self.set_showcase(!self.showcase_open);
                 dirty_main = true;
             }
         }
@@ -401,10 +471,19 @@ impl SettingsApp {
                 self.trigger_gpu_test();
                 return (true, false, false);
             }
-            b'1'..=b'9' => {
+            b'v' | b'V' => {
+                self.set_showcase(!self.showcase_open);
+                return (true, false, false);
+            }
+            b'1'..=b'8' => {
                 self.sel_row = (ev.ascii - b'1') as usize;
                 self.ensure_visible();
                 let _ = self.adjust_row(self.sel_row, 1);
+                return (true, self.dlg_win.is_some(), false);
+            }
+            b'9' => {
+                self.sel_row = 9;
+                self.apply_dpi_200(!self.dpi_200);
                 return (true, self.dlg_win.is_some(), false);
             }
             b'0' | b's' | b'S' => {
@@ -417,13 +496,26 @@ impl SettingsApp {
         }
         match ev.keycode {
             KEY_UP => {
-                self.sel_row = if self.sel_row == 0 { ROW_COUNT - 1 } else { self.sel_row - 1 };
-                self.ensure_visible();
+                if self.showcase_open {
+                    self.showcase_scroll = self.showcase_scroll.saturating_sub(1);
+                } else {
+                    self.sel_row = if self.sel_row == 0 { ROW_COUNT - 1 } else { self.sel_row - 1 };
+                    self.ensure_visible();
+                }
                 (true, false, false)
             }
             KEY_DOWN => {
-                self.sel_row = (self.sel_row + 1) % ROW_COUNT;
-                self.ensure_visible();
+                if self.showcase_open {
+                    let (_, sc_max) = showcase_grid_metrics(
+                        self.effective_theme(),
+                        self.main_win.w as usize,
+                        self.main_win.h as usize,
+                    );
+                    self.showcase_scroll = (self.showcase_scroll + 1).min(sc_max);
+                } else {
+                    self.sel_row = (self.sel_row + 1) % ROW_COUNT;
+                    self.ensure_visible();
+                }
                 (true, false, false)
             }
             KEY_LEFT => {
@@ -440,14 +532,7 @@ impl SettingsApp {
 
     fn redraw_main(&mut self) {
         if self.main_win.win_id != 0 {
-            let v = SettingsView {
-                prefs: self.prefs,
-                sel_row: self.sel_row,
-                list_scroll: self.list_scroll,
-                dlg_open: self.dlg_win.is_some(),
-                status_msg: &self.status[..self.status_len],
-            };
-            let _ = render_settings(&mut self.main_win, &v, PointerStep::default());
+            let _ = self.render_main(PointerStep::default());
             let _ = self.main_win.present_full(self.disp_ep);
         }
     }
@@ -493,6 +578,9 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
         prefs: SupervisorPrefs::new(),
         sel_row: 0,
         list_scroll: 0,
+        dpi_200: false,
+        showcase_open: false,
+        showcase_scroll: 0,
         status: [0; 64],
         status_len: 0,
     };
@@ -500,14 +588,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     app.sync_window_themes();
     app.set_status(b"Live DRY Glass 2.1 Settings");
 
-    let init_v = SettingsView {
-        prefs: app.prefs,
-        sel_row: app.sel_row,
-        list_scroll: app.list_scroll,
-        dlg_open: false,
-        status_msg: &app.status[..app.status_len],
-    };
-    let _ = render_settings(&mut app.main_win, &init_v, PointerStep::default());
+    let _ = app.render_main(PointerStep::default());
     app.main_win.publish_initial();
     let main_wid = app.main_win.attach(
         disp_ep,
@@ -564,24 +645,30 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                     }
                 } else if ev.kind == InputEventKind::MouseScroll {
                     let _ = app.main_win.ingest_pointer(ev);
-                    if ev.wheel > 0 {
-                        app.sel_row = app.sel_row.saturating_sub(1);
-                    } else if ev.wheel < 0 {
-                        app.sel_row = (app.sel_row + 1).min(ROW_COUNT - 1);
+                    if app.showcase_open {
+                        let (_, sc_max) = showcase_grid_metrics(
+                            app.effective_theme(),
+                            app.main_win.w as usize,
+                            app.main_win.h as usize,
+                        );
+                        if ev.wheel > 0 {
+                            app.showcase_scroll = app.showcase_scroll.saturating_sub(1);
+                        } else if ev.wheel < 0 {
+                            app.showcase_scroll = (app.showcase_scroll + 1).min(sc_max);
+                        }
+                    } else {
+                        if ev.wheel > 0 {
+                            app.sel_row = app.sel_row.saturating_sub(1);
+                        } else if ev.wheel < 0 {
+                            app.sel_row = (app.sel_row + 1).min(ROW_COUNT - 1);
+                        }
+                        app.ensure_visible();
                     }
-                    app.ensure_visible();
                     dirty_main = true;
                 } else {
                     let step = app.main_win.ingest_pointer(ev);
                     if step.clicked {
-                        let v = SettingsView {
-                            prefs: app.prefs,
-                            sel_row: app.sel_row,
-                            list_scroll: app.list_scroll,
-                            dlg_open: app.dlg_win.is_some(),
-                            status_msg: &app.status[..app.status_len],
-                        };
-                        let act = render_settings(&mut app.main_win, &v, step);
+                        let act = app.render_main(step);
                         let (dm, dd) = app.apply_ui_action(act);
                         dirty_main |= dm || step.redraw;
                         dirty_dlg |= dd;

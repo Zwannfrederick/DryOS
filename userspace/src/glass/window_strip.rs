@@ -13,6 +13,7 @@ use crate::gfx::Rect;
 use crate::glass::overlays::topbar_brand_pill_rect;
 use crate::glass::theme::GlassTokens;
 use crate::ttf::{measure_text, FontId, PixelFormat};
+use crate::ui::app_icons::draw_app_icon_for_app;
 use crate::ui::canvas::Canvas;
 use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::theme::UiTheme;
@@ -345,13 +346,7 @@ pub fn paint_adaptive_window_strip(
             };
             c.fill_bordered_rrect_aa(r, 6, bg, bd);
             if let Some(app) = slot.app {
-                draw_vector_icon(
-                    &mut c,
-                    Rect::new(r.x + 6, r.y + 4, 12, 12),
-                    IconKind::from_app(app),
-                    fg,
-                    ui.accent,
-                );
+                draw_app_icon_for_app(&mut c, Rect::new(r.x + 5, r.y + 3, 14, 14), app, tokens.mode);
                 let mut badge_buf = [0u8; 4];
                 let badge_len = if slot.win_count > 1 {
                     write_u32_ascii(&mut badge_buf, slot.win_count as u32)
@@ -382,7 +377,7 @@ pub fn paint_adaptive_window_strip(
                 draw_vector_icon(
                     &mut c,
                     Rect::new(r.x + 6, r.y + 4, 12, 12),
-                    IconKind::LayoutTiled,
+                    IconKind::WorkspaceGrid,
                     fg,
                     ui.accent,
                 );
@@ -404,20 +399,14 @@ pub fn paint_adaptive_window_strip(
             let n = write_u32_ascii(&mut obuf[1..], slot.overflow_count as u32);
             c.draw_text_centered(r, FontId::SansSemiBold, 10, &obuf[..1 + n], fg);
         } else if let Some(app) = slot.app {
-            let (bg, bd, fg) = if slot.is_running {
-                (ui.bg_card_alt, ui.border_strong, ui.fg_primary)
+            let (bg, bd) = if slot.is_running {
+                (ui.bg_card_alt, ui.border_strong)
             } else {
-                (ui.bg_card, ui.border_subtle, ui.fg_muted)
+                (ui.bg_card, ui.border_subtle)
             };
             c.fill_bordered_rrect_aa(r, 6, bg, bd);
-            let ix = if slot.win_count > 1 { r.x + 4 } else { r.x + (r.w.saturating_sub(12)) / 2 };
-            draw_vector_icon(
-                &mut c,
-                Rect::new(ix, r.y + 4, 12, 12),
-                IconKind::from_app(app),
-                fg,
-                ui.accent,
-            );
+            let ix = if slot.win_count > 1 { r.x + 4 } else { r.x + (r.w.saturating_sub(14)) / 2 };
+            draw_app_icon_for_app(&mut c, Rect::new(ix, r.y + 3, 14, 14), app, tokens.mode);
             if slot.win_count > 1 {
                 let mut cb = [0u8; 4];
                 let cn = write_u32_ascii(&mut cb, slot.win_count as u32);

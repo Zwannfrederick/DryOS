@@ -8,8 +8,8 @@ use crate::glass::blur::{backdrop_frosted_rect, blend_soft_rrect_shadow};
 use crate::glass::overlays::{dock_item_rect, dock_rect};
 use crate::glass::theme::{GlassTokens, ThemeMode};
 use crate::ttf::PixelFormat;
+use crate::ui::app_icons::draw_app_icon_for_app;
 use crate::ui::canvas::Canvas;
-use crate::ui::icons::{draw_vector_icon, IconKind};
 use crate::ui::theme::UiTheme;
 use crate::wm::{WindowManager, TOPBAR_H};
 
@@ -143,17 +143,8 @@ pub fn paint_dock_and_snap(
             c.stroke_rrect_aa(ir, 9, ui.border_subtle, 145);
         }
 
-        let icon_r = Rect::new(ir.x + 6, ir.y + 6, ir.w.saturating_sub(12), ir.h.saturating_sub(12));
-        let fg = if is_focused {
-            ui.accent_fg
-        } else if all_min {
-            ui.fg_muted
-        } else if is_running {
-            ui.fg_primary
-        } else {
-            ui.fg_secondary
-        };
-        draw_vector_icon(&mut c, icon_r, IconKind::from_app(app), fg, ui.accent);
+        let icon_r = Rect::new(ir.x + 4, ir.y + 4, ir.w.saturating_sub(8), ir.h.saturating_sub(8));
+        draw_app_icon_for_app(&mut c, icon_r, app, tokens.mode);
 
         if is_focused {
             let dot = Rect::new(ir.x + 10, ir.y + ir.h + 1, ir.w.saturating_sub(20), 3);
