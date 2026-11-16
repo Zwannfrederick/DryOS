@@ -8,6 +8,7 @@ use crate::ioring::IoSqe;
 
 pub const COMP_ID_LX_RNG_ISLAND: u16 = 0x0210;
 pub const COMP_ID_LX_DRM_BOCHS_ISLAND: u16 = 0x0212;
+pub const COMP_ID_LX_NET_8139CP_ISLAND: u16 = 0x0214;
 
 // Badge assigned by `dry-init` on `broker_ep` when launching `dry-broker` for a PCI-backed island.
 pub const BADGE_BROKER_LX_MODE: u64 = 0x0810;
@@ -17,6 +18,8 @@ pub const BADGE_LX_FAULT_BASE: u64 = 0xfa17_0000;
 
 // Control-plane broker opcode registering `pci_dev_cap` + target `comp_id` in LX mode.
 pub const BROKER_OP_BIND_PCI_DEV: u32 = 167;
+// Control-plane broker `drvctl`-compatible lifecycle & backend contract inspection opcode.
+pub const BROKER_OP_DRVCTL_QUERY: u32 = 168;
 
 // Direct `dry-lx-rng` island opcodes (alongside `MOCK_OP_BIND_NOTIF`, `MOCK_OP_INIT_ISLAND`, etc.)
 pub const LX_OP_BIND_PCI: u32 = 155;
@@ -28,10 +31,17 @@ pub const LX_DRM_OP_MODESET: u32 = 171;
 pub const LX_DRM_OP_IMPORT_DMABUF: u32 = 172;
 pub const LX_DRM_OP_COMMIT_DAMAGE: u32 = 173;
 
+// Direct `dry-lx-net` island opcodes (`M3`, `COMP_ID_LX_NET_8139CP_ISLAND`)
+pub const LX_NET_OP_QUERY_INFO: u32 = 175;
+pub const LX_NET_OP_SEND_ARP: u32 = 176;
+pub const LX_NET_OP_POLL_RX_TX: u32 = 177;
+
 // `IoRingSharedPage` opcode processed by `dry-lx-rng.elf`
 pub const IORING_OP_RNG_READ: u8 = 17;
 // `IoRingSharedPage` opcode processed by `dry-lx-drm-bochs.elf`
 pub const IORING_OP_DRM_FLUSH: u8 = 18;
+// `IoRingSharedPage` opcode processed by `dry-lx-net.elf`
+pub const IORING_OP_NET_POLL: u8 = 19;
 
 // Offset inside the shared 4 KiB `IoRingSharedPage` reserved for DMA-copied/filled RNG output
 // (`sizeof(IoRingSharedPage) == 1600`, so `2048..4096` is completely unused by SQ/CQ arrays).
@@ -63,6 +73,19 @@ pub const fn pack_drm_flush_sqe(x: u16, y: u16, w: u16, h: u16, expected_gen: u6
         sector_count: w,
         buf_offset: ((x as u32) << 16) | (y as u32),
         lba: h as u64,
+        user_tag: 0,
+        _reserved: expected_gen,
+    }
+}
+
+#[inline]
+pub const fn pack_net_poll_sqe(budget: u16, arp_ip_be: u32, expected_gen: u64) -> IoSqe {
+    IoSqe {
+        opcode: IORING_OP_NET_POLL,
+        flags: 0,
+        sector_count: budget,
+        buf_offset: arp_ip_be,
+        lba: 0,
         user_tag: 0,
         _reserved: expected_gen,
     }

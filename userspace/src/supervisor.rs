@@ -13,7 +13,7 @@ use crate::gpu_audit::{
     LiveGpuSession,
 };
 use crate::lx_drm_audit::{run_lx_drm_bochs_audit, teardown_live_lx_drm, LxDrmLiveSession};
-use crate::lx_island_audit::run_lx_island_audit;
+use crate::lx_island_audit::{run_lx_island_audit, run_lx_net_audit};
 use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
 pub use crate::sup_ctx::AppState;
@@ -144,11 +144,11 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     }
 
     let mut sec_audit_done =
-        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28 | 29);
+        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28 | 29 | 31);
     let mut gpu_live: Option<LiveGpuSession> =
         if boot.pci_gpu_cap != 0
             && boot.gpu_mod_cap != 0
-            && !matches!(boot.session_mode, 25..=29)
+            && !matches!(boot.session_mode, 25..=29 | 31)
         {
             spawn_live_gpu(boot, disp_sup_cap).ok()
         } else {
@@ -267,6 +267,12 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                             log_line(&elb);
                             sys_exit(code);
                         }
+                    }
+                } else if boot.session_mode == 31 {
+                    if let Err(code) =
+                        run_lx_net_audit(boot_info_addr, boot, vfs_sup_cap, vault_sup_cap)
+                    {
+                        sys_exit(code);
                     }
                 }
                 sec_audit_done = true;

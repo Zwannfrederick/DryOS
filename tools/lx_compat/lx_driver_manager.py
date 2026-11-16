@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR GPL-2.0-only
-"""DRY OS Linux Driver Compatibility Runtime Manager: fetch, SHA-256 verify, match, cache, pin."""
+"""DRY OS Linux Driver Compatibility Runtime Manager: fetch, SHA-256 verify, match, cache, lifecycle, drvctl."""
 
 import argparse
 import hashlib
@@ -17,27 +17,102 @@ MANIFEST_PATH = ROOT / "vendor" / "linux-drivers" / "MANIFEST.json"
 DEFAULT_CACHE_DIR = ROOT / "kernel" / "build" / "lx_cache"
 DEFAULT_LIBDRY_DIR = ROOT / "drivers" / "libdry-lx-compat"
 
+LIFECYCLE_STEPS: tuple[str, ...] = (
+    "DETECTED",
+    "MATCHED",
+    "ASSESSED",
+    "SOURCE_RESOLVED",
+    "DEPS_FIRMWARE_OK",
+    "BUILT_VERIFIED",
+    "ISLAND_CREATED",
+    "CAPS_ASSIGNED",
+    "RESOURCES_MAPPED",
+    "INITIALIZED",
+    "PUBLISHED",
+    "MONITORING",
+    "FAULT_RECOVERY",
+    "UNLOADED",
+    "ROLLED_BACK",
+)
+
+VALID_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "DETECTED": ("MATCHED", "ROLLED_BACK"),
+    "MATCHED": ("ASSESSED", "UNLOADED", "ROLLED_BACK"),
+    "ASSESSED": ("SOURCE_RESOLVED", "UNLOADED", "ROLLED_BACK"),
+    "SOURCE_RESOLVED": ("DEPS_FIRMWARE_OK", "ROLLED_BACK"),
+    "DEPS_FIRMWARE_OK": ("BUILT_VERIFIED", "ROLLED_BACK"),
+    "BUILT_VERIFIED": ("ISLAND_CREATED", "ROLLED_BACK"),
+    "ISLAND_CREATED": ("CAPS_ASSIGNED", "FAULT_RECOVERY", "UNLOADED"),
+    "CAPS_ASSIGNED": ("RESOURCES_MAPPED", "FAULT_RECOVERY", "UNLOADED"),
+    "RESOURCES_MAPPED": ("INITIALIZED", "FAULT_RECOVERY", "UNLOADED"),
+    "INITIALIZED": ("PUBLISHED", "FAULT_RECOVERY", "UNLOADED"),
+    "PUBLISHED": ("MONITORING", "FAULT_RECOVERY", "UNLOADED"),
+    "MONITORING": ("FAULT_RECOVERY", "UNLOADED"),
+    "FAULT_RECOVERY": ("ISLAND_CREATED", "UNLOADED", "ROLLED_BACK"),
+    "UNLOADED": ("ROLLED_BACK", "DETECTED"),
+    "ROLLED_BACK": ("SOURCE_RESOLVED", "DETECTED"),
+}
+
 BASE_CFLAGS = [
-    "clang",
-    "-std=gnu11",
-    "-target",
-    "x86_64-unknown-none-elf",
-    "-ffreestanding",
-    "-fno-builtin",
-    "-fno-stack-protector",
-    "-fno-pic",
-    "-fno-pie",
-    "-mno-red-zone",
-    "-mno-sse",
-    "-mno-sse2",
-    "-mno-avx",
-    "-mcmodel=small",
-    "-O2",
-    "-Wall",
-    "-Wextra",
-    "-Wno-unused-parameter",
-    "-Werror",
+    "clang", "-std=gnu11", "-target", "x86_64-unknown-none-elf",
+    "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
+    "-fno-pic", "-fno-pie", "-mno-red-zone", "-mno-sse", "-mno-sse2", "-mno-avx",
+    "-mcmodel=small", "-O2", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
 ]
+
+
+class DriverLifecycle:
+    """Explicit 15-step driver lifecycle state machine with transition validation."""
+
+    def __init__(self, driver: str, pci_id: str, backend: str) -> None:
+        self.driver = driver
+        self.pci_id = pci_id
+        self.backend = backend
+        self.state = "DETECTED"
+        self.generation = 1
+        self.restarts = 0
+        self.history: list[str] = ["DETECTED"]
+
+    def advance(self, next_state: str) -> str:
+        if next_state not in LIFECYCLE_STEPS:
+            raise ValueError(f"Unknown lifecycle state: {next_state!r}")
+        allowed = VALID_TRANSITIONS.get(self.state, ())
+        if next_state not in allowed:
+            raise ValueError(f"Illegal transition {self.state} -> {next_state} (allowed={allowed})")
+        self.state = next_state
+        self.history.append(next_state)
+        return self.state
+
+    def run_bringup_to_monitoring(self) -> list[str]:
+        for step in LIFECYCLE_STEPS[1:12]:
+            self.advance(step)
+        return list(self.history)
+
+    def handle_fault_and_respawn(self) -> int:
+        self.advance("FAULT_RECOVERY")
+        self.restarts += 1
+        self.generation += 1
+        for step in ("ISLAND_CREATED", "CAPS_ASSIGNED", "RESOURCES_MAPPED", "INITIALIZED", "PUBLISHED", "MONITORING"):
+            self.advance(step)
+        return self.generation
+
+    def unload_and_rollback(self) -> list[str]:
+        if self.state != "UNLOADED":
+            self.advance("UNLOADED")
+        self.advance("ROLLED_BACK")
+        return list(self.history)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "driver": self.driver,
+            "pci_id": self.pci_id,
+            "backend": self.backend,
+            "state": self.state,
+            "generation": self.generation,
+            "restarts": self.restarts,
+            "visited_steps": sorted(set(self.history), key=LIFECYCLE_STEPS.index),
+            "history": list(self.history),
+        }
 
 
 def load_catalog(catalog_path: pathlib.Path = CATALOG_PATH) -> dict[str, Any]:
@@ -115,18 +190,39 @@ def verify_all(
     for name, drv in cat["drivers"].items():
         local_rel = drv.get("local_path", "")
         expected = drv.get("sha256", "")
-        if not local_rel or not expected:
-            continue
-        p = root / local_rel
-        if not p.exists():
-            raise RuntimeError(f"Missing vendored driver source: {p}")
-        actual = sha256_file(p)
-        if actual != expected:
-            raise RuntimeError(f"SHA-256 tamper/mismatch for {name} ({local_rel}): {actual} != {expected}")
-        checked.append({"driver": name, "path": local_rel, "sha256": actual})
+        if local_rel and expected:
+            p = root / local_rel
+            if not p.exists():
+                raise RuntimeError(f"Missing vendored driver source: {p}")
+            actual = sha256_file(p)
+            if actual != expected:
+                raise RuntimeError(f"SHA-256 tamper/mismatch for {name} ({local_rel}): {actual} != {expected}")
+            checked.append({"driver": name, "path": local_rel, "sha256": actual})
 
-    igc_versions = manifest.get("versions", {})
-    for ver, meta in igc_versions.items():
+        for idx, comp in enumerate(drv.get("companion_sources", [])):
+            crel = comp.get("local_path", "")
+            cexp = comp.get("sha256", "")
+            if not crel or not cexp:
+                continue
+            cp = root / crel
+            if not cp.exists():
+                raise RuntimeError(f"Missing companion driver source: {cp}")
+            cact = sha256_file(cp)
+            if cact != cexp:
+                raise RuntimeError(f"SHA-256 tamper/mismatch for {name}[{idx}] ({crel}): {cact} != {cexp}")
+            checked.append({"driver": f"{name}:companion{idx}", "path": crel, "sha256": cact})
+
+    for mkey in ("net_8139cp", "net_mii"):
+        mrec = manifest.get(mkey)
+        if isinstance(mrec, dict) and mrec.get("local_path") and mrec.get("sha256"):
+            mp = root / mrec["local_path"]
+            if not mp.exists():
+                raise RuntimeError(f"Missing manifest source {mp}")
+            mact = sha256_file(mp)
+            if mact != mrec["sha256"]:
+                raise RuntimeError(f"Manifest SHA-256 mismatch for {mkey}: {mact} != {mrec['sha256']}")
+
+    for ver, meta in manifest.get("versions", {}).items():
         base_dir = root / "vendor" / "linux-drivers" / ver / "igc"
         for fentry in meta.get("files", []):
             fp = base_dir / fentry["name"]
@@ -138,6 +234,44 @@ def verify_all(
             checked.append({"driver": f"igc:{ver}/{fentry['name']}", "path": str(fp.relative_to(root)), "sha256": actual})
 
     return checked
+
+
+def validate_backend_contract(backend_name: str, catalog_path: pathlib.Path = CATALOG_PATH) -> dict[str, Any]:
+    cat = load_catalog(catalog_path)
+    backends = cat.get("backends", {})
+    if backend_name not in backends:
+        raise ValueError(f"Unknown backend contract: {backend_name!r}")
+    spec = backends[backend_name]
+    if not spec.get("ring0_ko_forbidden", False):
+        raise RuntimeError(f"Backend {backend_name!r} violates ring0_ko_forbidden contract")
+    if spec.get("igpu_passthrough_assumed", True):
+        raise RuntimeError(f"Backend {backend_name!r} illegally assumes physical iGPU passthrough")
+    return {
+        "backend": backend_name,
+        "ring0_ko_forbidden": True,
+        "igpu_passthrough_assumed": False,
+        "isolation": spec["isolation"],
+        "fault_ep_supervised": bool(spec.get("fault_ep_supervised", False)),
+    }
+
+
+def assess_driver(driver_name: str, catalog_path: pathlib.Path = CATALOG_PATH) -> dict[str, Any]:
+    cat = load_catalog(catalog_path)
+    drv = cat["drivers"].get(driver_name)
+    if not drv:
+        raise ValueError(f"Unknown driver {driver_name!r}")
+    backend_name = drv.get("backend", "lx-compat-island")
+    contract = validate_backend_contract(backend_name, catalog_path)
+    return {
+        "driver": driver_name,
+        "license": drv["license"],
+        "status": drv["status"],
+        "runtime_island": drv.get("runtime_island", ""),
+        "compartment_id": drv.get("compartment_id", ""),
+        "backend": contract,
+        "capabilities": drv.get("capabilities", []),
+        "firmware_blobs": drv.get("firmware_blobs", []),
+    }
 
 
 def match_pci(vendor_device: str, catalog_path: pathlib.Path = CATALOG_PATH) -> dict[str, Any]:
@@ -159,6 +293,7 @@ def match_pci(vendor_device: str, catalog_path: pathlib.Path = CATALOG_PATH) -> 
                     "driver": name,
                     "pci_id": norm,
                     "status": drv["status"],
+                    "backend": drv.get("backend", "lx-compat-island"),
                     "runtime_island": drv.get("runtime_island", ""),
                     "compartment_id": drv.get("compartment_id", ""),
                     "capabilities": drv.get("capabilities", []),
@@ -219,11 +354,21 @@ def build_cache(
     if expected and sha256_file(up_src) != expected:
         raise RuntimeError(f"SHA-256 mismatch on {up_src}")
 
+    comp_sources: list[pathlib.Path] = []
+    for comp in drv.get("companion_sources", []):
+        cp = ROOT / comp["local_path"]
+        if not cp.exists():
+            raise RuntimeError(f"Missing companion C source {cp}")
+        cexp = comp.get("sha256", "")
+        if cexp and sha256_file(cp) != cexp:
+            raise RuntimeError(f"SHA-256 mismatch on {cp}")
+        comp_sources.append(cp)
+
     if extra_c_sources is None:
-        compat_src = DEFAULT_LIBDRY_DIR / "src" / "lx_drm_compat.c"
-        c_sources = [up_src, compat_src] if compat_src.exists() else [up_src]
+        compat_srcs = sorted((DEFAULT_LIBDRY_DIR / "src").glob("*.c"))
+        c_sources = [up_src] + comp_sources + compat_srcs
     else:
-        c_sources = [up_src] + list(extra_c_sources)
+        c_sources = [up_src] + comp_sources + list(extra_c_sources)
 
     inc_dirs = include_dirs if include_dirs is not None else [DEFAULT_LIBDRY_DIR / "include"]
     headers: list[pathlib.Path] = []
@@ -291,6 +436,27 @@ def rollback_version(driver: str, state_path: pathlib.Path) -> dict[str, Any]:
     return rec
 
 
+def drvctl_inspect(driver_name: str | None = None, pci_id: str | None = None) -> dict[str, Any]:
+    cat = load_catalog()
+    if pci_id:
+        m = match_pci(pci_id)
+        if not m["matched"]:
+            return {"matched": False, "query": pci_id, "lifecycle_steps": list(LIFECYCLE_STEPS)}
+        driver_name = m["matches"][0]["driver"]
+    if driver_name:
+        assessment = assess_driver(driver_name)
+        drv = cat["drivers"][driver_name]
+        pids = drv.get("pci_ids", [])
+        lc = DriverLifecycle(driver_name, pids[0] if pids else "0000:0000", assessment["backend"]["backend"])
+        lc.run_bringup_to_monitoring()
+        return {"assessment": assessment, "lifecycle": lc.to_dict()}
+    return {
+        "lifecycle_steps": list(LIFECYCLE_STEPS),
+        "backends": {k: validate_backend_contract(k) for k in cat.get("backends", {})},
+        "drivers": {name: assess_driver(name) for name in cat["drivers"]},
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="DRY OS Linux Compatibility Runtime Manager")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -320,10 +486,13 @@ def main() -> None:
     p_rb.add_argument("--driver", required=True)
     p_rb.add_argument("--state-file", default=str(DEFAULT_CACHE_DIR / "pins.json"))
 
+    p_ctl = sub.add_parser("drvctl")
+    p_ctl.add_argument("--driver", default=None)
+    p_ctl.add_argument("--pci", default=None)
+
     args = parser.parse_args()
     if args.cmd == "fetch":
-        res = fetch_driver(args.driver)
-        print(json.dumps({"fetched": res}, indent=2))
+        print(json.dumps({"fetched": fetch_driver(args.driver)}, indent=2))
     elif args.cmd == "verify":
         checked = verify_all()
         print(f"[LX-COMPAT-VERIFY] OK: {len(checked)} upstream files SHA-256 verified (0 modified).")
@@ -335,12 +504,13 @@ def main() -> None:
         if not ok:
             sys.exit(2)
     elif args.cmd == "build-cache":
-        meta = build_cache(args.driver, pathlib.Path(args.cache_dir))
-        print(json.dumps(meta, indent=2))
+        print(json.dumps(build_cache(args.driver, pathlib.Path(args.cache_dir)), indent=2))
     elif args.cmd == "pin":
         print(json.dumps(pin_version(args.driver, args.version, pathlib.Path(args.state_file))))
     elif args.cmd == "rollback":
         print(json.dumps(rollback_version(args.driver, pathlib.Path(args.state_file))))
+    elif args.cmd == "drvctl":
+        print(json.dumps(drvctl_inspect(args.driver, args.pci), indent=2))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,48 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "linux_tag": "v6.18",
   "linux_commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "lifecycle_states": [
+    "DETECTED",
+    "MATCHED",
+    "ASSESSED",
+    "SOURCE_RESOLVED",
+    "DEPS_FIRMWARE_OK",
+    "BUILT_VERIFIED",
+    "ISLAND_CREATED",
+    "CAPS_ASSIGNED",
+    "RESOURCES_MAPPED",
+    "INITIALIZED",
+    "PUBLISHED",
+    "MONITORING",
+    "FAULT_RECOVERY",
+    "UNLOADED",
+    "ROLLED_BACK"
+  ],
+  "backends": {
+    "native-driver-island": {
+      "ring0_ko_forbidden": true,
+      "isolation": "ring3_compartment",
+      "fault_ep_supervised": true,
+      "igpu_passthrough_assumed": false,
+      "description": "DRY OS native Rust Ring-3 driver island with capability-gated PCI/DMA/IRQ"
+    },
+    "lx-compat-island": {
+      "ring0_ko_forbidden": true,
+      "isolation": "ring3_compartment_gpl",
+      "fault_ep_supervised": true,
+      "igpu_passthrough_assumed": false,
+      "description": "Unmodified Linux C source compiled freestanding against libdry-lx-compat in Ring 3"
+    },
+    "linux-microvm": {
+      "ring0_ko_forbidden": true,
+      "isolation": "userspace_microvm_paravirt",
+      "fault_ep_supervised": true,
+      "igpu_passthrough_assumed": false,
+      "transport": "virtio_shared_ring",
+      "description": "Isolated userspace Linux MicroVM runtime for multi-file drivers without Ring-0 .ko or physical iGPU passthrough"
+    }
+  },
   "drivers": {
     "virtio_rng": {
       "upstream_path": "drivers/char/hw_random/virtio-rng.c",
@@ -15,6 +56,7 @@
       "runtime_island": "dry-lx-rng",
       "compartment_id": "0x0210",
       "managed_slot": 1,
+      "backend": "lx-compat-island",
       "capabilities": ["pci_mmio", "dma_pinned", "msix_notif", "fault_ep"],
       "cflags": ["-DKBUILD_MODNAME=\"virtio_rng\""],
       "status": "active_verified"
@@ -31,8 +73,35 @@
       "runtime_island": "dry-lx-drm-bochs",
       "compartment_id": "0x0212",
       "managed_slot": 6,
+      "backend": "lx-compat-island",
       "capabilities": ["pci_mmio_bar0_wc", "pci_mmio_bar2_uc", "prime_dmabuf_frame_cap", "fault_ep"],
       "cflags": ["-DCONFIG_HAS_IOPORT=0", "-DKBUILD_MODNAME=\"bochs\""],
+      "status": "active_verified"
+    },
+    "net_8139cp": {
+      "upstream_path": "drivers/net/ethernet/realtek/8139cp.c",
+      "local_path": "vendor/linux-drivers/v6.18/8139cp/8139cp.c",
+      "sha256": "e09427eed8936d7fe6b54612cca42e9f4b269d9f7eea7fb5f6a3cccc9473805a",
+      "companion_sources": [
+        {
+          "upstream_path": "drivers/net/mii.c",
+          "local_path": "vendor/linux-drivers/v6.18/8139cp/mii.c",
+          "sha256": "fd9242860c57e6ec475b95a7184d8b76c473ec7845872cf858b568539fa5f97e",
+          "bytes": 18440,
+          "lines": 668
+        }
+      ],
+      "bytes": 57023,
+      "lines": 2121,
+      "license": "GPL-2.0-only",
+      "pci_ids": ["10ec:8139", "0357:000a"],
+      "pci_class": "0x020000",
+      "runtime_island": "dry-lx-net",
+      "compartment_id": "0x0214",
+      "managed_slot": 9,
+      "backend": "lx-compat-island",
+      "capabilities": ["pci_mmio_bar1_subpage", "dma_pinned_2m", "intx_mmio_napi_poll", "fault_ep"],
+      "cflags": ["-DCONFIG_HAS_IOPORT=0", "-DKBUILD_MODNAME=\"8139cp\""],
       "status": "active_verified"
     },
     "intel_i915_tgl": {
@@ -43,6 +112,7 @@
       "pci_ids": ["8086:9a49"],
       "pci_class": "0x030000",
       "runtime_island": "planned-i915-tgl",
+      "backend": "linux-microvm",
       "firmware_blobs": [
         "/lib/firmware/i915/tgl_guc_70.1.1.bin.zst",
         "/lib/firmware/i915/tgl_dmc_ver2_12.bin.zst"
@@ -58,6 +128,7 @@
       "pci_ids": ["10de:25a0"],
       "pci_class": "0x030000",
       "runtime_island": "planned-nv-open-ga107",
+      "backend": "linux-microvm",
       "firmware_blobs": [
         "/lib/firmware/nvidia/615.78.08/gsp_ga10x.bin"
       ],

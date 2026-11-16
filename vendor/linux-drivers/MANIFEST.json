@@ -352,5 +352,37 @@
     "bytes": 22785,
     "lines": 829,
     "sha256": "93f5c4bc2811ad1e0961a4e3d5c0410ac4b2336b2bdc96cc2c40802cc439ffe3"
+  },
+  "net_8139cp": {
+    "upstream_path": "drivers/net/ethernet/realtek/8139cp.c",
+    "tag": "v6.18",
+    "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "license": "GPL-2.0-only",
+    "local_path": "vendor/linux-drivers/v6.18/8139cp/8139cp.c",
+    "bytes": 57023,
+    "lines": 2121,
+    "sha256": "e09427eed8936d7fe6b54612cca42e9f4b269d9f7eea7fb5f6a3cccc9473805a",
+    "companion_sources": [
+      {
+        "upstream_path": "drivers/net/mii.c",
+        "tag": "v6.18",
+        "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+        "license": "GPL-2.0-only",
+        "local_path": "vendor/linux-drivers/v6.18/8139cp/mii.c",
+        "bytes": 18440,
+        "lines": 668,
+        "sha256": "fd9242860c57e6ec475b95a7184d8b76c473ec7845872cf858b568539fa5f97e"
+      }
+    ]
+  },
+  "net_mii": {
+    "upstream_path": "drivers/net/mii.c",
+    "tag": "v6.18",
+    "commit_sha": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "license": "GPL-2.0-only",
+    "local_path": "vendor/linux-drivers/v6.18/8139cp/mii.c",
+    "bytes": 18440,
+    "lines": 668,
+    "sha256": "fd9242860c57e6ec475b95a7184d8b76c473ec7845872cf858b568539fa5f97e"
   }
 }

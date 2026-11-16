@@ -4,6 +4,7 @@
 #![no_std]
 
 pub mod abi_ext;
+pub mod broker_lifecycle;
 pub mod action;
 pub mod apps;
 pub mod compositor;

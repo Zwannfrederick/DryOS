@@ -2,18 +2,28 @@
 //! Milestone 2C-1 Genuine Linux `v6.18` `virtio-rng.c` Driver Island E2E Audit & Benchmark
 //! (`ADR-005`, `ADR-016` — `session_mode == 27` via `desktop4=1 lx_island=1`).
 
-use crate::abi_ext::{sys_dev_map, UserVirtioPciInfo};
+use crate::abi_ext::{
+    sys_dev_map, RootInitBootExtInfo, UserVirtioPciInfo, BOOT_EXT_INFO_OFFSET, ROOT_BOOT_EXT_MAGIC,
+};
+use crate::broker_lifecycle::{
+    LifecycleStep, CONTRACT_FLAG_ASSUME_IGPU_PASSTHROUGH, CONTRACT_FLAG_REQUIRE_RING0_KO,
+    DRVCTL_CONTRACT_FAULT_EP_REQUIRED, DRVCTL_CONTRACT_IOMMU_ISOLATED,
+    DRVCTL_CONTRACT_NO_IGPU_PASSTHROUGH, DRVCTL_CONTRACT_RING0_KO_FORBIDDEN, DRVCTL_CONTRACT_VALID,
+};
 use crate::init_legacy::{domain_spec, log_line};
 use crate::ioring::IoRingSharedPage;
 use crate::island_proto::{
     LatencySamples64, BADGE_BROKER_ADMIN, BADGE_BROKER_CLIENT, BADGE_BROKER_ROGUE,
     BROKER_OP_ACQUIRE_EP, BROKER_OP_ACQUIRE_RING, BROKER_OP_CRASH_AND_RECOVER,
     BROKER_OP_FORWARD_TRANSFORM, BROKER_OP_SET_PARK_MODE, BROKER_OP_SHUTDOWN,
-    COMP_ID_DEV_BROKER, IPC_OP_ERR_STALE_GEN,
+    COMP_ID_DEV_BROKER, IPC_OP_ERR_STALE_GEN, ISLAND_DOORBELL_CTL,
 };
+use crate::lx_compat_meta::find_boot_pci_managed;
 use crate::lx_drv_proto::{
-    pack_rng_sqe, BADGE_BROKER_LX_MODE, BROKER_OP_BIND_PCI_DEV, COMP_ID_LX_RNG_ISLAND,
-    IORING_RNG_DATA_OFFSET, LX_OP_READ_ENTROPY,
+    pack_net_poll_sqe, pack_rng_sqe, BADGE_BROKER_LX_MODE, BROKER_OP_BIND_PCI_DEV,
+    BROKER_OP_DRVCTL_QUERY, COMP_ID_LX_NET_8139CP_ISLAND, COMP_ID_LX_RNG_ISLAND,
+    IORING_RNG_DATA_OFFSET, LX_NET_OP_POLL_RX_TX, LX_NET_OP_QUERY_INFO, LX_NET_OP_SEND_ARP,
+    LX_OP_READ_ENTROPY,
 };
 use crate::shell::LineBuilder;
 use crate::vfs_proto::{vfs_create_file, vfs_read_file, vfs_sync, vfs_write_small};
@@ -22,15 +32,17 @@ use crate::{
     sys_ep_create, sys_ipc_call_inline, sys_ipc_call_with_grant, sys_notify_signal,
     sys_notify_wait, sys_proc_list, sys_proc_spawn, sys_proc_wait, sys_sysinfo, sys_vspace_map,
     RootInitBootInfo, UserCapInfo, UserProcInfo, UserSysInfo, EBADCAP, EEXIST, EREVOKED,
-    IPC_OP_ERR_PERM, IPC_OP_PONG, RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_RECV,
-    RIGHT_REPLY, RIGHT_SEND, RIGHT_SPAWN, RIGHT_WRITE, VAULT_OP_STATUS, VSPACE_MAP_OP_4K_RW,
-    VSPACE_MAP_OP_UNMAP_4K,
+    IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_PONG, RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP,
+    RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SPAWN, RIGHT_WRITE, VAULT_OP_STATUS,
+    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
 const CLIENT_LX_RING_VADDR: u64 = 0x2600_0000;
 const LX_GUARD_PATH: &[u8] = b"/persist/lx-guard.txt";
 const LX_GUARD_TEXT: &[u8] = b"lx-island-guard-ok";
+const LX_NET_GUARD_PATH: &[u8] = b"/persist/lx-net-guard.txt";
+const LX_NET_GUARD_TEXT: &[u8] = b"lx-net-guard-ok";
 
 struct LxBrokerHarness {
     proc_handle: u64,
@@ -43,7 +55,14 @@ struct LxBrokerHarness {
 
 impl LxBrokerHarness {
     fn spawn(boot: &RootInitBootInfo) -> Result<Self, i32> {
-        if boot.broker_mod_cap == 0 || boot.lx_rng_mod_cap == 0 || boot.pci_rng_cap == 0 {
+        if boot.pci_rng_cap == 0 {
+            return Err(250);
+        }
+        Self::spawn_with(boot.broker_mod_cap, boot.lx_rng_mod_cap)
+    }
+
+    fn spawn_with(broker_mod_cap: u64, island_mod_cap: u64) -> Result<Self, i32> {
+        if broker_mod_cap == 0 || island_mod_cap == 0 {
             return Err(250);
         }
         let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
@@ -60,11 +79,11 @@ impl LxBrokerHarness {
         let unbadged_cap = sys_cap_derive(broker_ep, cli_rights, 0, 0).map_err(|_| 252)?;
 
         let (proc_handle, _) = sys_proc_spawn(
-            boot.broker_mod_cap,
+            broker_mod_cap,
             1,
             COMP_ID_DEV_BROKER,
             (broker_ep, srv_rights, BADGE_BROKER_LX_MODE),
-            (boot.lx_rng_mod_cap, RIGHT_READ | RIGHT_SPAWN),
+            (island_mod_cap, RIGHT_READ | RIGHT_SPAWN),
         )
         .map_err(|_| 253)?;
 
@@ -124,6 +143,56 @@ fn acquire_client_ring(client_cap: u64) -> Result<(u64, u64, u64), i32> {
     Ok((out[0], out[1], out[2]))
 }
 
+fn write_persist_guard(vfs_sup_cap: u64, path: &[u8], text: &[u8], err: i32) -> Result<(), i32> {
+    if vfs_sup_cap != 0 {
+        match vfs_create_file(vfs_sup_cap, path, 0) {
+            Ok(_) | Err(EEXIST) => {}
+            Err(_) => return Err(err),
+        }
+        vfs_write_small(vfs_sup_cap, path, text, false).map_err(|_| err)?;
+        vfs_sync(vfs_sup_cap).map_err(|_| err)?;
+    }
+    Ok(())
+}
+
+fn verify_persist_and_vault(vfs_sup_cap: u64, vault_sup_cap: u64, path: &[u8], expected: &[u8]) -> (bool, bool) {
+    let mut persist_ok = true;
+    if vfs_sup_cap != 0 {
+        let mut rbuf = [0u8; 32];
+        match vfs_read_file(vfs_sup_cap, path, 0, &mut rbuf) {
+            Ok((n, _)) if &rbuf[..n] == expected => {}
+            _ => persist_ok = false,
+        }
+    }
+    let mut vault_ok = true;
+    if vault_sup_cap != 0 {
+        vault_ok = sys_ipc_call_inline(
+            vault_sup_cap, pack_msg_tag(VAULT_OP_STATUS, 0, 1, 0), [0; 4], 0,
+        )
+        .is_ok_and(|(vt, _, _)| msg_tag_label(vt) == IPC_OP_PONG);
+    }
+    (persist_ok, vault_ok)
+}
+
+fn check_unauth_denials(bh: &LxBrokerHarness) -> u64 {
+    let mut denied = 0u64;
+    for bad_cap in [bh.rogue_cap, bh.unbadged_cap] {
+        if sys_ipc_call_inline(bad_cap, pack_msg_tag(BROKER_OP_ACQUIRE_EP, 0, 1, 0), [0; 4], 0)
+            .is_ok_and(|(t, _, _)| msg_tag_label(t) == IPC_OP_ERR_PERM)
+        {
+            denied += 1;
+        }
+    }
+    for cli_forbidden in [BROKER_OP_FORWARD_TRANSFORM, BROKER_OP_CRASH_AND_RECOVER, BROKER_OP_BIND_PCI_DEV] {
+        if sys_ipc_call_inline(bh.client_cap, pack_msg_tag(cli_forbidden, 0, 1, 0), [0; 4], 0)
+            .is_ok_and(|(t, _, _)| msg_tag_label(t) == IPC_OP_ERR_PERM)
+        {
+            denied += 1;
+        }
+    }
+    denied
+}
+
 pub fn run_lx_island_audit(
     boot: &RootInitBootInfo,
     vfs_sup_cap: u64,
@@ -133,14 +202,7 @@ pub fn run_lx_island_audit(
     let _ = sys_sysinfo(&mut sys0);
     let tsc_mhz = sys0.tsc_mhz.max(1000);
 
-    if vfs_sup_cap != 0 {
-        match vfs_create_file(vfs_sup_cap, LX_GUARD_PATH, 0) {
-            Ok(_) | Err(EEXIST) => {}
-            Err(_) => return Err(249),
-        }
-        vfs_write_small(vfs_sup_cap, LX_GUARD_PATH, LX_GUARD_TEXT, false).map_err(|_| 249)?;
-        vfs_sync(vfs_sup_cap).map_err(|_| 249)?;
-    }
+    write_persist_guard(vfs_sup_cap, LX_GUARD_PATH, LX_GUARD_TEXT, 249)?;
 
     let bh = LxBrokerHarness::spawn(boot)?;
 
@@ -149,35 +211,7 @@ pub fn run_lx_island_audit(
     let cap_kind_guard_ok =
         sys_dev_map(bh.broker_ep, CLIENT_LX_RING_VADDR + 0x10000, &mut dummy_info).is_err();
 
-    let mut unauth_denied = 0u64;
-    for bad_cap in [bh.rogue_cap, bh.unbadged_cap] {
-        if let Ok((t, _, _)) = sys_ipc_call_inline(
-            bad_cap,
-            pack_msg_tag(BROKER_OP_ACQUIRE_EP, 0, 1, 0),
-            [0; 4],
-            0,
-        ) {
-            if msg_tag_label(t) == IPC_OP_ERR_PERM {
-                unauth_denied += 1;
-            }
-        }
-    }
-    for cli_forbidden in [
-        BROKER_OP_FORWARD_TRANSFORM,
-        BROKER_OP_CRASH_AND_RECOVER,
-        BROKER_OP_BIND_PCI_DEV,
-    ] {
-        if let Ok((t, _, _)) = sys_ipc_call_inline(
-            bh.client_cap,
-            pack_msg_tag(cli_forbidden, 0, 1, 0),
-            [0; 4],
-            0,
-        ) {
-            if msg_tag_label(t) == IPC_OP_ERR_PERM {
-                unauth_denied += 1;
-            }
-        }
-    }
+    let unauth_denied = check_unauth_denials(&bh);
     if !cap_kind_guard_ok || unauth_denied < 5 {
         return Err(254);
     }
@@ -412,24 +446,8 @@ pub fn run_lx_island_audit(
 
     bh.shutdown_and_reclaim()?;
 
-    let mut persist_ok = true;
-    if vfs_sup_cap != 0 {
-        let mut rbuf = [0u8; 32];
-        match vfs_read_file(vfs_sup_cap, LX_GUARD_PATH, 0, &mut rbuf) {
-            Ok((n, _)) if &rbuf[..n] == LX_GUARD_TEXT => {}
-            _ => persist_ok = false,
-        }
-    }
-    let mut vault_ok = true;
-    if vault_sup_cap != 0 {
-        vault_ok = sys_ipc_call_inline(
-            vault_sup_cap,
-            pack_msg_tag(VAULT_OP_STATUS, 0, 1, 0),
-            [0; 4],
-            0,
-        )
-        .is_ok_and(|(vt, _, _)| msg_tag_label(vt) == IPC_OP_PONG);
-    }
+    let (persist_ok, vault_ok) =
+        verify_persist_and_vault(vfs_sup_cap, vault_sup_cap, LX_GUARD_PATH, LX_GUARD_TEXT);
 
     let ones_pct = (total_ones * 100) / (total_bytes * 8);
     if !(40..=60).contains(&ones_pct)
@@ -513,5 +531,270 @@ pub fn run_lx_island_audit(
     blb.push_bytes(b" tsc_mhz=");
     blb.push_u64(tsc_mhz);
     log_line(&blb);
+    Ok(())
+}
+
+pub fn run_lx_net_audit(
+    boot_info_addr: u64,
+    boot: &RootInitBootInfo,
+    vfs_sup_cap: u64,
+    vault_sup_cap: u64,
+) -> Result<(), i32> {
+    let res = run_lx_net_audit_inner(boot_info_addr, boot, vfs_sup_cap, vault_sup_cap);
+    if let Err(code) = res {
+        let mut elb = LineBuilder::new();
+        elb.push_bytes(b"[DRY-LX-NET-FAIL] code=");
+        elb.push_u64(code as u64);
+        log_line(&elb);
+    }
+    res
+}
+
+fn assert_net_drvctl(admin_cap: u64, exp_gen: u64, exp_restarts: u64, req_mask: u64, err: i32) -> Result<u64, i32> {
+    let (dtag, _, dmrs) = sys_ipc_call_inline(
+        admin_cap, pack_msg_tag(BROKER_OP_DRVCTL_QUERY, 0, 1, 0), [0; 4], 0,
+    )
+    .map_err(|_| err)?;
+    let req_contract = DRVCTL_CONTRACT_RING0_KO_FORBIDDEN
+        | DRVCTL_CONTRACT_NO_IGPU_PASSTHROUGH
+        | DRVCTL_CONTRACT_FAULT_EP_REQUIRED
+        | DRVCTL_CONTRACT_IOMMU_ISOLATED
+        | DRVCTL_CONTRACT_VALID;
+    let visited = dmrs[1] & 0xffff;
+    if msg_tag_label(dtag) != IPC_OP_PONG
+        || (dmrs[0] & 0xff) != u64::from(LifecycleStep::Monitoring.as_u8())
+        || ((dmrs[0] >> 8) & 0xff) != 1
+        || ((dmrs[0] >> 16) & 0xffff) != u64::from(COMP_ID_LX_NET_8139CP_ISLAND)
+        || (dmrs[0] >> 40) != exp_gen
+        || (dmrs[3] >> 32) != exp_restarts
+        || (visited & req_mask) != req_mask
+        || (dmrs[3] & req_contract) != req_contract
+    {
+        return Err(err);
+    }
+    Ok(visited)
+}
+
+fn run_lx_net_audit_inner(
+    boot_info_addr: u64,
+    boot: &RootInitBootInfo,
+    vfs_sup_cap: u64,
+    vault_sup_cap: u64,
+) -> Result<(), i32> {
+    if boot_info_addr == 0 {
+        return Err(270);
+    }
+    // SAFETY: Kernel populates `RootInitBootExtInfo` read-only at `boot_info_addr + BOOT_EXT_INFO_OFFSET`.
+    let ext = unsafe { &*((boot_info_addr + BOOT_EXT_INFO_OFFSET) as *const RootInitBootExtInfo) };
+    if ext.magic != ROOT_BOOT_EXT_MAGIC || ext.lx_net_mod_cap == 0 || ext.pci_net_cap == 0 {
+        return Err(270);
+    }
+    let pci_rev = find_boot_pci_managed(boot_info_addr, boot.boot_pci_func_count, 0x10ec, 0x8139, 9)
+        .or_else(|| find_boot_pci_managed(boot_info_addr, boot.boot_pci_func_count, 0x10ec, 0x8139, 0xff))
+        .map_or(0, |r| r.revision_id);
+
+    let mut sys0 = UserSysInfo::default();
+    let _ = sys_sysinfo(&mut sys0);
+    let tsc_mhz = sys0.tsc_mhz.max(1000);
+
+    write_persist_guard(vfs_sup_cap, LX_NET_GUARD_PATH, LX_NET_GUARD_TEXT, 271)?;
+    let bh = LxBrokerHarness::spawn_with(boot.broker_mod_cap, ext.lx_net_mod_cap)?;
+
+    let mut dummy_info = UserVirtioPciInfo::default();
+    if sys_dev_map(bh.broker_ep, CLIENT_LX_RING_VADDR + 0x10000, &mut dummy_info).is_ok()
+        || check_unauth_denials(&bh) < 5
+    {
+        return Err(272);
+    }
+    for (bad_flag, exp_label) in [
+        (CONTRACT_FLAG_REQUIRE_RING0_KO, IPC_OP_ERR_PERM),
+        (CONTRACT_FLAG_ASSUME_IGPU_PASSTHROUGH, IPC_OP_ERR_INVAL),
+    ] {
+        let probe_cap = sys_cap_derive(bh.broker_ep, RIGHT_READ | RIGHT_GRANT, 0, 0).map_err(|_| 273)?;
+        let (ctag, _, _) = sys_ipc_call_with_grant(
+            bh.admin_cap, BROKER_OP_BIND_PCI_DEV,
+            [COMP_ID_LX_NET_8139CP_ISLAND as u64, u64::from(pci_rev), 2, bad_flag],
+            probe_cap, RIGHT_READ, 0, 0,
+        )
+        .map_err(|_| 273)?;
+        let _ = sys_cap_revoke(probe_cap, 1);
+        if msg_tag_label(ctag) != exp_label {
+            return Err(273);
+        }
+    }
+
+    let (btag, _, bmrs) = sys_ipc_call_with_grant(
+        bh.admin_cap, BROKER_OP_BIND_PCI_DEV,
+        [COMP_ID_LX_NET_8139CP_ISLAND as u64, u64::from(pci_rev), 1, 0],
+        ext.pci_net_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT, 0, 0,
+    )
+    .map_err(|_| 274)?;
+    if msg_tag_label(btag) != IPC_OP_PONG || bmrs[0] != 1 {
+        return Err(274);
+    }
+    let (vendor_id, device_id) = ((bmrs[2] >> 16) & 0xffff, bmrs[2] & 0xffff);
+    if vendor_id != 0x10ec || device_id != 0x8139 || bmrs[3] == 0 {
+        return Err(275);
+    }
+    let _ = assert_net_drvctl(bh.admin_cap, 1, 0, 0x0fff, 276)?;
+
+    let (ep1_tag, gen1_drv_ep, ep1_mrs) =
+        sys_ipc_call_with_grant(bh.client_cap, BROKER_OP_ACQUIRE_EP, [0; 4], 0, 0, 0, 0).map_err(|_| 277)?;
+    if msg_tag_label(ep1_tag) != IPC_OP_PONG || gen1_drv_ep == 0 || ep1_mrs[0] != 1 {
+        return Err(277);
+    }
+    let (gen1_ring_cap, gen1_sq_notif, gen1_cq_notif) = acquire_client_ring(bh.client_cap)?;
+    if sys_vspace_map(gen1_ring_cap, CLIENT_LX_RING_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
+        return Err(278);
+    }
+    // SAFETY: `gen1_ring_cap` maps the live 4 KiB `IoRingSharedPage` from `dry-lx-net`.
+    let ring = unsafe { &*(CLIENT_LX_RING_VADDR as *const IoRingSharedPage) };
+
+    let (qtag, _, qmrs) = sys_ipc_call_inline(
+        gen1_drv_ep, pack_msg_tag(LX_NET_OP_QUERY_INFO, 0, 4, 0), [0, 0, 0, 1], 0,
+    )
+    .map_err(|_| 279)?;
+    let mac_u64 = qmrs[0];
+    let bar1_mapped = ((qmrs[1] >> 8) & 0xff) != 0;
+    let bar1_suboff = (qmrs[1] >> 16) & 0xffff;
+    let mtu = (qmrs[1] >> 40) & 0xffff_ffff;
+    if msg_tag_label(qtag) != IPC_OP_PONG || mac_u64 == 0 || !bar1_mapped || mtu != 1500 {
+        return Err(279);
+    }
+
+    // Exercise live `8139cp.c` hardware TX + `IoRingSharedPage` ARP poll to QEMU SLIRP `10.0.2.2`.
+    let (atag, _, _) = sys_ipc_call_inline(
+        gen1_drv_ep, pack_msg_tag(LX_NET_OP_SEND_ARP, 0, 4, 0), [0, 0, 0, 1], 0,
+    )
+    .map_err(|_| 280)?;
+    if msg_tag_label(atag) != IPC_OP_PONG
+        || !ring.push_sqe(pack_net_poll_sqe(64, 0, 1))
+        || sys_notify_signal(gen1_sq_notif, ISLAND_DOORBELL_CTL).is_err()
+        || sys_notify_wait(gen1_cq_notif, 0, tsc_mhz.saturating_mul(2_000_000)).is_err()
+        || ring.pop_cqe().is_none_or(|c| c.status != 0)
+    {
+        return Err(280);
+    }
+
+    let _ = sys_ipc_call_inline(
+        bh.admin_cap,
+        pack_msg_tag(BROKER_OP_SET_PARK_MODE, 0, 1, 0),
+        [1, 0, 0, 0],
+        0,
+    );
+
+    let mut rdy = LineBuilder::new();
+    rdy.push_bytes(b"[DRY-LX-NET] UDP_LISTEN_READY port=7777 gen=1");
+    log_line(&rdy);
+
+    let mut tx_pkts = 0u64;
+    let mut rx_pkts = 0u64;
+    let mut arp_replies = 0u64;
+    let mut udp_echo = 0u64;
+    let poll_t0 = rdtsc_user();
+    let poll_budget = tsc_mhz.saturating_mul(8_000_000);
+    while rdtsc_user().saturating_sub(poll_t0) < poll_budget {
+        let (ptag, _, pmrs) = sys_ipc_call_inline(
+            gen1_drv_ep, pack_msg_tag(LX_NET_OP_POLL_RX_TX, 0, 4, 0), [0, 0, 0, 1], 0,
+        )
+        .map_err(|_| 281)?;
+        if msg_tag_label(ptag) == IPC_OP_PONG {
+            tx_pkts = pmrs[0];
+            rx_pkts = pmrs[1];
+            arp_replies = pmrs[2];
+            udp_echo = pmrs[3] & 0xffff_ffff;
+            if udp_echo >= 1 && tx_pkts >= 2 && rx_pkts >= 1 {
+                break;
+            }
+        }
+        let _ = sys_notify_wait(gen1_cq_notif, 0, tsc_mhz.saturating_mul(5_000));
+    }
+    if udp_echo < 1 || tx_pkts == 0 || rx_pkts == 0 {
+        return Err(281);
+    }
+
+    let (ctag, _, cmrs) = sys_ipc_call_inline(
+        bh.admin_cap, pack_msg_tag(BROKER_OP_CRASH_AND_RECOVER, 0, 1, 0), [0; 4], 0,
+    )
+    .map_err(|_| 282)?;
+    if msg_tag_label(ctag) != IPC_OP_PONG || cmrs[0] != 2 || cmrs[3] != 1 {
+        return Err(282);
+    }
+    let (fault_vec, restarts) = (cmrs[2], cmrs[3]);
+    let drvctl_visited = assert_net_drvctl(bh.admin_cap, 2, 1, 0x1fff, 283)?;
+
+    let mut cinfo = UserCapInfo::default();
+    let ep_rev = sys_cap_query(gen1_drv_ep, &mut cinfo) != 0;
+    let ring_rev = sys_cap_query(gen1_ring_cap, &mut cinfo) != 0
+        && sys_cap_query(gen1_sq_notif, &mut cinfo) != 0
+        && sys_cap_query(gen1_cq_notif, &mut cinfo) != 0;
+    let _ = sys_vspace_map(0, CLIENT_LX_RING_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+    let stale_gen = sys_ipc_call_inline(
+        bh.admin_cap, pack_msg_tag(BROKER_OP_FORWARD_TRANSFORM, 0, 4, 0), [0, 0, 0, 1], 0,
+    )
+    .is_ok_and(|(st, _, _)| msg_tag_label(st) == IPC_OP_ERR_STALE_GEN);
+
+    let (ep2_tag, gen2_drv_ep, ep2_mrs) =
+        sys_ipc_call_with_grant(bh.client_cap, BROKER_OP_ACQUIRE_EP, [0; 4], 0, 0, 0, 0).map_err(|_| 284)?;
+    if msg_tag_label(ep2_tag) != IPC_OP_PONG || gen2_drv_ep == 0 || ep2_mrs[0] != 2 {
+        return Err(284);
+    }
+    let (g2q, _, g2qmrs) = sys_ipc_call_inline(
+        gen2_drv_ep, pack_msg_tag(LX_NET_OP_QUERY_INFO, 0, 4, 0), [0, 0, 0, 2], 0,
+    )
+    .map_err(|_| 285)?;
+    let (g2a, _, g2amrs) = sys_ipc_call_inline(
+        gen2_drv_ep, pack_msg_tag(LX_NET_OP_SEND_ARP, 0, 4, 0), [0, 0, 0, 2], 0,
+    )
+    .map_err(|_| 285)?;
+    if msg_tag_label(g2q) != IPC_OP_PONG
+        || g2qmrs[0] != mac_u64
+        || msg_tag_label(g2a) != IPC_OP_PONG
+        || g2amrs[0] == 0
+    {
+        return Err(285);
+    }
+    let _ = sys_cap_revoke(gen2_drv_ep, 1);
+
+    bh.shutdown_and_reclaim()?;
+
+    let (persist_ok, vault_ok) =
+        verify_persist_and_vault(vfs_sup_cap, vault_sup_cap, LX_NET_GUARD_PATH, LX_NET_GUARD_TEXT);
+    if !ep_rev || !ring_rev || !stale_gen || !persist_ok || !vault_ok {
+        return Err(286);
+    }
+
+    let mut lb = LineBuilder::new();
+    for (k, v, hex) in [
+        (&b"[DRY-LX-NET-PASS] vendor_id=0x"[..], vendor_id, true),
+        (b" device_id=0x", device_id, true),
+        (b" rev=0x", u64::from(pci_rev), true),
+        (b" mac=0x", mac_u64, true),
+        (b" bar1_suboff=", bar1_suboff, false),
+        (b" tx_pkts=", tx_pkts, false),
+        (b" rx_pkts=", rx_pkts, false),
+        (b" udp_echo=", udp_echo, false),
+        (b" arp=", arp_replies, false),
+        (b" vec=", fault_vec, false),
+        (b" restarts=", restarts, false),
+    ] {
+        lb.push_bytes(k);
+        if hex { lb.push_hex_u64(v); } else { lb.push_u64(v); }
+    }
+    log_line(&lb);
+
+    let mut lb2 = LineBuilder::new();
+    for (k, v, hex) in [
+        (&b"[DRY-LX-NET-PASS2] drvctl_visited=0x"[..], drvctl_visited, true),
+        (b" ep_rev=", u64::from(ep_rev), false),
+        (b" ring_rev=", u64::from(ring_rev), false),
+        (b" stale_gen=", u64::from(stale_gen), false),
+        (b" persist_ok=", u64::from(persist_ok), false),
+        (b" vault_ok=", u64::from(vault_ok), false),
+    ] {
+        lb2.push_bytes(k);
+        if hex { lb2.push_hex_u64(v); } else { lb2.push_u64(v); }
+    }
+    log_line(&lb2);
     Ok(())
 }

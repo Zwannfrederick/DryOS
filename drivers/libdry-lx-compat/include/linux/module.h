@@ -10,6 +10,8 @@
 #define MODULE_DEVICE_TABLE(type, name)
 #define MODULE_AUTHOR(author)
 #define MODULE_DESCRIPTION(desc)
+#define MODULE_VERSION(ver)
 #define MODULE_LICENSE(lic)
+#define EXPORT_SYMBOL(sym)
 
-#endif
+#endif /* _DRY_LINUX_MODULE_H */

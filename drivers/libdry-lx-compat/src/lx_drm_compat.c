@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT OR GPL-2.0-only */
 #include <linux/compat_base.h>
+#include <linux/dma-buf.h>
 #include <linux/pci.h>
 #include <drm/drm_compat_all.h>
 
-#define DEVM_POOL_BYTES 16384U
+extern void dry_lx_devm_reset(void);
+extern const struct pci_driver *dry_lx_registered_pci_driver(void);
 
-static uint8_t g_devm_pool[DEVM_POOL_BYTES];
-static size_t g_devm_used = 0;
-
-static struct pci_dev g_pdev;
+static struct pci_dev g_drm_pdev;
 static struct drm_edid g_edid;
 static struct drm_device *g_drm_dev = NULL;
 static struct drm_crtc_state g_crtc_state;
@@ -17,6 +16,8 @@ static struct drm_shadow_plane_state g_new_plane_state;
 static struct drm_atomic_state g_atomic_state;
 static struct drm_framebuffer g_fb;
 static struct drm_rect g_pending_damage;
+static spinlock_t g_drm_fence_lock;
+static u64 g_drm_fence_seqno = 0ULL;
 
 static const struct drm_format_info g_fmt_xrgb8888 = {
     .format = DRM_FORMAT_XRGB8888,
@@ -37,88 +38,6 @@ struct dry_lx_bochs_probe_info {
     uint32_t mapped_bar0_ok;
     uint32_t mapped_bar2_ok;
 };
-
-/* Implemented in Rust (`dry-lx-drm-bochs`) using `SYS_DEV_MAP` + `LineBuilder`. */
-extern void *dry_lx_rust_ioremap_bar(uint32_t bar_idx, uint32_t cache_mode, uint64_t size_bytes);
-extern void dry_lx_rust_log(const char *tag, const char *msg);
-extern const struct pci_driver *dry_lx_registered_pci_driver(void);
-
-static uint32_t g_mapped_bar0_ok = 0;
-static uint32_t g_mapped_bar2_ok = 0;
-
-void *dry_lx_memset(void *dst, int c, size_t n) {
-    uint8_t *p = (uint8_t *)dst;
-    uint8_t v = (uint8_t)c;
-    for (size_t i = 0; i < n; i++) {
-        p[i] = v;
-    }
-    return dst;
-}
-
-void *dry_lx_memcpy(void *dst, const void *src, size_t n) {
-    uint8_t *d = (uint8_t *)dst;
-    const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < n; i++) {
-        d[i] = s[i];
-    }
-    return dst;
-}
-
-void dry_lx_log(const char *tag, const char *fmt, ...) {
-    dry_lx_rust_log(tag ? tag : "DRV", fmt ? fmt : "");
-}
-
-void *dry_lx_devm_zalloc(struct device *dev, size_t size) {
-    (void)dev;
-    size_t aligned = (size + 15U) & ~(size_t)15U;
-    if (aligned == 0 || g_devm_used + aligned > DEVM_POOL_BYTES) {
-        return NULL;
-    }
-    void *ptr = &g_devm_pool[g_devm_used];
-    g_devm_used += aligned;
-    dry_lx_memset(ptr, 0, aligned);
-    return ptr;
-}
-
-void *devm_request_mem_region(struct device *dev, unsigned long start, unsigned long n, const char *name) {
-    (void)dev;
-    (void)n;
-    (void)name;
-    return start ? (void *)(uintptr_t)start : NULL;
-}
-
-void *devm_request_region(struct device *dev, unsigned long start, unsigned long n, const char *name) {
-    (void)dev;
-    (void)n;
-    (void)name;
-    return start ? (void *)(uintptr_t)start : NULL;
-}
-
-static void __iomem *ioremap_bar_token(unsigned long offset, unsigned long size, uint32_t cache_mode) {
-    uint32_t bar_idx = (uint32_t)((uint64_t)offset >> 56);
-    if (bar_idx >= 6U || size == 0) {
-        return NULL;
-    }
-    void *va = dry_lx_rust_ioremap_bar(bar_idx, cache_mode, (uint64_t)size);
-    if (va != NULL) {
-        if (bar_idx == 0U) {
-            g_mapped_bar0_ok = 1U;
-        } else if (bar_idx == 2U) {
-            g_mapped_bar2_ok = 1U;
-        }
-    }
-    return (void __iomem *)va;
-}
-
-void __iomem *devm_ioremap(struct device *dev, unsigned long offset, unsigned long size) {
-    (void)dev;
-    return ioremap_bar_token(offset, size, 0U);
-}
-
-void __iomem *devm_ioremap_wc(struct device *dev, unsigned long offset, unsigned long size) {
-    (void)dev;
-    return ioremap_bar_token(offset, size, 1U);
-}
 
 const struct drm_format_info *drm_format_info(u32 format) {
     if (format == DRM_FORMAT_XRGB8888) {
@@ -169,9 +88,7 @@ void drm_fb_memcpy(struct iosys_map *dst, const u32 *dst_pitch, const struct ios
     }
 }
 
-void drm_dev_exit(int idx) {
-    (void)idx;
-}
+void drm_dev_exit(int idx) { (void)idx; }
 
 int drm_dev_register(struct drm_device *dev, unsigned long flags) {
     (void)flags;
@@ -179,18 +96,9 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags) {
     return 0;
 }
 
-void drm_dev_put(struct drm_device *dev) {
-    (void)dev;
-}
-
-void drm_dev_unplug(struct drm_device *dev) {
-    (void)dev;
-}
-
-void drm_client_setup(struct drm_device *dev, const void *opt) {
-    (void)dev;
-    (void)opt;
-}
+void drm_dev_put(struct drm_device *dev) { (void)dev; }
+void drm_dev_unplug(struct drm_device *dev) { (void)dev; }
+void drm_client_setup(struct drm_device *dev, const void *opt) { (void)dev; (void)opt; }
 
 int drmm_mode_config_init(struct drm_device *dev) {
     dry_lx_memset(&dev->mode_config, 0, sizeof(dev->mode_config));
@@ -210,12 +118,8 @@ int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane, ui
                              const struct drm_plane_funcs *funcs, const uint32_t *formats,
                              unsigned int format_count, const uint64_t *format_modifiers,
                              int type, const char *name, ...) {
-    (void)possible_crtcs;
-    (void)formats;
-    (void)format_count;
-    (void)format_modifiers;
-    (void)type;
-    (void)name;
+    (void)possible_crtcs; (void)formats; (void)format_count;
+    (void)format_modifiers; (void)type; (void)name;
     plane->dev = dev;
     plane->funcs = funcs;
     plane->state = &g_new_plane_state.base;
@@ -227,16 +131,12 @@ void drm_plane_helper_add(struct drm_plane *plane, const struct drm_plane_helper
     plane->helper_private = funcs;
 }
 
-void drm_plane_enable_fb_damage_clips(struct drm_plane *plane) {
-    (void)plane;
-}
+void drm_plane_enable_fb_damage_clips(struct drm_plane *plane) { (void)plane; }
 
 int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, struct drm_plane *primary,
                               struct drm_plane *cursor, const struct drm_crtc_funcs *funcs,
                               const char *name, ...) {
-    (void)primary;
-    (void)cursor;
-    (void)name;
+    (void)primary; (void)cursor; (void)name;
     crtc->dev = dev;
     crtc->funcs = funcs;
     crtc->index = 0;
@@ -251,8 +151,7 @@ void drm_crtc_helper_add(struct drm_crtc *crtc, const struct drm_crtc_helper_fun
 
 int drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder,
                      const struct drm_encoder_funcs *funcs, int encoder_type, const char *name, ...) {
-    (void)encoder_type;
-    (void)name;
+    (void)encoder_type; (void)name;
     encoder->dev = dev;
     encoder->funcs = funcs;
     return 0;
@@ -271,13 +170,10 @@ void drm_connector_helper_add(struct drm_connector *connector, const struct drm_
     connector->helper_private = funcs;
 }
 
-void drm_connector_attach_edid_property(struct drm_connector *connector) {
-    (void)connector;
-}
+void drm_connector_attach_edid_property(struct drm_connector *connector) { (void)connector; }
 
 int drm_connector_attach_encoder(struct drm_connector *connector, struct drm_encoder *encoder) {
-    (void)connector;
-    (void)encoder;
+    (void)connector; (void)encoder;
     return 0;
 }
 
@@ -307,7 +203,6 @@ const struct drm_edid *drm_edid_read_custom(
     if (drm_edid_header_is_valid(g_edid.raw) != 8) {
         return NULL;
     }
-    /* Parse Preferred Timing Descriptor (bytes 54..=71) if populated. */
     int hactive = (int)g_edid.raw[56] | (((int)(g_edid.raw[58] & 0xf0U)) << 4);
     int vactive = (int)g_edid.raw[59] | (((int)(g_edid.raw[61] & 0xf0U)) << 4);
     g_edid.valid = 1;
@@ -333,14 +228,10 @@ int drm_edid_connector_add_modes(struct drm_connector *connector) {
     return (connector && connector->edid_valid) ? 1 : 0;
 }
 
-void drm_edid_free(const struct drm_edid *edid) {
-    (void)edid;
-}
+void drm_edid_free(const struct drm_edid *edid) { (void)edid; }
 
 int drm_add_modes_noedid(struct drm_connector *connector, int maxx, int maxy) {
-    (void)connector;
-    (void)maxx;
-    (void)maxy;
+    (void)connector; (void)maxx; (void)maxy;
     return 1;
 }
 
@@ -370,10 +261,7 @@ int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane_state,
                                         const struct drm_crtc_state *crtc_state,
                                         int min_scale, int max_scale, bool can_position,
                                         bool can_update_disabled) {
-    (void)min_scale;
-    (void)max_scale;
-    (void)can_position;
-    (void)can_update_disabled;
+    (void)min_scale; (void)max_scale; (void)can_position; (void)can_update_disabled;
     if (!plane_state || !crtc_state || !crtc_state->enable || !plane_state->fb) {
         return 0;
     }
@@ -389,8 +277,7 @@ int drm_atomic_helper_check_crtc_primary_plane(const struct drm_crtc_state *crtc
 void drm_atomic_helper_damage_iter_init(struct drm_atomic_helper_damage_iter *iter,
                                         const struct drm_plane_state *old_state,
                                         const struct drm_plane_state *new_state) {
-    (void)old_state;
-    (void)new_state;
+    (void)old_state; (void)new_state;
     iter->emitted = 0;
     iter->clip = g_pending_damage;
 }
@@ -427,47 +314,17 @@ int drm_atomic_helper_check(void) { return 0; }
 int drm_atomic_helper_commit(void) { return 0; }
 void drm_atomic_helper_shutdown(struct drm_device *dev) { (void)dev; }
 
-static const struct pci_device_id *match_pci_id_table(
-    const struct pci_device_id *tbl,
-    const struct pci_dev *pdev) {
-    for (; tbl && tbl->vendor != 0U; tbl++) {
-        if (tbl->vendor != pdev->vendor && tbl->vendor != PCI_ANY_ID) {
-            continue;
-        }
-        if (tbl->device != pdev->device && tbl->device != PCI_ANY_ID) {
-            continue;
-        }
-        if (tbl->subvendor != pdev->subsystem_vendor && tbl->subvendor != PCI_ANY_ID) {
-            continue;
-        }
-        if (tbl->subdevice != pdev->subsystem_device && tbl->subdevice != PCI_ANY_ID) {
-            continue;
-        }
-        return tbl;
-    }
-    return NULL;
-}
-
 int32_t dry_lx_bochs_probe(
-    uint16_t vendor_id,
-    uint16_t device_id,
-    uint16_t subvendor,
-    uint16_t subdevice,
-    uint16_t bdf,
-    uint64_t bar0_size,
-    uint8_t bar0_flags,
-    uint64_t bar2_size,
-    uint8_t bar2_flags,
-    struct dry_lx_bochs_probe_info *out) {
+    uint16_t vendor_id, uint16_t device_id, uint16_t subvendor, uint16_t subdevice,
+    uint16_t bdf, uint64_t bar0_size, uint8_t bar0_flags,
+    uint64_t bar2_size, uint8_t bar2_flags, struct dry_lx_bochs_probe_info *out) {
     const struct pci_driver *drv = dry_lx_registered_pci_driver();
     if (!drv || !drv->probe) {
         return -ENODEV;
     }
-    g_devm_used = 0;
-    g_mapped_bar0_ok = 0;
-    g_mapped_bar2_ok = 0;
+    dry_lx_devm_reset();
+    spin_lock_init(&g_drm_fence_lock);
     g_drm_dev = NULL;
-    dry_lx_memset(&g_pdev, 0, sizeof(g_pdev));
     dry_lx_memset(&g_crtc_state, 0, sizeof(g_crtc_state));
     dry_lx_memset(&g_old_plane_state, 0, sizeof(g_old_plane_state));
     dry_lx_memset(&g_new_plane_state, 0, sizeof(g_new_plane_state));
@@ -475,44 +332,34 @@ int32_t dry_lx_bochs_probe(
     dry_lx_memset(&g_fb, 0, sizeof(g_fb));
     dry_lx_memset(&g_pending_damage, 0, sizeof(g_pending_damage));
 
-    g_pdev.dev.bdf = bdf;
-    g_pdev.vendor = vendor_id;
-    g_pdev.device = device_id;
-    g_pdev.subsystem_vendor = subvendor;
-    g_pdev.subsystem_device = subdevice;
-    g_pdev.revision = 2;
+    struct dry_lx_pci_bar_init bars[6];
+    dry_lx_memset(bars, 0, sizeof(bars));
+    bars[0].size_bytes = bar0_size;
+    bars[0].flags = bar0_flags;
+    bars[2].size_bytes = bar2_size;
+    bars[2].flags = bar2_flags;
+    dry_lx_pci_init_device(&g_drm_pdev, vendor_id, device_id, subvendor, subdevice, bdf, 2U, 0U, bars);
 
-    if (bar0_size > 0 && (bar0_flags & 1U) != 0U) {
-        g_pdev.resource[0].flags = IORESOURCE_MEM;
-        g_pdev.resource[0].start = 0x0000000001000000ULL;
-        g_pdev.resource[0].end = g_pdev.resource[0].start + bar0_size - 1ULL;
-    }
-    if (bar2_size > 0 && (bar2_flags & 1U) != 0U) {
-        g_pdev.resource[2].flags = IORESOURCE_MEM;
-        g_pdev.resource[2].start = (2ULL << 56) | 0x02000000ULL;
-        g_pdev.resource[2].end = g_pdev.resource[2].start + bar2_size - 1ULL;
-    }
-
-    const struct pci_device_id *matched = match_pci_id_table(drv->id_table, &g_pdev);
+    const struct pci_device_id *matched = dry_lx_match_pci_id_table(drv->id_table, &g_drm_pdev);
     if (!matched) {
         return -ENODEV;
     }
-    int rc = drv->probe(&g_pdev, matched);
+    int rc = drv->probe(&g_drm_pdev, matched);
     if (rc != 0 || !g_drm_dev) {
         return rc != 0 ? rc : -ENODEV;
     }
-
     if (g_drm_dev->connector && g_drm_dev->connector->helper_private &&
         g_drm_dev->connector->helper_private->get_modes) {
         g_drm_dev->connector->helper_private->get_modes(g_drm_dev->connector);
     }
 
+    uint32_t bar_mask = dry_lx_pci_mapped_bar_mask();
     if (out) {
         out->edid_ok = (g_drm_dev->connector && g_drm_dev->connector->edid_valid) ? 1U : 0U;
         out->pref_w = g_drm_dev->connector ? (uint32_t)g_drm_dev->connector->edid_pref_w : 1024U;
         out->pref_h = g_drm_dev->connector ? (uint32_t)g_drm_dev->connector->edid_pref_h : 768U;
-        out->mapped_bar0_ok = g_mapped_bar0_ok;
-        out->mapped_bar2_ok = g_mapped_bar2_ok;
+        out->mapped_bar0_ok = (bar_mask & (1U << 0)) ? 1U : 0U;
+        out->mapped_bar2_ok = (bar_mask & (1U << 2)) ? 1U : 0U;
     }
     return 0;
 }
@@ -521,31 +368,23 @@ int32_t dry_lx_bochs_modeset(uint32_t w, uint32_t h) {
     if (!g_drm_dev || !g_drm_dev->crtc || !g_drm_dev->crtc->helper_private) {
         return -ENODEV;
     }
-    struct drm_display_mode mode = {
-        .hdisplay = (int)w,
-        .vdisplay = (int)h,
-        .clock = 65000,
-    };
+    struct drm_display_mode mode = { .hdisplay = (int)w, .vdisplay = (int)h, .clock = 65000 };
     if (g_drm_dev->mode_config.funcs && g_drm_dev->mode_config.funcs->mode_valid) {
         enum drm_mode_status st = g_drm_dev->mode_config.funcs->mode_valid(g_drm_dev, &mode);
         if (st != MODE_OK) {
             return (int32_t)st;
         }
     }
-
     g_crtc_state.mode = mode;
     g_crtc_state.enable = true;
     g_drm_dev->crtc->state = &g_crtc_state;
-
     g_atomic_state.new_crtc_state = &g_crtc_state;
     g_atomic_state.new_plane_state = &g_new_plane_state.base;
     g_atomic_state.old_plane_state = &g_old_plane_state.base;
 
     if (g_drm_dev->crtc->helper_private->atomic_check) {
         int chk = g_drm_dev->crtc->helper_private->atomic_check(g_drm_dev->crtc, &g_atomic_state);
-        if (chk != 0) {
-            return chk;
-        }
+        if (chk != 0) return chk;
     }
     if (g_drm_dev->crtc->helper_private->mode_set_nofb) {
         g_drm_dev->crtc->helper_private->mode_set_nofb(g_drm_dev->crtc);
@@ -557,14 +396,8 @@ int32_t dry_lx_bochs_modeset(uint32_t w, uint32_t h) {
 }
 
 int32_t dry_lx_bochs_commit_dmabuf(
-    const void *src_ptr,
-    uint32_t w,
-    uint32_t h,
-    uint32_t pitch,
-    int32_t x,
-    int32_t y,
-    int32_t dw,
-    int32_t dh) {
+    const void *src_ptr, uint32_t w, uint32_t h, uint32_t pitch,
+    int32_t x, int32_t y, int32_t dw, int32_t dh) {
     if (!g_drm_dev || !g_drm_dev->primary_plane || !g_drm_dev->primary_plane->helper_private || !src_ptr) {
         return -EINVAL;
     }
@@ -579,17 +412,25 @@ int32_t dry_lx_bochs_commit_dmabuf(
         return -EINVAL;
     }
 
+    struct dma_buf *db = NULL;
+    struct dma_fence fence;
+    dma_fence_init(&fence, NULL, &g_drm_fence_lock, 1ULL, ++g_drm_fence_seqno);
+    if (dry_lx_dmabuf_wrap_framecap(1ULL, (void *)src_ptr, (size_t)pitch * (size_t)h,
+                                    DRY_DMABUF_FLAG_RO_EXPORT, &db) != 0 ||
+        !dry_lx_dmabuf_is_ro(db)) {
+        return -EINVAL;
+    }
+    (void)dry_lx_dmabuf_attach_fence(db, &fence);
+
     g_fb.format = &g_fmt_xrgb8888;
     g_fb.width = w;
     g_fb.height = h;
     g_fb.pitches[0] = pitch;
 
     g_new_plane_state.base.fb = &g_fb;
-    g_new_plane_state.base.crtc_x = 0;
-    g_new_plane_state.base.crtc_y = 0;
     g_new_plane_state.base.crtc = g_drm_dev->crtc;
     g_new_plane_state.base.visible = true;
-    g_new_plane_state.data[0].vaddr = (void *)src_ptr;
+    g_new_plane_state.data[0].vaddr = dry_lx_dmabuf_vaddr(db);
     g_new_plane_state.data[0].is_iomem = false;
 
     g_drm_dev->primary_plane->state = &g_new_plane_state.base;
@@ -603,21 +444,21 @@ int32_t dry_lx_bochs_commit_dmabuf(
     g_atomic_state.old_plane_state = &g_old_plane_state.base;
 
     const struct drm_plane_helper_funcs *pf = g_drm_dev->primary_plane->helper_private;
+    int rc = 0;
     if (pf->atomic_check) {
-        int chk = pf->atomic_check(g_drm_dev->primary_plane, &g_atomic_state);
-        if (chk != 0) {
-            return chk;
-        }
+        rc = pf->atomic_check(g_drm_dev->primary_plane, &g_atomic_state);
     }
-    if (pf->atomic_update) {
+    if (rc == 0 && pf->atomic_update) {
         pf->atomic_update(g_drm_dev->primary_plane, &g_atomic_state);
     }
-    return 0;
+    dma_fence_signal(&fence);
+    dma_buf_put(db);
+    return rc;
 }
 
 void dry_lx_bochs_shutdown(void) {
     const struct pci_driver *drv = dry_lx_registered_pci_driver();
     if (drv && drv->shutdown && g_drm_dev) {
-        drv->shutdown(&g_pdev);
+        drv->shutdown(&g_drm_pdev);
     }
 }
