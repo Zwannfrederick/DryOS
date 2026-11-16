@@ -2,7 +2,7 @@
 name = "dry-kernel"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR GPL-2.0-only"
+license = "Apache-2.0 OR MIT"
 publish = false
 
 [workspace]
