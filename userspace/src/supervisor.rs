@@ -18,10 +18,11 @@ use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
 pub use crate::sup_ctx::AppState;
 use crate::sup_ctx::SupervisorCtx;
+use crate::sup_hw_services::{handle_hw_query_ipc, init_hw_services_and_persist, HwInitCaps};
 use crate::sup_services::{
-    apply_input_prefs, mount_persist_and_load_prefs, spawn_and_bind_p3_display,
-    spawn_and_bind_power_service, spawn_and_seed_vfs, spawn_blk_service, spawn_vault_service,
-    sync_live_layout_pref, teardown_p3_core_services, FinalPowerMode, SupervisorPrefs,
+    apply_input_prefs, spawn_and_bind_p3_display, spawn_and_bind_power_service,
+    spawn_and_seed_vfs, spawn_blk_service, spawn_vault_service, sync_live_layout_pref,
+    teardown_p3_core_services_with_hw, FinalPowerMode, SupervisorPrefs,
 };
 use crate::vfs_proto::vfs_corrupt_sb0_test;
 use crate::wm::SUP_BIT_WM_ACTION;
@@ -105,16 +106,22 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     let input_sup_cap = sys_cap_derive(input_ep, cli_rights, 0, BADGE_SUPERVISOR).unwrap_or(0);
 
     let mut init_prefs = SupervisorPrefs::new();
-    if blk_sectors > 0 {
-        mount_persist_and_load_prefs(
-            vfs_sup_cap,
-            blk_ep,
+    let mut hw_state = init_hw_services_and_persist(
+        boot_info_addr,
+        boot,
+        HwInitCaps {
+            disp_ep,
             disp_sup_cap,
             input_sup_cap,
-            sys.tsc_mhz,
-            &mut init_prefs,
-        );
-    }
+            vfs_ep,
+            vfs_sup_cap,
+            blk_ep,
+            blk_sup_cap,
+            blk_sectors,
+            tsc_mhz: sys.tsc_mhz,
+        },
+        &mut init_prefs,
+    );
     let (vault_handle, vault_ep, vault_sup_cap) =
         match spawn_vault_service(boot, vfs_ep, disp_sup_cap) {
             Ok(v) => v,
@@ -215,6 +222,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         log_line(&elb);
                         sys_exit(code);
                     }
+                    hw_state.blk_sup_cap = blk_sup_cap;
                 } else if boot.session_mode == 25 {
                     if let Err(code) =
                         run_island_poc_lifecycle_audit(boot, vfs_sup_cap, vault_sup_cap)
@@ -667,7 +675,11 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                 };
             }
             _ => {
-                if reply_tok != 0 {
+                let auth = is_action_badge_authorized(ext.sender_badge)
+                    || ext.sender_badge == BADGE_SUPERVISOR;
+                if !handle_hw_query_ipc(sup_ep, reply_tok, op, mrs, auth, &hw_state)
+                    && reply_tok != 0
+                {
                     let _ = sys_ipc_reply_inline(
                         sup_ep,
                         reply_tok,
@@ -711,7 +723,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         teardown_live_gpu(live, disp_sup_cap);
     }
 
-    if let Err(code) = teardown_p3_core_services(
+    if let Err(code) = teardown_p3_core_services_with_hw(
         ctx.input_sup_cap,
         ctx.input_ep,
         input_handle,
@@ -724,6 +736,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         blk_handle,
         blk_ep,
         blk_sup_cap,
+        Some(&mut hw_state),
         disp_sup_cap,
         disp_ep,
         disp_handle,

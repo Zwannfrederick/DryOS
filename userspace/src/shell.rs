@@ -102,8 +102,9 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"sec-audit" => ShellCommand::SecAudit,
         b"gpufault" => ShellCommand::GpuFault,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
-        b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"vault-status"
-        | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
+        b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"dmesg" | b"lspci" | b"lsusb"
+        | b"lsblk" | b"nvme" | b"drvctl" | b"uname" | b"free" | b"mounts"
+        | b"vault-status" | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
         | b"corrupt-sb0-test" => {
             ShellCommand::StorageVault(verb, rest)
         }
@@ -181,6 +182,16 @@ impl LineBuilder {
         while n > 0 {
             n -= 1;
             self.push_byte(tmp[n]);
+        }
+    }
+
+    pub fn push_hex_width(&mut self, val: u64, digits: usize) {
+        let w = digits.clamp(1, 16);
+        let mut i = w;
+        while i > 0 {
+            i -= 1;
+            let nib = ((val >> (i * 4)) & 0x0f) as u8;
+            self.push_byte(if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) });
         }
     }
 
@@ -538,6 +549,7 @@ impl ShellEngine {
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings|editor|calc>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
         self.push_line(b"  ls|cat|write|rm|ln|sync  VFS (/persist, /ram, /boot) ops", STYLE_DEFAULT);
+        self.push_line(b"  dmesg|lspci|lsusb|lsblk|nvme|drvctl|uname|free|mounts  Sys", STYLE_DEFAULT);
         self.push_line(b"  vault-status|vault-unlock|vault-lock|vault-passwd  DRY Vault", STYLE_DEFAULT);
         self.push_line(b"  gpufault|blank|lock|reboot|poweroff|shutdown|suspend  System", STYLE_DEFAULT);
         self.push_line(b"Keys: Up/Down hist | PgUp/PgDn scroll | Alt+1..6 apps | Alt+Space", STYLE_MUTED);

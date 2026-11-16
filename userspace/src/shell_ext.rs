@@ -4,6 +4,7 @@
 
 use crate::action::{AppId, DesktopAction};
 use crate::shell::{LineBuilder, ShellEngine};
+use crate::shell_sys_cmds::exec_sys_diag_command;
 use crate::surface::{STYLE_ACCENT, STYLE_DEFAULT, STYLE_MUTED, STYLE_OK, STYLE_WARN};
 use crate::vault_proto::{
     vault_change_passphrase, vault_get_sealed_ro_status_cap, vault_lock_and_revoke,
@@ -149,7 +150,7 @@ pub fn exec_storage_vault_command(
                 engine.push_line(b"cat: VFS unavailable", STYLE_WARN);
                 return None;
             };
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; 2048];
             match vfs_read_file(vcap, rest, 0, &mut buf) {
                 Ok((got, total)) => {
                     let slice = &buf[..got];
@@ -511,7 +512,10 @@ pub fn exec_storage_vault_command(
             }
             None
         }
-        _ => None,
+        _ => {
+            let _ = exec_sys_diag_command(sup_ep_cap, verb, rest, engine);
+            None
+        }
     }
 }
 
