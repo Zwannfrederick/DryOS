@@ -1,0 +1,676 @@
+{
+  "schema_version": "1.0",
+  "audit_mode": "strictly_read_only_host_inventory",
+  "dmi": {"sys_vendor": "LENOVO", "product_name": "82K1", "product_version": "IdeaPad Gaming 3 15IHU6", "product_family": "IdeaPad Gaming 3 15IHU6", "board_vendor": "LENOVO", "board_name": "LNVNB161216", "bios_vendor": "LENOVO", "bios_version": "H4CN22WW(V1.07)", "bios_date": "11/18/2021"},
+  "cpu": {
+    "model_name": "11th Gen Intel(R) Core(TM) i5-11300H @ 3.10GHz",
+    "vendor_id": "GenuineIntel",
+    "family": "6",
+    "model": "140",
+    "stepping": "1",
+    "microcode": "0xbe",
+    "cache_size": "8192 KB",
+    "physical_cores": 4,
+    "logical_threads": 8,
+    "physical_addr_bits": 39,
+    "virtual_addr_bits": 48,
+    "address_sizes_raw": "39 bits physical, 48 bits virtual",
+    "key_isa_flags": ["x2apic", "vmx", "smap", "smep", "xsave", "xsaveopt", "avx2", "avx512f", "pdpe1gb", "invpcid", "constant_tsc", "nonstop_tsc", "umip"],
+    "key_vmx_flags": ["ept", "ept_1gb", "unrestricted_guest", "vpid"]
+  },
+  "memory": {"mem_total_kib": 32634344, "mem_total_gib": 31.12, "installed_ram_class_gib": 32, "mem_available_kib": 22467316, "swap_total_kib": 4718584},
+  "boot_and_security": {
+    "uefi_fw_platform_bits": "64",
+    "kernel_lockdown": "[none] integrity confidentiality",
+    "secure_boot_state": "disabled",
+    "secure_boot_source": "journalctl -k -b (efivars and efibootmgr untouched)",
+    "secure_boot_kernel_line": "Kas 16 18:55:05 devshub kernel: Secure boot disabled",
+    "efivars_touched": false,
+    "efibootmgr_invoked": false,
+    "cmdline": "BOOT_IMAGE=/@/boot/vmlinuz-linux-zen root=UUID=11c5d1b8-f03b-42e9-9566-c97e60110988 rw rootflags=subvol=@ quiet rfkill.default_state=1 nowatchdog nvme_load=YES nvidia_drm.modeset=1 loglevel=3 8250.nr_uarts=0",
+    "uart_8250_nr_uarts": "8250.nr_uarts=0",
+    "uart_legacy_com1_absent": true,
+    "cmdline_iommu_flags": [],
+    "dmar_acpi_table": "present_root_only",
+    "host_iommu_units": [],
+    "host_iommu_groups_count": 0,
+    "vtd_active_in_host_linux": false
+  },
+  "pci_devices": [
+    {
+      "bdf": "0000:00:00.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a14",
+      "class_code": "0x060000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3835",
+      "irq": 0,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:00.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:02.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a49",
+      "class_code": "0x030000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3a5b",
+      "irq": 153,
+      "host_driver": "i915",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6104000000", "end": "0x6104ffffff", "size_bytes": 16777216, "size_human": "16.0 MiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true},
+        {"bar": 2, "start": "0x4000000000", "end": "0x400fffffff", "size_bytes": 268435456, "size_human": "256.0 MiB", "flags": "0x14220c", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": true, "above_4g": true},
+        {"bar": 4, "start": "0x5000", "end": "0x503f", "size_bytes": 64, "size_human": "64 B", "flags": "0x40101", "is_io": true, "is_mem": false, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:02.0",
+      "dryos_role": "Intel Iris Xe iGPU (primary UEFI GOP console target; PCI_OBJ_IGPU)"
+    },
+    {
+      "bdf": "0000:00:04.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a03",
+      "class_code": "0x118000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x380d",
+      "irq": 16,
+      "host_driver": "proc_thermal",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105200000", "end": "0x610521ffff", "size_bytes": 131072, "size_human": "128.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:04.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:06.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x09ab",
+      "class_code": "0x088000",
+      "revision": "0x0",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3801",
+      "irq": 0,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:06.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:08.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a11",
+      "class_code": "0x088000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x380d",
+      "irq": 255,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105238000", "end": "0x6105238fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:08.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:0a.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a0d",
+      "class_code": "0x118000",
+      "revision": "0x1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3807",
+      "irq": 0,
+      "host_driver": "intel_vsec",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105220000", "end": "0x6105227fff", "size_bytes": 32768, "size_human": "32.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:0a.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:0e.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a0b",
+      "class_code": "0x010400",
+      "revision": "0x0",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3801",
+      "irq": 0,
+      "host_driver": "vmd",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6102000000", "end": "0x6103ffffff", "size_bytes": 33554432, "size_human": "32.0 MiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true},
+        {"bar": 2, "start": "0x52000000", "end": "0x53ffffff", "size_bytes": 33554432, "size_human": "32.0 MiB", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 4, "start": "0x6105100000", "end": "0x61051fffff", "size_bytes": 1048576, "size_human": "1.0 MiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:0e.0",
+      "dryos_role": "Intel VMD controller (owns PCI domain 10000:e0..e1 NVMe + AHCI)"
+    },
+    {
+      "bdf": "0000:00:14.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0ed",
+      "class_code": "0x0c0330",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3829",
+      "irq": 122,
+      "host_driver": "xhci_hcd",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x55180000", "end": "0x5518ffff", "size_bytes": 65536, "size_human": "64.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:14.0",
+      "dryos_role": "Intel Tiger Lake xHCI USB 3.2 controller (Live USB & USB HID; PCI_OBJ_XHCI)"
+    },
+    {
+      "bdf": "0000:00:14.2",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0ef",
+      "class_code": "0x050000",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3830",
+      "irq": 0,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105230000", "end": "0x6105233fff", "size_bytes": 16384, "size_human": "16.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true},
+        {"bar": 2, "start": "0x6105237000", "end": "0x6105237fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:14.2",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:14.3",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0f0",
+      "class_code": "0x028000",
+      "revision": "0x20",
+      "subsystem_vendor": "0x8086",
+      "subsystem_device": "0x0074",
+      "irq": 16,
+      "host_driver": "iwlwifi",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x610522c000", "end": "0x610522ffff", "size_bytes": 16384, "size_human": "16.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:14.3",
+      "dryos_role": "Intel Wi-Fi 6 AX201 CNVi wireless adapter (iwlwifi)"
+    },
+    {
+      "bdf": "0000:00:15.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0e8",
+      "class_code": "0x0c8000",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3822",
+      "irq": 27,
+      "host_driver": "intel-lpss",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x4017000000", "end": "0x4017000fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:15.0",
+      "dryos_role": "Intel LPSS I2C controller #0 (owns Synaptics I2C-HID touchpad 06cb:ce78)"
+    },
+    {
+      "bdf": "0000:00:16.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0e0",
+      "class_code": "0x078000",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3825",
+      "irq": 163,
+      "host_driver": "mei_me",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105235000", "end": "0x6105235fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:16.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:17.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0x09ab",
+      "class_code": "0x088000",
+      "revision": "0x0",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3801",
+      "irq": 0,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:17.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:1c.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0bc",
+      "class_code": "0x060400",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3812",
+      "irq": 120,
+      "host_driver": "pcieport",
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1c.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:1d.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0b3",
+      "class_code": "0x060400",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3814",
+      "irq": 121,
+      "host_driver": "pcieport",
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1d.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:1f.0",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa082",
+      "class_code": "0x060100",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3806",
+      "irq": 0,
+      "host_driver": null,
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1f.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:1f.3",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0c8",
+      "class_code": "0x040100",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x380a",
+      "irq": 175,
+      "host_driver": "sof-audio-pci-intel-tgl",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105228000", "end": "0x610522bfff", "size_bytes": 16384, "size_human": "16.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true},
+        {"bar": 4, "start": "0x6105000000", "end": "0x61050fffff", "size_bytes": 1048576, "size_human": "1.0 MiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1f.3",
+      "dryos_role": "Intel Smart Sound Technology HDA audio DSP (Realtek ALC257 + HDMI)"
+    },
+    {
+      "bdf": "0000:00:1f.4",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0a3",
+      "class_code": "0x0c0500",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x380d",
+      "irq": 16,
+      "host_driver": "i801_smbus",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x6105234000", "end": "0x61052340ff", "size_bytes": 256, "size_human": "256 B", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": true},
+        {"bar": 4, "start": "0xefa0", "end": "0xefbf", "size_bytes": 32, "size_human": "32 B", "flags": "0x40101", "is_io": true, "is_mem": false, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1f.4",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:00:1f.5",
+      "domain": "0000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0a4",
+      "class_code": "0x0c8000",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x380c",
+      "irq": 0,
+      "host_driver": "intel-spi",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x50400000", "end": "0x50400fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1f.5",
+      "dryos_role": null
+    },
+    {
+      "bdf": "0000:01:00.0",
+      "domain": "0000",
+      "vendor_id": "0x10de",
+      "device_id": "0x25a0",
+      "class_code": "0x030200",
+      "revision": "0xa1",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3a5b",
+      "irq": 130,
+      "host_driver": "nvidia",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x54000000", "end": "0x54ffffff", "size_bytes": 16777216, "size_human": "16.0 MiB", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 1, "start": "0x6000000000", "end": "0x60ffffffff", "size_bytes": 4294967296, "size_human": "4096.0 MiB", "flags": "0x14220c", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": true, "above_4g": true},
+        {"bar": 3, "start": "0x6100000000", "end": "0x6101ffffff", "size_bytes": 33554432, "size_human": "32.0 MiB", "flags": "0x14220c", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": true, "above_4g": true},
+        {"bar": 5, "start": "0x4000", "end": "0x407f", "size_bytes": 128, "size_human": "128 B", "flags": "0x40101", "is_io": true, "is_mem": false, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": true,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1c.0/0000:01:00.0",
+      "dryos_role": "NVIDIA RTX 3050 Ti Mobile GA107M (class 03:02 muxless dGPU; 4 GiB BAR1 >4G)",
+      "power": {"runtime_status": "suspended", "power_state": "D3cold", "d3cold_allowed": "1", "current_link_speed": "8.0 GT/s PCIe", "current_link_width": "4", "max_link_speed": "16.0 GT/s PCIe", "max_link_width": "16"}
+    },
+    {
+      "bdf": "0000:02:00.0",
+      "domain": "0000",
+      "vendor_id": "0x10ec",
+      "device_id": "0x8168",
+      "class_code": "0x020000",
+      "revision": "0x15",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3908",
+      "irq": 19,
+      "host_driver": "r8169",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x3000", "end": "0x30ff", "size_bytes": 256, "size_human": "256 B", "flags": "0x40101", "is_io": true, "is_mem": false, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 2, "start": "0x55004000", "end": "0x55004fff", "size_bytes": 4096, "size_human": "4.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 4, "start": "0x55000000", "end": "0x55003fff", "size_bytes": 16384, "size_human": "16.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:1d.0/0000:02:00.0",
+      "dryos_role": "Realtek RTL8111/8168 Gigabit Ethernet NIC (r8169; PCI_OBJ_NET target)"
+    },
+    {
+      "bdf": "10000:e0:06.0",
+      "domain": "10000",
+      "vendor_id": "0x8086",
+      "device_id": "0x9a09",
+      "class_code": "0x060400",
+      "revision": "0x1",
+      "subsystem_vendor": "0x8086",
+      "subsystem_device": "0x7270",
+      "irq": 151,
+      "host_driver": "pcieport",
+      "iommu_group": null,
+      "bars": [],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:0e.0/pci10000:e0/10000:e0:06.0",
+      "dryos_role": null
+    },
+    {
+      "bdf": "10000:e0:17.0",
+      "domain": "10000",
+      "vendor_id": "0x8086",
+      "device_id": "0xa0d3",
+      "class_code": "0x010601",
+      "revision": "0x20",
+      "subsystem_vendor": "0x17aa",
+      "subsystem_device": "0x3819",
+      "irq": 152,
+      "host_driver": "ahci",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x52100000", "end": "0x52101fff", "size_bytes": 8192, "size_human": "8.0 KiB", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 1, "start": "0x52102800", "end": "0x521028ff", "size_bytes": 256, "size_human": "256 B", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false},
+        {"bar": 5, "start": "0x52102000", "end": "0x521027ff", "size_bytes": 2048, "size_human": "2.0 KiB", "flags": "0x40200", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:0e.0/pci10000:e0/10000:e0:17.0",
+      "dryos_role": "Intel Tiger Lake AHCI SATA controller (behind VMD 10000:e0:17.0)"
+    },
+    {
+      "bdf": "10000:e1:00.0",
+      "domain": "10000",
+      "vendor_id": "0x1344",
+      "device_id": "0x5404",
+      "class_code": "0x010802",
+      "revision": "0x3",
+      "subsystem_vendor": "0x1344",
+      "subsystem_device": "0x1100",
+      "irq": 2147483648,
+      "host_driver": "nvme",
+      "iommu_group": null,
+      "bars": [
+        {"bar": 0, "start": "0x52000000", "end": "0x52003fff", "size_bytes": 16384, "size_human": "16.0 KiB", "flags": "0x140204", "is_io": false, "is_mem": true, "is_64bit": false, "is_prefetchable": false, "above_4g": false}
+      ],
+      "has_bar_above_4g": false,
+      "realpath": "/sys/devices/pci0000:00/0000:00:0e.0/pci10000:e0/10000:e0:06.0/10000:e1:00.0",
+      "dryos_role": "Micron MTFDHBA512QFD NVMe SSD (behind VMD domain 10000:e1:00.0)"
+    }
+  ],
+  "storage_lsblk": {
+    "blockdevices": [
+      {
+        "name": "sda",
+        "model": "KIOXIA-EXCERIA SATA SSD",
+        "size": "894,3G",
+        "type": "disk",
+        "tran": "sata",
+        "rota": false,
+        "mountpoints": [],
+        "children": [
+          {
+            "name": "sda1",
+            "model": null,
+            "size": "2G",
+            "type": "part",
+            "tran": null,
+            "rota": false,
+            "mountpoints": ["/boot/efi"]
+          },
+          {
+            "name": "sda2",
+            "model": null,
+            "size": "892,3G",
+            "type": "part",
+            "tran": null,
+            "rota": false,
+            "mountpoints": ["/var/cache", "/var/log", "/home", "/swap", "/"]
+          }
+        ]
+      },
+      {
+        "name": "zram0",
+        "model": null,
+        "size": "4G",
+        "type": "disk",
+        "tran": null,
+        "rota": false,
+        "mountpoints": ["[SWAP]"]
+      },
+      {
+        "name": "nvme0n1",
+        "model": "Micron MTFDHBA512QFD",
+        "size": "476,9G",
+        "type": "disk",
+        "tran": "nvme",
+        "rota": false,
+        "mountpoints": [],
+        "children": [
+          {
+            "name": "nvme0n1p1",
+            "model": null,
+            "size": "600M",
+            "type": "part",
+            "tran": "nvme",
+            "rota": false,
+            "mountpoints": []
+          },
+          {
+            "name": "nvme0n1p2",
+            "model": null,
+            "size": "16M",
+            "type": "part",
+            "tran": "nvme",
+            "rota": false,
+            "mountpoints": []
+          },
+          {
+            "name": "nvme0n1p3",
+            "model": null,
+            "size": "475,5G",
+            "type": "part",
+            "tran": "nvme",
+            "rota": false,
+            "mountpoints": []
+          },
+          {
+            "name": "nvme0n1p4",
+            "model": null,
+            "size": "892M",
+            "type": "part",
+            "tran": "nvme",
+            "rota": false,
+            "mountpoints": []
+          }
+        ]
+      }
+    ]
+  },
+  "subsystems": {
+    "i2c_hid_nodes": [
+      {"node": "i2c-MSFT0001:01", "name": "MSFT0001:01", "driver": "i2c_hid_acpi", "modalias": "acpi:MSFT0001:PNP0C50:", "realpath": "/sys/devices/pci0000:00/0000:00:15.0/i2c_designware.0/i2c-1/i2c-MSFT0001:01"}
+    ],
+    "hid_devices": [
+      {"id": "0003:048D:C963.0003", "name": "ITE Tech. Inc. ITE Device(8295)", "phys": "usb-0000:00:14.0-7/input1", "driver": "hid-generic", "realpath": "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-7/1-7:1.1/0003:048D:C963.0003"},
+      {"id": "0003:048D:C966.0004", "name": "ITE Tech. Inc. ITE Device(8176)", "phys": "usb-0000:00:14.0-8/input0", "driver": "hid-generic", "realpath": "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-8/1-8:1.0/0003:048D:C966.0004"},
+      {"id": "0003:1A81:2232.0001", "name": "Lenovo Lenovo Gaming Mouse", "phys": "usb-0000:00:14.0-1.2/input0", "driver": "hid-generic", "realpath": "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1.2/1-1.2:1.0/0003:1A81:2232.0001"},
+      {"id": "0018:06CB:CE78.0005", "name": "MSFT0001:01 06CB:CE78", "phys": "i2c-MSFT0001:01", "driver": "hid-multitouch", "realpath": "/sys/devices/pci0000:00/0000:00:15.0/i2c_designware.0/i2c-1/i2c-MSFT0001:01/0018:06CB:CE78.0005"}
+    ],
+    "i8042_platform_present": true,
+    "network_pci_ifaces": [
+      {"iface": "enp2s0", "operstate": "down", "pci_device": "0000:02:00.0"},
+      {"iface": "wlan0", "operstate": "up", "pci_device": "0000:00:14.3"}
+    ],
+    "audio_codecs": [
+      {"node": "card0/codec#0", "codec": "Realtek ALC257", "vendor_id": "0x10ec0257"},
+      {"node": "card0/codec#2", "codec": "Intel Tigerlake HDMI", "vendor_id": "0x80862812"}
+    ],
+    "power_supplies": [
+      {"name": "ACAD", "type": "Mains", "status": null, "capacity": null, "model_name": null},
+      {"name": "BAT1", "type": "Battery", "status": "Full", "capacity": "100", "model_name": "L20C3PC2"}
+    ],
+    "sleep_modes": "[s2idle] deep",
+    "power_states": "freeze mem disk",
+    "backlight_max": "96000",
+    "drm_edid_panels": [
+      {
+        "connector": "card2-eDP-1",
+        "status": "connected",
+        "enabled": "enabled",
+        "modes": ["1920x1080"],
+        "edid_bytes": 128
+      }
+    ]
+  },
+  "firmware": {
+    "intel_tgl_count": 15,
+    "intel_tgl_key_files": [
+      {"path": "/lib/firmware/i915/tgl_dmc_ver2_12.bin.zst", "bytes": 5141},
+      {"path": "/lib/firmware/i915/tgl_guc_70.1.1.bin.zst", "bytes": 102651},
+      {"path": "/lib/firmware/i915/tgl_huc.bin.zst", "bytes": 154252}
+    ],
+    "nvidia_615_files": [
+      {"path": "/lib/firmware/nvidia/615.78.08/gsp_ga10x.bin", "bytes": 27043992},
+      {"path": "/lib/firmware/nvidia/615.78.08/gsp_tu10x.bin", "bytes": 22901632},
+      {"path": "/lib/firmware/nvidia/615.78.08/ucodes_ga10x.bin", "bytes": 58215936},
+      {"path": "/lib/firmware/nvidia/615.78.08/ucodes_tu10x.bin", "bytes": 8837632}
+    ],
+    "nvidia_ga107_gsp_files": [
+      {"path": "/lib/firmware/nvidia/ga107/gsp/booter_load-535.113.01.bin.zst", "bytes": 33114},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/booter_load-570.144.bin.zst", "bytes": 35095},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/booter_unload-535.113.01.bin.zst", "bytes": 18906},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/booter_unload-570.144.bin.zst", "bytes": 20302},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/bootloader-535.113.01.bin.zst", "bytes": 16468},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin.zst", "bytes": 17843},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/gsp-535.113.01.bin.zst", "bytes": 26285961},
+      {"path": "/lib/firmware/nvidia/ga107/gsp/gsp-570.144.bin.zst", "bytes": 51762663}
+    ]
+  },
+  "readiness_assessments": {
+    "uart_serial": {"status": "MITIGATED_IN_KERNEL", "finding": "Host cmdline sets 8250.nr_uarts=0; legacy COM1 0x3F8 is absent on 15IHU6.", "dryos_readiness": "kernel/src/serial.rs probes COM1 scratch/LSR != 0xff and buffers logs into 16 KiB DIAG_RING without stalling."},
+    "display_and_gpu": {
+      "status": "GOP_READY_NATIVE_KMS_PLANNED",
+      "finding": "00:02.0 Iris Xe (8086:9a49, BAR2 256 MiB >4G) drives eDP-1 AUO 1920x1080; 01:00.0 RTX 3050 Ti (10de:25a0, class 03:02) is muxless with 4 GiB BAR1 >4G.",
+      "dryos_readiness": "UEFI GOP + preserve_active_gop + 64-bit >4G WC BAR + VT-d SLPT verified in QEMU; native GuC/DMC/GSP modeset remains PLANNED (Gates 6-7)."
+    },
+    "storage_vmd_and_usb": {
+      "status": "LIVE_USB_XHCI_READY_VMD_PLANNED",
+      "finding": "00:0e.0 Intel VMD (8086:9a0b) owns domain 10000:e0..e1 (10000:e1:00.0 Micron NVMe 1344:5404 + 10000:e0:17.0 AHCI). 00:14.0 xHCI (8086:a0ed) handles USB.",
+      "dryos_readiness": "Live USB boots via UEFI + xHCI; native NVMe behind VMD requires VMD sub-bus ECAM remapping in pci_cfg.rs (PLANNED)."
+    },
+    "i2c_hid_input": {
+      "status": "PS2_KBD_USB_HID_NEARTERM_I2C_PLANNED",
+      "finding": "i8042 AT keyboard present; Synaptics touchpad 06cb:ce78 (MSFT0001:01) hangs off 00:15.0 LPSS I2C (8086:a0e8, 4 KiB >4G BAR, IRQ 27).",
+      "dryos_readiness": "dry-input covers PS/2 i8042; Synaptics touchpad needs Ring-3 LPSS DesignWare I2C + I2C-HID island; xHCI USB mouse is immediate bare-metal path."
+    },
+    "networking": {
+      "status": "GBE_ISLAND_CANDIDATE_WIFI_DEFERRED",
+      "finding": "02:00.0 Realtek GbE (10ec:8168, r8169) has 256 B I/O + 4 KiB/16 KiB MMIO; 00:14.3 Intel Wi-Fi 6 AX201 (8086:a0f0, iwlwifi) requires CNVi + mac80211 stack.",
+      "dryos_readiness": "10ec:8168 fits Ring-3 Driver Island after 2C-3 igc/e1000e (PLANNED); 8086:a0f0 exceeds <10k LOC ADR-006 island ceiling (BLOCKED/LONG-TERM)."
+    },
+    "audio": {"status": "PLANNED_LONG_TERM", "finding": "00:1f.3 Intel TGL SST (8086:a0c8) uses sof-audio-pci-intel-tgl with Realtek ALC257 and Intel HDMI codecs.", "dryos_readiness": "Requires SOF DSP firmware loader, NHLT/topology, and Ring-3 audio server (no audio stack in DRY OS yet)."},
+    "power_and_rtd3": {
+      "status": "S5_RESET_READY_S3_RTD3_PLANNED",
+      "finding": "BAT1 (L20C3PC2), ACAD, s2idle/deep, and 01:00.0 d3cold_allowed=1 (currently D0 active on host).",
+      "dryos_readiness": "ACPI S5 & FADT reset implemented; S3 returns -ENOSYS (R-16); 01:00.0 RTD3 D3cold power-off (~8-15W savings, R-17) is PLANNED for P5."
+    }
+  }
+}
