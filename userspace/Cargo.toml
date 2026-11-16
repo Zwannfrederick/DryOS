@@ -93,6 +93,14 @@ path = "src/bin/dry_editor.rs"
 name = "dry-calc"
 path = "src/bin/dry_calc.rs"
 
+[[bin]]
+name = "dry-usb"
+path = "src/bin/dry_usb.rs"
+
+[[bin]]
+name = "dry-nvme"
+path = "src/bin/dry_nvme.rs"
+
 [profile.dev]
 panic = "abort"
 

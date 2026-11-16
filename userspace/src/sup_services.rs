@@ -2,8 +2,11 @@
 //! Supervisor Core Service Spawners (`dry-vfs`, `dry-blk`, `dry-vault`, `dry-power`) &
 //! Persistent Runtime Preference Sync (`Milestone 2A-3` & `Milestone 2B`).
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::init_legacy::{domain_spec, log_line};
 use crate::shell::LineBuilder;
+use crate::sup_hw_services::HwServicesState;
 use crate::vfs_proto::{
     vfs_create_file, vfs_mount_blk, vfs_read_file, vfs_seed_boot_entry, vfs_sync, vfs_write_small,
 };
@@ -269,6 +272,17 @@ pub fn mount_persist_and_load_prefs(
     lb.push_bytes(if recovered { b"true" } else { b"false" });
     log_line(&lb);
 
+    restore_prefs_from_persist(vfs_sup_cap, disp_sup_cap, input_sup_cap, tsc_mhz, prefs);
+}
+
+/// Restore saved workspace preferences from `/persist/desktop.cfg` into live services.
+pub fn restore_prefs_from_persist(
+    vfs_sup_cap: u64,
+    disp_sup_cap: u64,
+    input_sup_cap: u64,
+    tsc_mhz: u64,
+    prefs: &mut SupervisorPrefs,
+) {
     let mut raw = [0u8; 16];
     if let Ok((got, _)) = vfs_read_file(vfs_sup_cap, DESKTOP_CFG_PATH, 0, &mut raw) {
         if got == 16 && raw[0..8] == DESKTOP_CFG_MAGIC {
@@ -309,9 +323,15 @@ pub fn mount_persist_and_load_prefs(
     }
 }
 
+static PERSIST_READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_persist_read_only(ro: bool) {
+    PERSIST_READ_ONLY.store(ro, Ordering::Release);
+}
+
 /// Persist live runtime preferences atomically into `/persist/desktop.cfg` via CoW + `FLUSH`.
 pub fn save_prefs_to_persist(vfs_sup_cap: u64, prefs: &SupervisorPrefs) {
-    if !prefs.persist_backed || vfs_sup_cap == 0 {
+    if !prefs.persist_backed || vfs_sup_cap == 0 || PERSIST_READ_ONLY.load(Ordering::Acquire) {
         return;
     }
     match vfs_create_file(vfs_sup_cap, DESKTOP_CFG_PATH, 0) {
@@ -526,6 +546,57 @@ pub fn teardown_p3_core_services(
     sup_ep: u64,
     final_mode: FinalPowerMode,
 ) -> Result<(), i32> {
+    teardown_p3_core_services_with_hw(
+        input_sup_cap,
+        input_ep,
+        input_handle,
+        vault_handle,
+        vault_ep,
+        vault_sup_cap,
+        vfs_handle,
+        vfs_ep,
+        vfs_sup_cap,
+        blk_handle,
+        blk_ep,
+        blk_sup_cap,
+        None,
+        disp_sup_cap,
+        disp_ep,
+        disp_handle,
+        pwr_handle,
+        pwr_ep,
+        pwr_sup_cap,
+        sup_notif,
+        sup_ep,
+        final_mode,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn teardown_p3_core_services_with_hw(
+    input_sup_cap: u64,
+    input_ep: u64,
+    input_handle: u64,
+    vault_handle: u64,
+    vault_ep: u64,
+    vault_sup_cap: u64,
+    vfs_handle: u64,
+    vfs_ep: u64,
+    vfs_sup_cap: u64,
+    blk_handle: u64,
+    blk_ep: u64,
+    blk_sup_cap: u64,
+    hw_opt: Option<&mut HwServicesState>,
+    disp_sup_cap: u64,
+    disp_ep: u64,
+    disp_handle: u64,
+    pwr_handle: u64,
+    pwr_ep: u64,
+    pwr_sup_cap: u64,
+    sup_notif: u64,
+    sup_ep: u64,
+    final_mode: FinalPowerMode,
+) -> Result<(), i32> {
     let mut first_err: Result<(), i32> = Ok(());
     let _ = sys_ipc_call_inline(
         input_ep,
@@ -556,6 +627,9 @@ pub fn teardown_p3_core_services(
         if first_err.is_ok() {
             first_err = Err(e);
         }
+    }
+    if let Some(hw) = hw_opt {
+        hw.teardown();
     }
 
     if disp_ep != 0 {

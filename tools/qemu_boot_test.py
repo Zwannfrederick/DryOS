@@ -36,6 +36,7 @@ from qemu_p9_glass_validators import run_p9_glass_suite
 from qemu_p10_glass2_validators import run_p10_glass2_suite
 from qemu_p11_glass21_validators import run_p11_glass21_suite
 from qemu_p12_lx_compat_validators import run_p12_lx_compat_suite
+from qemu_p13_usb_persist_validators import run_p13_usb_persist_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -80,6 +81,8 @@ USERSPACE_MODS = (
     ("dry-editor", "dry-editor.elf"),
     ("dry-calc", "dry-calc.elf"),
     ("dry-lx-drm-bochs", "dry-lx-drm-bochs.elf"),
+    ("dry-usb", "dry-usb.elf"),
+    ("dry-nvme", "dry-nvme.elf"),
 )
 
 
@@ -687,6 +690,7 @@ def main() -> None:
     parser.add_argument("--p10-only", action="store_true", help="Run only DRY Glass 2.0 TrueType UI, 6 Native Apps, Multi-DPI & Multi-Res suite")
     parser.add_argument("--p11-only", action="store_true", help="Run only DRY Glass 2.1 Adaptive Window Strip, Overview & HiDPI Sidebar suite")
     parser.add_argument("--p12-only", action="store_true", help="Run only Ascension 4.0 Linux DRM (bochs.c) Runtime Compatibility suite")
+    parser.add_argument("--p13-only", action="store_true", help="Run only M2 xHCI USB HID/BOT Persist & Read-Only NVMe suite")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -750,6 +754,11 @@ def main() -> None:
     if args.p12_only:
         n_p12 = run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p12} LINUX DRM COMPATIBILITY CHECKS PASSED.")
+        return
+
+    if args.p13_only:
+        n_p13 = run_p13_usb_persist_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p13} M2 USB/PERSIST/NVME-RO CHECKS PASSED.")
         return
 
     if args.p3_matrix:

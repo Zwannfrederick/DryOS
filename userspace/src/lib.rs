@@ -25,12 +25,16 @@ pub mod lx_island_audit;
 pub mod persist_fs;
 pub mod virtio_gpu;
 pub mod ps2;
+pub mod nvme_ro;
 pub mod shell;
 pub mod shell_ext;
+pub mod shell_sys_cmds;
 pub mod sup_audit;
 pub mod sup_ctx;
+pub mod sup_hw_services;
 pub mod sup_services;
 pub mod supervisor;
+pub mod usb;
 pub mod surface;
 pub mod ttf;
 pub mod ui;
@@ -224,6 +228,17 @@ pub const IPC_OP_PWR_QUERY: u32 = 53;
 pub const IPC_OP_PWR_SHUTDOWN_S5: u32 = 54;
 pub const IPC_OP_PWR_REBOOT: u32 = 55;
 pub const IPC_OP_PWR_SUSPEND_S3: u32 = 56;
+
+// Milestone M2 Ring-3 USB/xHCI, Read-Only NVMe, and Supervisor Hardware Query Protocol.
+pub const COMP_ID_USB_DRV: u16 = 0x000a;
+pub const COMP_ID_NVME_DRV: u16 = 0x000b;
+pub const USB_OP_SET_WM_SINK: u32 = 0x6700;
+pub const USB_OP_QUERY_SUMMARY: u32 = 0x6701;
+pub const NVME_OP_QUERY_INFO: u32 = 0x6800;
+pub const IPC_OP_SUP_QUERY_HW: u32 = 140;
+pub const IPC_OP_SUP_QUERY_USB: u32 = 141;
+pub const IPC_OP_SUP_QUERY_NVME: u32 = 142;
+pub const IPC_OP_SUP_QUERY_BLK: u32 = 143;
 
 pub const POWER_OP_QUERY: u64 = 0;
 pub const POWER_OP_SHUTDOWN_S5: u64 = 1;

@@ -11,7 +11,7 @@ use core::cell::UnsafeCell;
 use core::mem::size_of;
 
 use dry_userspace::ioring::IoRingClient;
-use dry_userspace::persist_fs::{PersistMount, VfsCallerCtx};
+use dry_userspace::persist_fs::{DryFsSuperblock, PersistMount, VfsCallerCtx, DRYFS_MAGIC};
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::vfs_mem::{
     is_valid_filename, name_eq, parse_file_path, parse_mount_dir, parse_two_paths, MemMounts,
@@ -37,6 +37,7 @@ struct VfsState {
     mem: MemMounts,
     ring: IoRingClient,
     persist: PersistMount,
+    persist_ro: bool,
     ops_ok: u64,
     rofs_rejects: u64,
     unauth_rejects: u64,
@@ -63,6 +64,7 @@ static VFS_STATE: SingleThreadVfs = SingleThreadVfs(UnsafeCell::new(VfsState {
     mem: MemMounts::new(),
     ring: IoRingClient::empty(),
     persist: PersistMount::new(),
+    persist_ro: false,
     ops_ok: 0,
     rofs_rejects: 0,
     unauth_rejects: 0,
@@ -156,6 +158,8 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 }
                 st.ring.teardown();
                 st.persist.mounted = false;
+                st.persist_ro = false;
+                let req_ro = (mrs[0] & 1) != 0;
                 let client = match IoRingClient::connect(
                     ext.transferred_cap,
                     VFS_RING_VADDR,
@@ -169,12 +173,34 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     }
                 };
                 st.ring = client;
+                if req_ro {
+                    let max_b = ((st.ring.total_sectors / 8) as u32).clamp(16, 4096);
+                    let mut ok_ro = false;
+                    if st.ring.read_block_4k(0, &mut st.persist.io_buf_4k).is_ok() {
+                        DryFsSuperblock::decode_into(&st.persist.io_buf_4k, &mut st.persist.sb);
+                        ok_ro = st.persist.sb.magic == DRYFS_MAGIC && st.persist.sb.is_valid(max_b);
+                    }
+                    if !ok_ro && st.ring.read_block_4k(1, &mut st.persist.io_buf_4k).is_ok() {
+                        DryFsSuperblock::decode_into(&st.persist.io_buf_4k, &mut st.persist.staging_sb);
+                        ok_ro = st.persist.staging_sb.magic == DRYFS_MAGIC
+                            && st.persist.staging_sb.is_valid(max_b);
+                    }
+                    if !ok_ro {
+                        st.ring.teardown();
+                        st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
+                        reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
+                        continue;
+                    }
+                }
                 match st.persist.mount_or_format(&mut st.ring) {
                     Ok((fresh, tx_seq)) => {
+                        st.persist_ro = req_ro;
                         st.ops_ok = st.ops_ok.wrapping_add(1);
                         let mut lb = LineBuilder::new();
                         lb.push_bytes(b"[DRY-VFS] PERSIST_MOUNT fresh=");
                         lb.push_bytes(if fresh { b"true" } else { b"false" });
+                        lb.push_bytes(b" ro=");
+                        lb.push_bytes(if req_ro { b"true" } else { b"false" });
                         lb.push_bytes(b" tx_seq=");
                         lb.push_u64(tx_seq);
                         lb.push_bytes(b" recovered=");
@@ -205,13 +231,13 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 }
             }
             VFS_OP_SYNC => {
-                if !st.persist.mounted {
+                if !st.persist.mounted || st.persist_ro {
                     if reply_tok != 0 {
                         let _ = sys_ipc_reply_inline(
                             srv_ep_cap,
                             reply_tok,
                             pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                            [0, 0, 0, 0],
+                            [if st.persist.mounted { st.persist.sb.tx_seq } else { 0 }, 0, 0, 0],
                         );
                     }
                     continue;
@@ -239,6 +265,11 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 }
                 if !st.persist.mounted {
                     reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
+                    continue;
+                }
+                if st.persist_ro {
+                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
+                    reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
                 }
                 match st.persist.corrupt_slot0_for_recovery_test(&mut st.ring) {
@@ -279,7 +310,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     }
                     MountKind::Persist => {
                         let (b, t) = st.persist.list(start_idx, &mut entries);
-                        (b, t, 0)
+                        (b, t, if st.persist_ro { VFS_FLAG_READONLY } else { 0 })
                     }
                 };
                 st.ops_ok = st.ops_ok.wrapping_add(1);
@@ -461,7 +492,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         continue;
                     }
                 };
-                if mk == MountKind::Boot {
+                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
                     st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
@@ -554,7 +585,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         continue;
                     }
                 };
-                if mk == MountKind::Boot {
+                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
                     st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
@@ -631,7 +662,10 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                             continue;
                         }
                     };
-                if mk_old == MountKind::Boot || mk_new == MountKind::Boot {
+                if mk_old == MountKind::Boot
+                    || mk_new == MountKind::Boot
+                    || ((mk_old == MountKind::Persist || mk_new == MountKind::Persist) && st.persist_ro)
+                {
                     st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
@@ -701,6 +735,11 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     }
                     MountKind::Persist => {
+                        if st.persist_ro {
+                            st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
+                            reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
+                            continue;
+                        }
                         if !st.persist.mounted {
                             reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
                             continue;
@@ -735,7 +774,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         continue;
                     }
                 };
-                if mk == MountKind::Boot {
+                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
                     st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
