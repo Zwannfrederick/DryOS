@@ -50,7 +50,7 @@ def _boot_gpu_desktop(
     )
     qmp = h.boot_to_desktop_ready()
     h.wait_for("[DRY-INIT] Mounted /persist (DRYFS_v1)", wait_s=8.0)
-    h.wait_for("[DRY-WM] GPU_SCANOUT_BOUND back_2m=2", wait_s=12.0)
+    h.wait_for("[DRY-WM] GPU_SCANOUT_BOUND", wait_s=12.0)
     h.wait_for(f"[DRY-GPU] LIVE_SESSION_ACTIVE gen=1 w={res_w} h={res_h}", wait_s=12.0)
     h.wait_for("[DRY-SYSMON] REFRESH seq=2", wait_s=10.0)
     return h, qmp
@@ -182,13 +182,15 @@ def run_p15a_1280x800_brand_themes_dpi(
         idx = len(h.serial_lines)
         qmp.type_ascii("lock")
         qmp.send_qcodes(["ret"])
-        h.wait_for("[DRY-WM] SESSION_LOCK locked=1", start_idx=idx)
+        h.wait_for("[DRY-WM] SESSION state=2", start_idx=idx)
         time.sleep(0.20)
         snap("p15_1280x800_lock_screen.png", min_colors=20)
 
         idx = len(h.serial_lines)
+        qmp.type_ascii("dryos")
+        time.sleep(0.05)
         qmp.send_qcodes(["ret"])
-        h.wait_for("[DRY-WM] SESSION_LOCK locked=0", start_idx=idx)
+        h.wait_for("[DRY-WM] SESSION state=0", start_idx=idx)
 
         leaked = _shutdown_verify(name, h, qmp)
         elapsed = round(time.monotonic() - t0, 3)

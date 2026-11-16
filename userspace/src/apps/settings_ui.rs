@@ -102,21 +102,35 @@ struct ShowcaseLayout {
 
 fn compute_showcase_layout(t: UiTheme, list_r: Rect) -> ShowcaseLayout {
     let dpi_s = t.dpi_pct as usize;
-    let pad = (10 * dpi_s / 100).clamp(8, 16);
-    let brand_h = (52 * dpi_s / 100).clamp(46, 72);
-    let sys_h = (32 * dpi_s / 100).clamp(28, 44);
-    let inner = inset_rect(list_r, pad, (pad / 2).max(4));
+    let pad = if list_r.h < 220 { 6 } else { (10 * dpi_s / 100).clamp(8, 16) };
+    let vpad = (pad / 2).max(4);
+    let brand_h = if list_r.h < 220 {
+        (list_r.h * 22 / 100).clamp(32, 46)
+    } else {
+        (52 * dpi_s / 100).clamp(46, 72)
+    };
+    let sys_h = if list_r.h < 200 {
+        26usize
+    } else {
+        (32 * dpi_s / 100).clamp(28, 44)
+    };
+    let inner = inset_rect(list_r, pad, vpad);
     let brand_r = Rect::new(inner.x, inner.y, inner.w, brand_h);
-    let grid_y = brand_r.y + brand_r.h + 6;
-    let sys_y = (list_r.y + list_r.h).saturating_sub(sys_h + (pad / 2).max(4));
-    let grid_h = sys_y.saturating_sub(grid_y + 6);
+    let grid_y = brand_r.y + brand_r.h + 5;
+    let sys_y = (list_r.y + list_r.h).saturating_sub(sys_h + vpad);
+    let grid_h = sys_y.saturating_sub(grid_y + 5);
     let grid_r = Rect::new(inner.x, grid_y, inner.w, grid_h);
     let sys_r = Rect::new(inner.x, sys_y, inner.w, sys_h);
 
     let cell_w_target = (60 * dpi_s / 100).clamp(58, 108);
     let cols = (grid_r.w.saturating_sub(8) / cell_w_target).clamp(3, 7);
     let cell_w = (grid_r.w.saturating_sub(8)) / cols;
-    let cell_h = (60 * dpi_s / 100).clamp(56, 98);
+    let raw_ch = (56 * dpi_s / 100).clamp(52, 86);
+    let cell_h = if grid_h >= 116 && grid_h / raw_ch < 2 {
+        (grid_h / 2).clamp(52, 80)
+    } else {
+        raw_ch.min(grid_h.max(46))
+    };
     let vis_rows = (grid_r.h / cell_h).max(1);
     let total_rows = AppIconKind::ALL.len().div_ceil(cols);
     ShowcaseLayout {
@@ -132,9 +146,9 @@ fn compute_showcase_layout(t: UiTheme, list_r: Rect) -> ShowcaseLayout {
 }
 
 pub fn showcase_grid_metrics(t: UiTheme, w: usize, h: usize) -> (usize, usize) {
-    let top_h = (t.ctrl_h + 12).clamp(40, 56);
+    let top_h = if h < 380 { (t.ctrl_h + 6).clamp(36, 46) } else { (t.ctrl_h + 12).clamp(40, 56) };
     let mid_outer = Rect::new(0, top_h, w, h.saturating_sub(top_h + 30));
-    let mid_r = inset_rect(mid_outer, t.sp_md, t.sp_sm);
+    let mid_r = inset_rect(mid_outer, t.sp_md, if h < 380 { 4 } else { t.sp_sm });
     let sb_w = sidebar_preferred_w(t, w, &SETTINGS_CATS);
     let (_, list_r) = split_left(mid_r, sb_w, t.sp_sm);
     let lay = compute_showcase_layout(t, list_r);
@@ -167,39 +181,40 @@ fn render_showcase_panel(
     let brand_r = lay.brand_r;
     c.fill_bordered_rrect_aa(brand_r, t.r_sm, t.bg_card_alt, t.border_subtle);
 
-    let sym_sz = (brand_r.h.saturating_sub(14)).clamp(24, 48);
-    let sym_x = brand_r.x + 10;
-    let sym_y = brand_r.y + (brand_r.h.saturating_sub(sym_sz)) / 2;
-    draw_brand_symbol(c, Rect::new(sym_x, sym_y, sym_sz, sym_sz), t.mode, false);
-
-    let wm_x = sym_x + sym_sz + 10;
-    let wm_w = (128 * dpi_s / 100).min(brand_r.w.saturating_sub(sym_sz + 24));
-    let wm_h = (wm_w / 5).max(20).min(brand_r.h.saturating_sub(10));
+    let wm_x = brand_r.x + 12;
+    let wm_w = (156 * dpi_s / 100).min(brand_r.w.saturating_sub(24));
+    let wm_h = (wm_w / 5).max(22).min(brand_r.h.saturating_sub(10));
     draw_brand_wordmark(
         c,
         Rect::new(wm_x, brand_r.y + (brand_r.h.saturating_sub(wm_h)) / 2, wm_w, wm_h),
         t.mode,
     );
 
-    let lbl_x = wm_x + wm_w + 10;
-    let lbl_px = (10 * dpi_s / 100).clamp(10, 16) as u8;
-    if lbl_x + 88 <= brand_r.x + brand_r.w {
+    let sym_sz = 16usize;
+    let lbl_x = wm_x + wm_w + 12;
+    let lbl_px = (10 * dpi_s / 100).clamp(10, 15) as u8;
+    if lbl_x + sym_sz + 76 <= brand_r.x + brand_r.w {
+        let sym_y = brand_r.y + (brand_r.h.saturating_sub(sym_sz)) / 2;
+        draw_brand_symbol(c, Rect::new(lbl_x, sym_y, sym_sz, sym_sz), t.mode, false);
+        let txt_x = lbl_x + sym_sz + 8;
+        let max_lbl_w = (brand_r.x + brand_r.w).saturating_sub(txt_x + 8);
+        let full_tag = b"21 Apps + 91 Sys";
+        let tag: &[u8] = if (measure_text(FontId::SansSemiBold, lbl_px, full_tag).max(0) as usize) <= max_lbl_w {
+            full_tag
+        } else {
+            b"21 + 91"
+        };
         let m = font_metrics(FontId::SansSemiBold, lbl_px);
         let ly = brand_r.y as i32 + ((brand_r.h as i32 - (m.ascent + m.descent)) / 2);
-        c.draw_text_ellipsis(
-            lbl_x as i32,
-            ly,
-            (brand_r.x + brand_r.w).saturating_sub(lbl_x + 8) as i32,
-            FontId::SansSemiBold,
-            lbl_px,
-            b"21 Apps + 91 Sys",
-            t.fg_secondary,
-        );
+        c.draw_text_ellipsis(txt_x as i32, ly, max_lbl_w as i32, FontId::SansSemiBold, lbl_px, tag, t.fg_secondary);
     }
 
     let grid_r = lay.grid_r;
-    let ic_sz = (30 * dpi_s / 100).clamp(26, 48).min(lay.cell_w.saturating_sub(12));
-    let cap_px = (9 * dpi_s / 100).clamp(9, 15) as u8;
+    let cap_px = (9 * dpi_s / 100).clamp(9, 14) as u8;
+    let ic_sz = (30 * dpi_s / 100)
+        .clamp(24, 48)
+        .min(lay.cell_w.saturating_sub(12))
+        .min(lay.cell_h.saturating_sub(cap_px as usize + 18));
     let total_rows = AppIconKind::ALL.len().div_ceil(lay.cols);
     let start_row = scroll.min(lay.max_scroll);
 
@@ -282,12 +297,12 @@ pub fn render_settings(
     let w = win.w as usize;
     let h = win.h as usize;
 
-    let top_h = (t.ctrl_h + 12).clamp(40, 56);
+    let top_h = if h < 380 { (t.ctrl_h + 6).clamp(36, 46) } else { (t.ctrl_h + 12).clamp(40, 56) };
     let foot_h = 30usize;
     let root = Rect::new(0, 0, w, h);
     let (top_r, rest1) = split_top(root, top_h, 0);
     let (mid_outer, foot_r) = split_bot(rest1, foot_h, 0);
-    let mid_r = inset_rect(mid_outer, t.sp_md, t.sp_sm);
+    let mid_r = inset_rect(mid_outer, t.sp_md, if h < 380 { 4 } else { t.sp_sm });
 
     let sb_w = sidebar_preferred_w(t, w, &SETTINGS_CATS);
     let (sb_r, list_r) = split_left(mid_r, sb_w, t.sp_sm);
@@ -311,17 +326,21 @@ pub fn render_settings(
 
     let btn_h = top_h.saturating_sub(14).max(26);
     let btn_y = top_r.y + (top_h.saturating_sub(btn_h)) / 2;
-    let help_lbl = b"Help (H)";
-    let gpu_lbl = b"GPU Test";
-    let icons_lbl = b"Icons (V)";
-    let help_w = (measure_text(FontId::SansSemiBold, t.caption_px, help_lbl).max(48) as usize) + 38;
-    let gpu_w = (measure_text(FontId::SansSemiBold, t.caption_px, gpu_lbl).max(52) as usize) + 38;
-    let icons_w = (measure_text(FontId::SansSemiBold, t.caption_px, icons_lbl).max(50) as usize) + 38;
+    let compact_top = w < 680 && t.dpi_pct >= 185;
+    let (icons_lbl, gpu_lbl, help_lbl): (&[u8], &[u8], &[u8]) = if compact_top {
+        (b"Icons", b"GPU", b"Help")
+    } else {
+        (b"Icons (V)", b"GPU Test", b"Help (H)")
+    };
+    let icon_pad = (t.body_px as usize + 2).min(btn_h.saturating_sub(8)) + 24;
+    let help_w = (measure_text(FontId::SansSemiBold, t.body_px, help_lbl).max(32) as usize) + icon_pad;
+    let gpu_w = (measure_text(FontId::SansSemiBold, t.body_px, gpu_lbl).max(32) as usize) + icon_pad;
+    let icons_w = (measure_text(FontId::SansSemiBold, t.body_px, icons_lbl).max(32) as usize) + icon_pad;
     let help_x = w.saturating_sub(t.sp_md + help_w);
     let gpu_x = help_x.saturating_sub(6 + gpu_w);
     let icons_x = gpu_x.saturating_sub(6 + icons_w);
 
-    let show_icons_btn = icons_x >= t.sp_md + 145;
+    let show_icons_btn = icons_x >= t.sp_md + 128;
     if show_icons_btn
         && button(
             &mut c,
@@ -380,12 +399,6 @@ pub fn render_settings(
     let badge_limit = if show_icons_btn { icons_x } else { gpu_x };
     let sb_h = (font_metrics(FontId::SansSemiBold, t.caption_px).line_height as usize + 6).max(20);
     let badge_y = top_r.y + (top_h.saturating_sub(sb_h)) / 2;
-    let st_w = measure_text(FontId::SansSemiBold, t.caption_px, st_lbl).max(0) as usize + 22;
-    let mut dpi_x = t.sp_md;
-    if t.sp_md + st_w + 8 <= badge_limit {
-        status_badge(&mut c, t, t.sp_md, badge_y, st_lbl, st_kind);
-        dpi_x = t.sp_md + st_w + 8;
-    }
     let dpi_lbl: &[u8] = if view.dpi_200 {
         b"200% DPI"
     } else {
@@ -395,9 +408,13 @@ pub fn render_settings(
             _ => b"100% DPI",
         }
     };
+    let st_w = measure_text(FontId::SansSemiBold, t.caption_px, st_lbl).max(0) as usize + 22;
     let dpi_w = measure_text(FontId::SansSemiBold, t.caption_px, dpi_lbl).max(0) as usize + 22;
-    if dpi_x + dpi_w + 8 <= badge_limit {
-        status_badge(&mut c, t, dpi_x, badge_y, dpi_lbl, StatusKind::Accent);
+    if t.sp_md + st_w + 8 + dpi_w + 8 <= badge_limit {
+        status_badge(&mut c, t, t.sp_md, badge_y, st_lbl, st_kind);
+        status_badge(&mut c, t, t.sp_md + st_w + 8, badge_y, dpi_lbl, StatusKind::Accent);
+    } else if t.sp_md + dpi_w + 8 <= badge_limit {
+        status_badge(&mut c, t, t.sp_md, badge_y, dpi_lbl, StatusKind::Accent);
     }
 
     // Left category sidebar

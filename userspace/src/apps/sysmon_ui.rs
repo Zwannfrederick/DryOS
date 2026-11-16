@@ -133,13 +133,15 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
         StatusKind::Ok,
         None,
     );
-    draw_vector_icon(
-        &mut c,
-        Rect::new(cpu_card_r.x + cpu_card_r.w.saturating_sub(24), cpu_card_r.y + 8, 14, 14),
-        IconKind::Cpu,
-        t.ok_fg,
-        t.accent_fg,
-    );
+    if (measure_text(FontId::SansSemiBold, t.caption_px, b"CPU & APIC").max(0) as usize + 42) <= cpu_card_r.w {
+        draw_vector_icon(
+            &mut c,
+            Rect::new(cpu_card_r.x + cpu_card_r.w.saturating_sub(24), cpu_card_r.y + 8, 14, 14),
+            IconKind::Cpu,
+            t.ok_fg,
+            t.accent_fg,
+        );
+    }
 
     let usable = view.sys.usable_frames_4k.max(1) as u64;
     let free = (view.sys.free_frames_4k as u64).min(usable);
@@ -169,13 +171,15 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
         mem_kind,
         Some(used_pct as u8),
     );
-    draw_vector_icon(
-        &mut c,
-        Rect::new(mem_card_r.x + mem_card_r.w.saturating_sub(24), mem_card_r.y + 8, 14, 14),
-        IconKind::Memory,
-        t.fg_secondary,
-        t.accent_fg,
-    );
+    if (measure_text(FontId::SansSemiBold, t.caption_px, b"PMM MEMORY").max(0) as usize + 42) <= mem_card_r.w {
+        draw_vector_icon(
+            &mut c,
+            Rect::new(mem_card_r.x + mem_card_r.w.saturating_sub(24), mem_card_r.y + 8, 14, 14),
+            IconKind::Memory,
+            t.fg_secondary,
+            t.accent_fg,
+        );
+    }
 
     let mut sys_v = LineBuilder::new();
     sys_v.push_byte(b'+');
@@ -197,13 +201,15 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
         StatusKind::Accent,
         None,
     );
-    draw_vector_icon(
-        &mut c,
-        Rect::new(sys_card_r.x + sys_card_r.w.saturating_sub(24), sys_card_r.y + 8, 14, 14),
-        IconKind::DriverIsland,
-        t.accent_fg,
-        t.accent_fg,
-    );
+    if (measure_text(FontId::SansSemiBold, t.caption_px, b"KERNEL TRAFFIC").max(0) as usize + 42) <= sys_card_r.w {
+        draw_vector_icon(
+            &mut c,
+            Rect::new(sys_card_r.x + sys_card_r.w.saturating_sub(24), sys_card_r.y + 8, 14, 14),
+            IconKind::DriverIsland,
+            t.accent_fg,
+            t.accent_fg,
+        );
+    }
 
     // AA Syscall Delta Sparkline Card
     c.fill_bordered_rrect_aa(spark_r, t.r_md, t.bg_card, t.border_subtle);
