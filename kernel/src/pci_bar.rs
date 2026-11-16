@@ -78,7 +78,8 @@ impl PciBarDesc {
 pub struct UserPciBarInfo {
     pub size_bytes: u64,
     pub flags: u32,
-    pub _pad: u32,
+    pub page_suboff: u16,
+    pub _pad: u16,
 }
 
 const _: () = assert!(size_of::<UserPciBarInfo>() == 16);
@@ -303,6 +304,11 @@ pub fn build_user_pci_info(
         }
         dst.size_bytes = src.size_bytes;
         dst.flags = flags;
+        dst.page_suboff = if src.is_mmio() {
+            (src.base_phys & 0xfff) as u16
+        } else {
+            0
+        };
     }
     UserPciDeviceInfo {
         vendor_id,
@@ -406,7 +412,24 @@ pub fn run_bar64_unit_tests() {
         Err(PciBarError::InvalidSize)
     );
 
-    serial_println!("[DRY-BAR64] PASS: unit_cases=8 max_phys_limit={:#x}", phys_limit_str(limit_40));
+    // 9. Sub-page (< 4 KiB) MMIO BAR (e.g., 256-byte rtl8139 BAR1) preserves `page_suboff` while IoPort zeros it
+    let (d_io, c_io) = decode_bar_pair(0, 0xC001, 0xFFFF_FF01, 0, 0, limit_40).expect("valid ioport bar");
+    let (d9, c9) = decode_bar_pair(1, 0xFEBC_1200, 0xFFFF_FF00, 0, 0, limit_40).expect("valid subpage bar32");
+    assert_eq!(d_io.kind, PciBarKind::IoPort);
+    assert_eq!(d9.kind, PciBarKind::Mem32);
+    assert_eq!(d9.base_phys, 0xFEBC_1200);
+    assert_eq!(d9.size_bytes, 256);
+    assert!(!c_io && !c9);
+    let mut bars = [PciBarDesc::UNUSED; 6];
+    bars[0] = d_io;
+    bars[1] = d9;
+    let uinfo = build_user_pci_info(0x10ec, 0x8139, 0x0018, 0, 0, &bars);
+    assert_eq!(uinfo.bars[0].page_suboff, 0);
+    assert_eq!(uinfo.bars[1].size_bytes, 256);
+    assert_eq!(uinfo.bars[1].page_suboff, 0x200);
+    assert_ne!(uinfo.bars[1].flags & PCI_BAR_FLAG_MMIO, 0);
+
+    serial_println!("[DRY-BAR64] PASS: unit_cases=9 max_phys_limit={:#x}", phys_limit_str(limit_40));
 }
 
 #[inline]

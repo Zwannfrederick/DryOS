@@ -8,8 +8,8 @@ use crate::pmm::{query_frame_state, FrameState, PAGE_SIZE};
 use crate::serial_println;
 use crate::vspace::pte::cpu_max_phys_addr_limit;
 
-pub const MAX_DRHD_UNITS: usize = 4;
-pub const MAX_RMRR_RANGES: usize = 8;
+pub const MAX_DRHD_UNITS: usize = 8;
+pub const MAX_RMRR_RANGES: usize = 16;
 pub const MAX_DEV_SCOPES: usize = 16;
 
 const DMAR_HEADER_LEN: usize = 48;

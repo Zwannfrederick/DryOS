@@ -6,6 +6,7 @@ use core::mem::size_of;
 
 use crate::{
     pack_msg_tag, raw_ipc_syscall, raw_syscall6, MSG_FLAG_GRANT_CAP, SYS_IPC_REPLY, SYS_PROC_SPAWN,
+    SYS_SYSINFO,
 };
 
 #[repr(C)]
@@ -219,7 +220,8 @@ pub const PCI_DEV_FLAG_VIRTIO: u16 = 1 << 3;
 pub struct UserPciBarInfo {
     pub size_bytes: u64,
     pub flags: u32,
-    pub _pad: u32,
+    pub page_suboff: u16,
+    pub _pad: u16,
 }
 
 #[repr(C, align(8))]
@@ -468,5 +470,57 @@ pub fn sys_proc_spawn_with_fault_ep(
         Err(r0)
     } else {
         Ok((r0 as u64, pid))
+    }
+}
+
+pub const BOOT_EXT_INFO_OFFSET: u64 = 0x0700;
+pub const ROOT_BOOT_EXT_MAGIC: u64 = 0x4452_595f_4245_5854; // "DRY_BEXT"
+
+pub const BOOT_FLAG_LIVE_USB: u64 = 1 << 0;
+pub const BOOT_FLAG_STORAGE_RO: u64 = 1 << 1;
+pub const BOOT_FLAG_RECOVERY: u64 = 1 << 2;
+pub const BOOT_FLAG_UART_PRESENT: u64 = 1 << 3;
+pub const BOOT_FLAG_VTD_ENFORCING: u64 = 1 << 4;
+pub const BOOT_FLAG_VTD_GFX_DEFERRED: u64 = 1 << 5;
+pub const BOOT_FLAG_SAFE_GOP: u64 = 1 << 6;
+pub const BOOT_FLAG_USB_PERSIST_PREFER: u64 = 1 << 7;
+pub const BOOT_FLAG_DIAG_SELFTEST: u64 = 1 << 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RootInitBootExtInfo {
+    pub magic: u64,
+    pub usb_mod_cap: u64,
+    pub pci_xhci_cap: u64,
+    pub nvme_mod_cap: u64,
+    pub pci_nvme_cap: u64,
+    pub lx_net_mod_cap: u64,
+    pub pci_net_cap: u64,
+    pub pci_igpu_cap: u64,
+    pub boot_flags: u64,
+    pub dgpu_packed: u64,
+    pub vmd_packed: u64,
+    pub lpss_i2c_count: u64,
+}
+
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 96);
+
+/// Read kernel `UserSysInfo` and recent kernel `dmesg` ring bytes (`DIAG_RING`, up to 16 KiB).
+#[inline]
+pub fn sys_dmesg_read(info: &mut UserSysInfo, out: &mut [u8]) -> Result<usize, isize> {
+    let ptr = if out.is_empty() { 0 } else { out.as_mut_ptr() as u64 };
+    let (r0, _) = raw_syscall6(
+        SYS_SYSINFO,
+        (info as *mut UserSysInfo) as u64,
+        ptr,
+        out.len() as u64,
+        0,
+        0,
+        0,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(r0 as usize)
     }
 }

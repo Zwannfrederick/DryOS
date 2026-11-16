@@ -15,7 +15,7 @@ use crate::vspace::VSpaceId;
 pub type CSpaceId = u16;
 pub const KERNEL_RESERVED_CSPACE_ID: CSpaceId = 0;
 pub const INVALID_CSPACE_ID: CSpaceId = u16::MAX;
-pub const MAX_CSPACES: usize = 32;
+pub const MAX_CSPACES: usize = 40;
 pub const CNODE_RADIX_BITS: u8 = 8;
 pub const CNODE_SLOTS: usize = 1 << (CNODE_RADIX_BITS as usize); // 256 slots / CNode
 pub const CDT_NONE: u32 = u32::MAX;

@@ -19,8 +19,9 @@ pub const PAGE_SIZE: usize = 4096;
 pub const HUGE_2M_FRAMES: usize = 512;
 /// Low `< 64 KiB` (`PFN 0..16`) BIOS/real-mode/AP guard: never handed out as general RAM.
 pub const LOW_MEM_GUARD_END_PFN: u32 = 16;
-/// Standard x86 Local APIC MMIO base (`0xFEE0_0000`) — must never classify as allocatable RAM.
+/// Standard x86 Local APIC MMIO base (`0xFEE0_0000`) & default IOAPIC base (`0xFEC0_0000`).
 pub const LAPIC_MMIO_PHYS_BASE: u64 = 0xfee0_0000;
+pub const IOAPIC_MMIO_DEFAULT_BASE: u64 = 0xfec0_0000;
 pub(crate) const PFN_NONE: u32 = u32::MAX;
 pub(crate) const NEVER_OWNED_DOMAIN: u8 = 3;
 pub(crate) const NO_CPU_OWNER: u8 = 0xff;
@@ -452,7 +453,6 @@ pub(crate) fn build_inventory_and_meta(mem: &MemorySummary) -> (PmmInventory, u3
     let max_tracked_pfn_u64 = (max_ram_end + (PAGE_SIZE as u64 - 1)) >> PAGE_SHIFT;
     assert!(max_tracked_pfn_u64 > 0 && max_tracked_pfn_u64 < (PFN_NONE as u64));
     let max_tracked_pfn = max_tracked_pfn_u64 as u32;
-    assert!((LAPIC_MMIO_PHYS_BASE >> PAGE_SHIFT) >= max_tracked_pfn_u64);
 
     let meta_bytes = (max_tracked_pfn as usize) * size_of::<FrameMeta>();
     let meta_pages = meta_bytes.div_ceil(PAGE_SIZE);
@@ -515,8 +515,10 @@ pub(crate) fn build_inventory_and_meta(mem: &MemorySummary) -> (PmmInventory, u3
         match e.kind {
             LIMINE_MEMMAP_USABLE => {
                 for pfn in (start_pfn..end_pfn).rev() {
+                    let pa = (pfn as u64) << PAGE_SHIFT;
                     if pfn < LOW_MEM_GUARD_END_PFN
-                        || ((pfn as u64) << PAGE_SHIFT) == LAPIC_MMIO_PHYS_BASE
+                        || pa == LAPIC_MMIO_PHYS_BASE
+                        || pa == IOAPIC_MMIO_DEFAULT_BASE
                     {
                         continue;
                     }

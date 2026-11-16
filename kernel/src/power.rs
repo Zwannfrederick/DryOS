@@ -174,6 +174,12 @@ pub fn sys_power_ctl(
                         && (inw(pwr.pm1a_cnt_port) & 1) == 0
                     {
                         outb(pwr.smi_cmd_port, pwr.acpi_enable_val);
+                        for _ in 0..10_000 {
+                            if (inw(pwr.pm1a_cnt_port) & 1) != 0 {
+                                break;
+                            }
+                            core::hint::spin_loop();
+                        }
                     }
                     let slp_en = 1u16 << 13;
                     let val_a = ((pwr.slp_typ_s5_a as u16) << 10) | slp_en;

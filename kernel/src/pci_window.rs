@@ -138,8 +138,13 @@ pub(super) fn sys_dev_map_window(
         let Some(vdev) = validated_pci_slot(dev_idx) else {
             return Err(CapError::InvalidHandle);
         };
+        if vdev.preserve_active_gop {
+            sub_err = DevMapSubErr::Perm;
+            return Err(CapError::InsufficientRights);
+        }
         let bar = vdev.bars[bar_idx];
-        if !bar.is_mmio() || end_bar_off > bar.size_bytes {
+        let eff_bar_limit = bar.size_bytes.max(PAGE_SIZE as u64);
+        if !bar.is_mmio() || end_bar_off > eff_bar_limit {
             sub_err = DevMapSubErr::Inval;
             return Err(CapError::PagingError);
         }
@@ -166,10 +171,11 @@ pub(super) fn sys_dev_map_window(
         } else {
             VmProt::USER_MMIO_UC
         };
+        let bar_page_base = bar.base_phys & !((PAGE_SIZE as u64) - 1);
         let bar_page_off_bytes = page_offset * (PAGE_SIZE as u64);
         for p in 0..page_count {
             let va = map_vaddr + (p as u64) * (PAGE_SIZE as u64);
-            let pa = bar.base_phys + bar_page_off_bytes + (p as u64) * (PAGE_SIZE as u64);
+            let pa = bar_page_base + bar_page_off_bytes + (p as u64) * (PAGE_SIZE as u64);
             if map_mmio_4k(vs_h, va, pa, prot).is_err() {
                 for rb in 0..p {
                     let _ = unmap_4k(vs_h, map_vaddr + (rb as u64) * (PAGE_SIZE as u64));

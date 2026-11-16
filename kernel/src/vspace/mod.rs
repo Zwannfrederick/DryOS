@@ -36,7 +36,7 @@ use crate::vspace::pte::{
 
 pub type VSpaceId = u16;
 pub const KERNEL_VSPACE_ID: VSpaceId = 0;
-pub const MAX_VSPACES: usize = 32;
+pub const MAX_VSPACES: usize = 40;
 const NO_CPU_LOCK: usize = usize::MAX;
 const KERNEL_PT_LABEL: SecLabel = SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0);
 pub(crate) const BOOT_CR3_VSPACE_SENTINEL: VSpaceId = u16::MAX;

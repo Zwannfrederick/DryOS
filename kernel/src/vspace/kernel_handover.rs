@@ -323,6 +323,14 @@ pub fn init_and_activate_kernel_vspace(
         map_kernel_4k_init(pml4_h.pfn, va, pa, uc_flags, &mut pt_frames);
     });
 
+    if let Some(vfb) = crate::display::framebuffer_summary() {
+        for p in 0..(vfb.num_pages as usize) {
+            let va = crate::vspace::pte::KERNEL_GOP_DIAG_BASE + (p as u64) * PAGE_SIZE_4K;
+            let pa = vfb.phys_base + (p as u64) * PAGE_SIZE_4K;
+            map_kernel_4k_init(pml4_h.pfn, va, pa, uc_flags, &mut pt_frames);
+        }
+    }
+
     let wx_ok = audit_kernel_upper_half_wx_and_us(pml4_h.pfn);
     assert!(wx_ok, "KERNEL_VSPACE upper-half W^X or U/S=0 audit failed");
 
@@ -337,6 +345,9 @@ pub fn init_and_activate_kernel_vspace(
     let bsp_caps = detect_and_enable_cpu_paging_caps(0);
     // SAFETY: `kernel_cr3` maps active BSP code, stack, GDT/TSS/IST1, GS_BASE, IDT, HHDM, and APIC.
     unsafe { write_cr3(kernel_cr3) };
+    if crate::display::framebuffer_summary().is_some() {
+        crate::panic_fb::set_kernel_gop_diag_mapped(true);
+    }
     assert_eq!(read_cr3() & PTE_PHYS_MASK_4K, kernel_cr3);
     CPU_ACTIVE_CR3[0].store(kernel_cr3, Ordering::Release);
     CPU_ACTIVE_VSPACE[0].store(KERNEL_VSPACE_ID, Ordering::Release);

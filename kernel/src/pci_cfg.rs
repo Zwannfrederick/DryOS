@@ -6,7 +6,12 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{inl, irq_restore, irq_save_cli, outl, outw};
-use crate::pci_bar::{probe_function_bars, PciBarDesc};
+use crate::pci_bar::{probe_function_bars, verify_bar_non_ram, PciBarDesc, PciBarKind};
+use crate::pci_slots::{
+    set_active_gop_bdf, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU, PCI_OBJ_IOMMU_TEST, PCI_OBJ_IVSHMEM,
+    PCI_OBJ_NET, PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU,
+    PCI_OBJ_VIRTIO_RNG, PCI_OBJ_XHCI,
+};
 use crate::pmm::{query_frame_state, FrameState, PAGE_SIZE};
 
 const PCI_CONFIG_ADDR: u16 = 0x0cf8;
@@ -25,15 +30,6 @@ const QEMU_EDU_DEVICE_ID: u16 = 0x11e8;
 
 const QEMU_TESTDEV_VENDOR_ID: u16 = 0x1b36;
 const QEMU_IOMMU_TESTDEV_ID: u16 = 0x0014;
-
-pub const PCI_OBJ_VIRTIO_BLK: usize = 0;
-pub const PCI_OBJ_VIRTIO_RNG: usize = 1;
-pub const PCI_OBJ_VIRTIO_GPU: usize = 2;
-pub const PCI_OBJ_QEMU_EDU: usize = 3;
-pub const PCI_OBJ_IVSHMEM: usize = 4;
-pub const PCI_OBJ_IOMMU_TEST: usize = 5;
-pub const PCI_OBJ_DISPLAY_AUX: usize = 6;
-pub(crate) const PCI_DEV_COUNT: usize = 7;
 
 const PCI_CAP_ID_MSI: u8 = 0x05;
 const PCI_CAP_ID_VNDR: u8 = 0x09;
@@ -71,6 +67,7 @@ pub(crate) struct ValidatedVirtioPci {
     pub func: u8,
     pub bar_idx: u8,
     pub is_virtio: bool,
+    pub preserve_active_gop: bool,
     pub phys_base: u64,
     pub num_pages: u16,
     pub msi_cap_off: u8,
@@ -89,6 +86,7 @@ impl ValidatedVirtioPci {
         func: 0,
         bar_idx: 0,
         is_virtio: false,
+        preserve_active_gop: false,
         phys_base: 0,
         num_pages: 0,
         msi_cap_off: 0,
@@ -247,6 +245,81 @@ fn match_managed_pci_slot(vendor_id: u16, device_id: u16) -> Option<(usize, bool
     }
 }
 
+fn read_bars_readonly(bus: u8, dev: u8, func: u8) -> [PciBarDesc; 6] {
+    let mut raw = [0u32; 6];
+    for (i, slot) in raw.iter_mut().enumerate() {
+        *slot = pci_read_u32(bus, dev, func, 0x10 + (i as u8) * 4);
+    }
+    let mut out = [PciBarDesc::UNUSED; 6];
+    let mut i = 0usize;
+    while i < 6 {
+        let lo = raw[i];
+        if (lo & 1) != 0 {
+            let port = (lo & !0x3) as u64;
+            if port != 0 {
+                out[i] = PciBarDesc {
+                    kind: PciBarKind::IoPort,
+                    base_phys: port,
+                    size_bytes: 0,
+                    prefetchable: false,
+                    above_4g: false,
+                };
+            }
+            i += 1;
+            continue;
+        }
+        let is_64 = ((lo >> 1) & 0x3) == 2 && i + 1 < 6;
+        let base = if is_64 {
+            ((raw[i + 1] as u64) << 32) | ((lo & !0xf) as u64)
+        } else {
+            (lo & !0xf) as u64
+        };
+        if base != 0 {
+            let desc = PciBarDesc {
+                kind: if is_64 { PciBarKind::Mem64 } else { PciBarKind::Mem32 },
+                base_phys: base,
+                size_bytes: PAGE_SIZE as u64,
+                prefetchable: (lo & (1 << 3)) != 0,
+                above_4g: base >= 0x0000_0001_0000_0000,
+            };
+            out[i] = if verify_bar_non_ram(desc) {
+                desc
+            } else {
+                PciBarDesc::UNUSED
+            };
+            if is_64 {
+                out[i + 1] = PciBarDesc {
+                    kind: PciBarKind::UpperHalfOf64,
+                    ..PciBarDesc::UNUSED
+                };
+                i += 2;
+                continue;
+            }
+        } else if is_64 {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn is_active_gop_display(bus: u8, subclass: u8, ro_bars: &[PciBarDesc; 6]) -> bool {
+    let Some(fb) = crate::display::framebuffer_summary() else {
+        return false;
+    };
+    for bar in ro_bars.iter() {
+        if bar.is_mmio()
+            && bar.base_phys != 0
+            && fb.phys_base >= bar.base_phys
+            && fb.phys_base < bar.base_phys.saturating_add(512 * 1024 * 1024)
+        {
+            return true;
+        }
+    }
+    bus == 0 && subclass == 0x00 && ro_bars.iter().all(|b| !b.is_mmio())
+}
+
 pub(crate) fn probe_pci_function(
     bus: u8,
     dev: u8,
@@ -255,36 +328,42 @@ pub(crate) fn probe_pci_function(
     let id = pci_read_u32(bus, dev, func, 0x00);
     let vendor_id = (id & 0xffff) as u16;
     let device_id = (id >> 16) as u16;
-    let (slot_idx, is_virtio) = if let Some(slot) = match_managed_pci_slot(vendor_id, device_id) {
-        slot
-    } else {
-        // Generic display auxiliary controller discovery (`class_code == 0x03`, zero vendor IDs in kernel).
-        let class_rev = pci_read_u32(bus, dev, func, 0x08);
-        if ((class_rev >> 24) as u8) != 0x03 {
-            return None;
-        }
-        let subclass = ((class_rev >> 16) & 0xff) as u8;
-        let raw0 = pci_read_u32(bus, dev, func, 0x10);
-        if (raw0 & 0x1) != 0 {
-            return None;
-        }
-        let bar0_phys = if (raw0 & 0x6) == 0x4 {
-            let raw1 = pci_read_u32(bus, dev, func, 0x14);
-            ((raw1 as u64) << 32) | ((raw0 as u64) & !0xfu64)
-        } else {
-            (raw0 as u64) & !0xfu64
-        };
-        if let Some(fb) = crate::display::framebuffer_summary() {
-            if bar0_phys != 0 && bar0_phys == fb.phys_base {
-                return None;
-            }
-        } else if subclass == 0x00 {
-            return None;
-        }
-        (PCI_OBJ_DISPLAY_AUX, false)
-    };
+    let class_rev = pci_read_u32(bus, dev, func, 0x08);
+    let class_code = (class_rev >> 24) as u8;
+    let subclass = ((class_rev >> 16) & 0xff) as u8;
+    let prog_if = ((class_rev >> 8) & 0xff) as u8;
 
-    let bars = probe_function_bars(bus, dev, func);
+    let mut ro_bars_cache: Option<[PciBarDesc; 6]> = None;
+    let (slot_idx, is_virtio, preserve_active_gop) =
+        if let Some((slot, v)) = match_managed_pci_slot(vendor_id, device_id) {
+            (slot, v, false)
+        } else {
+            match (class_code, subclass, prog_if) {
+                (0x03, _, _) => {
+                    let ro = read_bars_readonly(bus, dev, func);
+                    let active_gop = is_active_gop_display(bus, subclass, &ro);
+                    ro_bars_cache = Some(ro);
+                    if active_gop {
+                        set_active_gop_bdf(bus, dev, func);
+                        (PCI_OBJ_IGPU, false, true)
+                    } else if subclass == 0x00 && !crate::display::is_framebuffer_available() {
+                        return None;
+                    } else {
+                        (PCI_OBJ_DISPLAY_AUX, false, false)
+                    }
+                }
+                (0x0c, 0x03, 0x30) => (PCI_OBJ_XHCI, false, false),
+                (0x01, 0x08, 0x02) => (PCI_OBJ_NVME, false, false),
+                (0x02, 0x00, _) => (PCI_OBJ_NET, vendor_id == VIRTIO_VENDOR_ID, false),
+                _ => return None,
+            }
+        };
+
+    let bars = if preserve_active_gop {
+        ro_bars_cache.unwrap_or_else(|| read_bars_readonly(bus, dev, func))
+    } else {
+        probe_function_bars(bus, dev, func)
+    };
     let status = pci_read_u16(bus, dev, func, 0x06);
 
     let mut common: Option<(u8, u32, u32)> = None;
@@ -307,19 +386,23 @@ pub(crate) fn probe_pci_function(
             let next_ptr = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(1)) & 0xfc;
             match cap_id {
                 PCI_CAP_ID_MSI if msi_cap_off == 0 => {
-                    let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
-                    pci_write_u16(bus, dev, func, cap_ptr.wrapping_add(2), ctrl & !0x0001);
+                    if !preserve_active_gop {
+                        let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
+                        pci_write_u16(bus, dev, func, cap_ptr.wrapping_add(2), ctrl & !0x0001);
+                    }
                     msi_cap_off = cap_ptr;
                 }
                 PCI_CAP_ID_MSIX if msix_cap_off == 0 => {
                     let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
-                    pci_write_u16(
-                        bus,
-                        dev,
-                        func,
-                        cap_ptr.wrapping_add(2),
-                        (ctrl & !(1 << 15)) | (1 << 14),
-                    );
+                    if !preserve_active_gop {
+                        pci_write_u16(
+                            bus,
+                            dev,
+                            func,
+                            cap_ptr.wrapping_add(2),
+                            (ctrl & !(1 << 15)) | (1 << 14),
+                        );
+                    }
                     let tbl = pci_read_u32(bus, dev, func, cap_ptr.wrapping_add(4));
                     let bir = (tbl & 0x7) as u8;
                     let off = tbl & !0x7;
@@ -396,16 +479,24 @@ pub(crate) fn probe_pci_function(
             }
         }
         (c_bar, bdesc.base_phys, pages as u16, c_off, n_off, n_mult, i_off, d_off)
+    } else if preserve_active_gop {
+        if let Some((first_idx, first_bar)) = bars.iter().enumerate().find(|(_, b)| b.is_mmio()) {
+            (first_idx as u8, first_bar.base_phys, 1u16, 0, 0, 0, 0, 0)
+        } else {
+            (0, 0, 0, 0, 0, 0, 0, 0)
+        }
     } else {
-        // Generic non-VirtIO PCI device (`edu`, `ivshmem-plain`, `iommu-testdev`): must have >=1 valid MMIO BAR.
+        // Generic non-VirtIO PCI device (`edu`, `ivshmem-plain`, `iommu-testdev`, `xhci`, `nvme`, `net`): must have >=1 valid MMIO BAR.
         let (first_idx, first_bar) = bars.iter().enumerate().find(|(_, b)| b.is_mmio())?;
         let pages = ((first_bar.size_bytes.div_ceil(PAGE_SIZE as u64)) as usize).clamp(1, MAX_MMIO_BAR_PAGES);
         (first_idx as u8, first_bar.base_phys, pages as u16, 0, 0, 0, 0, 0)
     };
 
-    // Keep Bus Master disabled until an authorized Ring 3 driver calls `SYS_DEV_MAP`.
-    let cmd = pci_read_u16(bus, dev, func, 0x04);
-    pci_write_u16(bus, dev, func, 0x04, (cmd & !0x0004) | 0x0402);
+    if !preserve_active_gop {
+        // Keep Bus Master disabled until an authorized Ring 3 driver calls `SYS_DEV_MAP`.
+        let cmd = pci_read_u16(bus, dev, func, 0x04);
+        pci_write_u16(bus, dev, func, 0x04, (cmd & !0x0004) | 0x0402);
+    }
 
     let bdf = ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
     Some((
@@ -416,6 +507,7 @@ pub(crate) fn probe_pci_function(
             func,
             bar_idx,
             is_virtio,
+            preserve_active_gop,
             phys_base,
             num_pages: pages,
             msi_cap_off,

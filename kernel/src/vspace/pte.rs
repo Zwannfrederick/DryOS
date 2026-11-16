@@ -338,6 +338,7 @@ pub const KERNEL_VTD_MAX_PAGES: usize = 4;
 pub const KERNEL_MSIX_MMIO_OFFSET: u64 = 0x0010_0000;
 pub const KERNEL_MSIX_MAX_PAGES: usize = 4;
 pub const KERNEL_VIRTIO_COMMON_MMIO_OFFSET: u64 = 0x0020_0000;
+pub const KERNEL_GOP_DIAG_BASE: u64 = KERNEL_MMIO_DYN_BASE + 0x0200_0000;
 
 #[inline]
 pub const fn vtd_unit_vaddr(unit_idx: usize) -> u64 {

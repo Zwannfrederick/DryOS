@@ -461,7 +461,7 @@ pub fn spurious_apic_irqs() -> u64 {
     SPURIOUS_APIC_IRQS.load(Ordering::Acquire)
 }
 
-fn measure_one_5ms_pit_ch2_sample() -> (u64, u64) {
+fn measure_one_5ms_pit_ch2_sample() -> Option<(u64, u64)> {
     apic_write(MSR_X2APIC_TIMER_DIV, MMIO_TIMER_DIV, TIMER_DIV_BY_16);
     apic_write(
         MSR_X2APIC_LVT_TIMER,
@@ -470,7 +470,7 @@ fn measure_one_5ms_pit_ch2_sample() -> (u64, u64) {
     );
 
     // SAFETY: Polls standard i8254 PIT Channel 2 (`0x61`, `0x43`, `0x42`) with speaker muted.
-    let (apic_cur, tsc_delta) = unsafe {
+    let res = unsafe {
         let orig_61 = inb(0x61);
         outb(0x61, orig_61 & !0x03); // GATE2=0, SPKR=0
         outb(0x43, 0xb0); // Ch2, lobyte/hibyte, Mode 0 (terminal count), binary
@@ -484,9 +484,13 @@ fn measure_one_5ms_pit_ch2_sample() -> (u64, u64) {
         outb(0x61, (orig_61 & !0x02) | 0x01); // Raise GATE2=1 (starts Ch2 countdown)
 
         let mut polls = 0u64;
+        let mut timed_out = false;
         while (inb(0x61) & 0x20) == 0 {
             polls += 1;
-            assert!(polls < PIT_MAX_POLL_ITERS, "PIT Channel 2 terminal-count calibration timeout");
+            if polls >= PIT_MAX_POLL_ITERS {
+                timed_out = true;
+                break;
+            }
             core::hint::spin_loop();
         }
 
@@ -494,17 +498,22 @@ fn measure_one_5ms_pit_ch2_sample() -> (u64, u64) {
         let t1 = rdtsc();
         apic_write(MSR_X2APIC_TIMER_INIT, MMIO_TIMER_INIT, 0);
         outb(0x61, orig_61 & !0x03);
-        (cur, t1.wrapping_sub(t0))
+        if timed_out {
+            None
+        } else {
+            Some((cur, t1.wrapping_sub(t0)))
+        }
     };
 
+    let (apic_cur, tsc_delta) = res?;
     let apic_elapsed = u32::MAX.wrapping_sub(apic_cur) as u64;
     let ticks_per_ms = (apic_elapsed * PIT_FREQ_HZ) / ((PIT_5MS_TICKS as u64) * 1_000);
     let tsc_khz = (tsc_delta * PIT_FREQ_HZ) / ((PIT_5MS_TICKS as u64) * 1_000);
-    (ticks_per_ms, tsc_khz)
+    Some((ticks_per_ms, tsc_khz))
 }
 
 /// Detect APIC/`x2APIC` capabilities, enforce fallback policy, initialize BSP Local APIC,
-/// and calibrate the Local APIC timer over 3 PIT Channel 2 hardware reference windows.
+/// and calibrate the Local APIC timer over 3 PIT Channel 2 hardware reference windows (with CPUID fallback).
 pub fn detect_and_init_bsp_apic(
     hhdm_offset: u64,
     kernel_phys_base: u64,
@@ -513,7 +522,17 @@ pub fn detect_and_init_bsp_apic(
 ) -> ApicCalibrationSummary {
     mask_legacy_8259_pic();
 
-    let (has_apic, has_x2apic, has_tsc_deadline, has_arat, has_inv_tsc, crystal_hz, base_mhz) = {
+    let (
+        has_apic,
+        has_x2apic,
+        has_tsc_deadline,
+        has_arat,
+        has_inv_tsc,
+        cpuid_15_denom,
+        cpuid_15_numer,
+        crystal_hz,
+        base_mhz,
+    ) = {
         let leaf0 = __cpuid(0);
         let leaf1 = __cpuid(1);
         let apic = (leaf1.edx & (1 << 9)) != 0;
@@ -530,17 +549,18 @@ pub fn detect_and_init_bsp_apic(
         } else {
             false
         };
-        let crystal = if leaf0.eax >= 0x15 {
-            __cpuid_count(0x15, 0).ecx
+        let (denom, numer, crystal) = if leaf0.eax >= 0x15 {
+            let l15 = __cpuid_count(0x15, 0);
+            (l15.eax, l15.ebx, l15.ecx)
         } else {
-            0
+            (0, 0, 0)
         };
         let b_mhz = if leaf0.eax >= 0x16 {
             __cpuid_count(0x16, 0).eax & 0xffff
         } else {
             0
         };
-        (apic, x2apic, tsc_dl, arat, inv_tsc, crystal, b_mhz)
+        (apic, x2apic, tsc_dl, arat, inv_tsc, denom, numer, crystal, b_mhz)
     };
 
     if !has_apic {
@@ -570,19 +590,38 @@ pub fn detect_and_init_bsp_apic(
     ACTIVE_APIC_MODE.store(chosen_mode as u8, Ordering::Release);
     init_cpu_lapic(0);
 
-    let (s0, k0) = measure_one_5ms_pit_ch2_sample();
-    let (s1, k1) = measure_one_5ms_pit_ch2_sample();
-    let (s2, k2) = measure_one_5ms_pit_ch2_sample();
-
-    let mut sorted_ticks = [s0, s1, s2];
-    sorted_ticks.sort_unstable();
-    let mut sorted_tsc = [k0, k1, k2];
-    sorted_tsc.sort_unstable();
-
-    // PIT Channel 2 Mode 0 `OUT2` cannot assert early (< 5.000 ms); host vCPU preemption only
-    // adds positive post-terminal-count read latency, so the minimum of 3 windows is tightest.
-    let best_ticks_ms = sorted_ticks[0];
-    let best_tsc_khz = sorted_tsc[0];
+    let ([s0, s1, s2], best_ticks_ms, best_tsc_khz) = match (
+        measure_one_5ms_pit_ch2_sample(),
+        measure_one_5ms_pit_ch2_sample(),
+        measure_one_5ms_pit_ch2_sample(),
+    ) {
+        (Some((t0, k0)), Some((t1, k1)), Some((t2, k2))) => {
+            let mut sorted_ticks = [t0, t1, t2];
+            sorted_ticks.sort_unstable();
+            let mut sorted_tsc = [k0, k1, k2];
+            sorted_tsc.sort_unstable();
+            ([t0, t1, t2], sorted_ticks[0], sorted_tsc[0])
+        }
+        _ => {
+            // Bare-metal fallback when PIT Channel 2 gate/timer is disabled by firmware:
+            // Intel SDM Vol. 3A 18.7.3 CPUID 0x15 crystal clock & CPUID 0x16 base frequency.
+            let crys = if crystal_hz > 0 { crystal_hz as u64 } else { 24_000_000 };
+            let lapic_per_ms = crys / (16 * 1_000);
+            let tsc_khz = if crystal_hz > 0 && cpuid_15_denom > 0 && cpuid_15_numer > 0 {
+                ((crys * (cpuid_15_numer as u64)) / (cpuid_15_denom as u64)) / 1_000
+            } else if base_mhz > 0 {
+                (base_mhz as u64) * 1_000
+            } else {
+                2_400_000
+            };
+            crate::serial_println!(
+                "[DRY-APIC] WARN: PIT Ch2 unavailable; using CPUID fallback lapic_ticks_ms={} tsc_khz={}",
+                lapic_per_ms,
+                tsc_khz
+            );
+            ([lapic_per_ms; 3], lapic_per_ms, tsc_khz)
+        }
+    };
     assert!(
         (100..=50_000_000).contains(&best_ticks_ms),
         "Calibrated Local APIC ticks_per_ms={} outside sane hardware bounds",

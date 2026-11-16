@@ -18,9 +18,11 @@ mod ipc;
 mod irq;
 mod limine;
 mod mem_verify;
+mod panic_fb;
 mod pci;
 mod pci_bar;
 mod pci_hw_test;
+mod pci_slots;
 mod percpu;
 mod pmm;
 mod power;
@@ -252,27 +254,45 @@ extern "C" fn bsp_kmain() -> ! {
         smp.total_work_ops
     );
 
-    let sched_fault = sched::tests::SchedFaultTest::from_cmdline(cmdline);
-    let sched_summary = sched::tests::verify_cooperative_scheduler(smp.cpu_count, sched_fault);
-    serial_println!(
-        "[DRY-SCHED] PASS: cpus={} spawned={} exited={} recycled_slots={} ctx_switches={} migrations={} park_rounds={} work_units={} stale_wakes_rejected={} orphan_ready=0",
-        sched_summary.cpus,
-        sched_summary.spawned,
-        sched_summary.exited,
-        sched_summary.recycled_slots,
-        sched_summary.ctx_switches,
-        sched_summary.migrations,
-        sched_summary.park_rounds,
-        sched_summary.work_units,
-        sched_summary.stale_wakes_rejected,
-    );
-
+    let fast_live_boot = cmdline.contains("live_usb=1") && !cmdline.contains("diag_selftest=1");
     let irq_only_stage = cmdline.contains("preempt_stage=irq_only");
-    let preempt_fault = sched::preempt_tests::PreemptFaultTest::from_cmdline(cmdline);
-    sched::preempt_tests::verify_preemptive_scheduler(smp.cpu_count, irq_only_stage, preempt_fault);
+
+    if fast_live_boot {
+        sched::init_scheduler(smp.cpu_count);
+        sched::preempt_tests::verify_preemptive_scheduler(
+            smp.cpu_count,
+            true,
+            sched::preempt_tests::PreemptFaultTest::None,
+        );
+        serial_println!(
+            "[DRY-LIVEBOOT] Fast deterministic hardware path: cpus={} uart={} skipped_synthetic_burnin=true",
+            smp.cpu_count,
+            serial::is_uart_hw_present()
+        );
+    } else {
+        let sched_fault = sched::tests::SchedFaultTest::from_cmdline(cmdline);
+        let sched_summary = sched::tests::verify_cooperative_scheduler(smp.cpu_count, sched_fault);
+        serial_println!(
+            "[DRY-SCHED] PASS: cpus={} spawned={} exited={} recycled_slots={} ctx_switches={} migrations={} park_rounds={} work_units={} stale_wakes_rejected={} orphan_ready=0",
+            sched_summary.cpus,
+            sched_summary.spawned,
+            sched_summary.exited,
+            sched_summary.recycled_slots,
+            sched_summary.ctx_switches,
+            sched_summary.migrations,
+            sched_summary.park_rounds,
+            sched_summary.work_units,
+            sched_summary.stale_wakes_rejected,
+        );
+
+        let preempt_fault = sched::preempt_tests::PreemptFaultTest::from_cmdline(cmdline);
+        sched::preempt_tests::verify_preemptive_scheduler(smp.cpu_count, irq_only_stage, preempt_fault);
+    }
     if !irq_only_stage {
-        let pmm_fault = pmm::tests::PmmFaultTest::from_cmdline(cmdline);
-        pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
+        if !fast_live_boot {
+            let pmm_fault = pmm::tests::PmmFaultTest::from_cmdline(cmdline);
+            pmm::tests::verify_pmm_and_untyped(smp.cpu_count, apic_cal.tsc_mhz, pmm_fault);
+        }
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
         iommu::init_vtd_units();
@@ -403,12 +423,20 @@ fn panic(info: &PanicInfo<'_>) -> ! {
             loc.column(),
             info.message()
         ));
+        panic_fb::render_fatal_screen(
+            "DRY OS KERNEL PANIC - HALTED SAFELY",
+            format_args!("cpu={} {}:{}:{} {}", cpu_id, loc.file(), loc.line(), loc.column(), info.message()),
+        );
     } else {
         serial::emergency_print(format_args!(
             "\r\n[DRY-PANIC] cpu={} <no-location> — {}\r\n",
             cpu_id,
             info.message()
         ));
+        panic_fb::render_fatal_screen(
+            "DRY OS KERNEL PANIC - HALTED SAFELY",
+            format_args!("cpu={} <no-location> {}", cpu_id, info.message()),
+        );
     }
     qemu_exit(QEMU_EXIT_PANIC);
 }

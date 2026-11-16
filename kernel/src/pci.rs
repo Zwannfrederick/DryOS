@@ -14,7 +14,6 @@
 //!    `Command.BME = 0` in hardware *before* unpinning DMA frames and reclaiming memory.
 
 use core::cell::UnsafeCell;
-use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::{irq_restore, irq_save_cli};
@@ -29,9 +28,8 @@ use crate::iommu::{attach_device_domain, detach_and_scrub_domain, map_dma_range,
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci_bar::{
     DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW, DEV_MAP_OP_MASK, DEV_MAP_OP_QUERY_BARS,
-    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G, PCI_BAR_FLAG_IO, PCI_BAR_FLAG_MMIO,
-    PCI_BAR_FLAG_PREFETCHABLE, PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_VIRTIO,
-    PciBarDesc, PciBarKind,
+    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_IO, PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE,
+    PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_VIRTIO,
 };
 use crate::pmm::{
     adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
@@ -50,13 +48,20 @@ mod pci_cfg;
 #[path = "pci_window.rs"]
 mod pci_window;
 
-pub use pci_cfg::{
-    UserVirtioPciInfo, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IOMMU_TEST, PCI_OBJ_IVSHMEM, PCI_OBJ_QEMU_EDU,
-    PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG,
+pub use crate::pci_slots::{
+    active_gop_bdf, latched_boot_pci_funcs, pci_topology_summary, BootPciFuncRecord,
+    BOOT_PCI_ENUM_OFFSET, MAX_BOOT_PCI_FUNCS, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU,
+    PCI_OBJ_IVSHMEM, PCI_OBJ_NET, PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK,
+    PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG, PCI_OBJ_XHCI,
 };
+pub(crate) use crate::pci_slots::{
+    encode_bar_desc_flags, publish_boot_pci_count, push_boot_pci_record, record_topology_hints,
+    slot_label, PCI_DEV_COUNT,
+};
+pub use pci_cfg::UserVirtioPciInfo;
 pub(crate) use pci_cfg::{
     pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16, pci_write_u32, probe_all_bars_raw,
-    probe_pci_function, ValidatedVirtioPci, PCI_DEV_COUNT,
+    probe_pci_function, ValidatedVirtioPci,
 };
 
 #[inline]
@@ -64,7 +69,7 @@ pub fn pci_cfg_probe_all_bars_raw(bus: u8, dev: u8, func: u8) -> ([u32; 6], [u32
     probe_all_bars_raw(bus, dev, func)
 }
 
-const MAX_DMA_PINS_PER_DEV: usize = 16;
+const MAX_DMA_PINS_PER_DEV: usize = 32;
 const DMA_ALLOC_FLAG_2M: u64 = 1;
 
 struct PciVirtioSlot {
@@ -148,99 +153,14 @@ pub fn pci_dma_telemetry() -> (u64, u64) {
     (denied, quiesces)
 }
 
-pub const BOOT_PCI_ENUM_OFFSET: usize = 0x0800;
-pub const MAX_BOOT_PCI_FUNCS: usize = 64;
-
-/// Sanitized 32-byte PCI function descriptor published read-only in boot info (0 phys addrs).
-#[repr(C, align(8))]
-#[derive(Clone, Copy, Default)]
-pub struct BootPciFuncRecord {
-    pub bus_dev_fn: u16,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub subsys_vendor_id: u16,
-    pub subsys_id: u16,
-    pub revision_id: u8,
-    pub prog_if: u8,
-    pub subclass: u8,
-    pub class_code: u8,
-    pub managed_slot: u8,
-    pub dev_flags: u8,
-    pub bar_flags: [u8; 6],
-    pub irq_pin: u8,
-    pub _pad: u8,
-    pub bar0_size_bytes: u64,
-}
-
-const _: () = assert!(size_of::<BootPciFuncRecord>() == 32);
-
-struct BootPciEnumTable {
-    recs: UnsafeCell<[BootPciFuncRecord; MAX_BOOT_PCI_FUNCS]>,
-    count: AtomicU32,
-}
-
-// SAFETY: Populated once on BSP during `init_pci_devices()` before Ring-3 launch.
-unsafe impl Sync for BootPciEnumTable {}
-
-static BOOT_PCI_ENUM: BootPciEnumTable = BootPciEnumTable {
-    recs: UnsafeCell::new([BootPciFuncRecord {
-        bus_dev_fn: 0,
-        vendor_id: 0,
-        device_id: 0,
-        subsys_vendor_id: 0,
-        subsys_id: 0,
-        revision_id: 0,
-        prog_if: 0,
-        subclass: 0,
-        class_code: 0,
-        managed_slot: 0xff,
-        dev_flags: 0,
-        bar_flags: [0; 6],
-        irq_pin: 0,
-        _pad: 0,
-        bar0_size_bytes: 0,
-    }; MAX_BOOT_PCI_FUNCS]),
-    count: AtomicU32::new(0),
-};
-
-#[inline]
-pub fn latched_boot_pci_funcs() -> (&'static [BootPciFuncRecord], usize) {
-    let cnt = (BOOT_PCI_ENUM.count.load(Ordering::Acquire) as usize).min(MAX_BOOT_PCI_FUNCS);
-    // SAFETY: Immutable after `init_pci_devices()` on BSP.
-    let recs = unsafe {
-        core::slice::from_raw_parts(BOOT_PCI_ENUM.recs.get().cast::<BootPciFuncRecord>(), cnt)
-    };
-    (recs, cnt)
-}
-
-#[inline]
-fn encode_bar_desc_flags(bar: PciBarDesc) -> u8 {
-    match bar.kind {
-        PciBarKind::IoPort => PCI_BAR_FLAG_IO as u8,
-        PciBarKind::Mem32 | PciBarKind::Mem64 => {
-            let mut f = PCI_BAR_FLAG_MMIO as u8;
-            if bar.kind == PciBarKind::Mem64 {
-                f |= PCI_BAR_FLAG_64BIT as u8;
-            }
-            if bar.prefetchable {
-                f |= PCI_BAR_FLAG_PREFETCHABLE as u8;
-            }
-            if bar.above_4g {
-                f |= PCI_BAR_FLAG_ABOVE_4G as u8;
-            }
-            f
-        }
-        _ => 0,
-    }
-}
-
-/// Enumerate PCI buses `0..=4` on the BSP after `init_pmm` to discover VirtIO and test controllers.
+/// Enumerate PCI buses `0..=15` on the BSP after `init_pmm` to discover VirtIO, USB/NVMe/NET,
+/// GPU/Display, and test controllers without hardcoding host vendor drivers.
 #[inline(never)]
 pub fn init_pci_devices() -> bool {
     crate::pci_bar::run_bar64_unit_tests();
     let mut found = 0usize;
     let mut rec_cnt = 0usize;
-    for bus in 0..=4u8 {
+    for bus in 0..=15u8 {
         for dev in 0..32u8 {
             let id0 = pci_read_u32(bus, dev, 0, 0x00);
             if (id0 & 0xffff) == 0xffff {
@@ -299,6 +219,7 @@ pub fn init_pci_devices() -> bool {
                         }
                     }
                 }
+                record_topology_hints(&rec);
 
                 if let Some((slot_idx, vdev)) = probe_pci_function(bus, dev, func) {
                     rec.managed_slot = slot_idx as u8;
@@ -322,16 +243,7 @@ pub fn init_pci_devices() -> bool {
                         }
                         PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
                         found += 1;
-                        let label = match slot_idx {
-                            PCI_OBJ_VIRTIO_BLK => "virtio-blk",
-                            PCI_OBJ_VIRTIO_RNG => "virtio-rng",
-                            PCI_OBJ_VIRTIO_GPU => "virtio-gpu",
-                            PCI_OBJ_QEMU_EDU => "qemu-edu",
-                            PCI_OBJ_IVSHMEM => "ivshmem",
-                            PCI_OBJ_IOMMU_TEST => "iommu-testdev",
-                            PCI_OBJ_DISPLAY_AUX => "display-aux",
-                            _ => "pci",
-                        };
+                        let label = slot_label(slot_idx);
                         let bar64_cnt = vdev
                             .bars
                             .iter()
@@ -361,17 +273,12 @@ pub fn init_pci_devices() -> bool {
                         );
                     }
                 }
-                if rec_cnt < MAX_BOOT_PCI_FUNCS {
-                    // SAFETY: Single-threaded BSP init before `BOOT_PCI_ENUM.count` publish.
-                    unsafe {
-                        (*BOOT_PCI_ENUM.recs.get())[rec_cnt] = rec;
-                    }
-                    rec_cnt += 1;
-                }
+                push_boot_pci_record(rec_cnt, rec);
+                rec_cnt += 1;
             }
         }
     }
-    BOOT_PCI_ENUM.count.store(rec_cnt as u32, Ordering::Release);
+    publish_boot_pci_count(rec_cnt);
     if found == 0 {
         serial_println!("[DRY-PCI] No managed PCI controllers attached");
     }
@@ -433,6 +340,9 @@ pub(crate) fn for_each_kernel_shadow_mmio_page(mut f: impl FnMut(u64, u64)) {
         let Some(vdev) = validated_pci_slot(slot_idx) else {
             continue;
         };
+        if vdev.preserve_active_gop {
+            continue;
+        }
         if vdev.msix_cap_off != 0 {
             let bar = vdev.bars[vdev.msix_table_bir as usize];
             if bar.is_mmio() {
@@ -501,6 +411,9 @@ pub(super) fn release_claimed_pci_slot(dev_idx: usize, claimed_new: bool) {
 }
 
 pub(super) fn enable_pci_bme(vdev: &ValidatedVirtioPci) {
+    if vdev.preserve_active_gop {
+        return;
+    }
     let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
     pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, cmd | 0x0406);
 }
@@ -510,26 +423,29 @@ fn quiesce_slot_for_cspace(dev_idx: usize, cspace_id: CSpaceId) {
     if cspace_id == 0 || slot.owner_cspace.load(Ordering::Acquire) != cspace_id {
         return;
     }
-    crate::irq::msi::quiesce_pci_msi_for_dev(dev_idx);
-    if let Some(vdev) = validated_pci_slot(dev_idx) {
-        if vdev.is_virtio && ((vdev.info.common_off as usize) & 0xfff) <= 0xfec {
-            let common_va =
-                pci_virtio_common_vaddr(dev_idx) + ((vdev.info.common_off as u64) & 0xfff);
-            // SAFETY: `common_va + 0x14` is `common_cfg.device_status` on the pre-mapped `UC` shadow page (`PML4[385]`).
-            unsafe {
-                core::ptr::write_volatile((common_va + 0x14) as *mut u8, 0);
-                for _ in 0..1024 {
-                    if core::ptr::read_volatile((common_va + 0x14) as *const u8) == 0 {
-                        break;
+    let is_active_gop = validated_pci_slot(dev_idx).is_some_and(|v| v.preserve_active_gop);
+    if !is_active_gop {
+        crate::irq::msi::quiesce_pci_msi_for_dev(dev_idx);
+        if let Some(vdev) = validated_pci_slot(dev_idx) {
+            if vdev.is_virtio && ((vdev.info.common_off as usize) & 0xfff) <= 0xfec {
+                let common_va =
+                    pci_virtio_common_vaddr(dev_idx) + ((vdev.info.common_off as u64) & 0xfff);
+                // SAFETY: `common_va + 0x14` is `common_cfg.device_status` on the pre-mapped `UC` shadow page (`PML4[385]`).
+                unsafe {
+                    core::ptr::write_volatile((common_va + 0x14) as *mut u8, 0);
+                    for _ in 0..1024 {
+                        if core::ptr::read_volatile((common_va + 0x14) as *const u8) == 0 {
+                            break;
+                        }
+                        core::hint::spin_loop();
                     }
-                    core::hint::spin_loop();
                 }
             }
+            let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
+            // Clear Bus Master Enable (`bit 2 = 0`) and keep legacy INTx masked (`bit 10 = 1`).
+            pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, (cmd & !0x0004) | 0x0402);
+            let _ = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
         }
-        let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
-        // Clear Bus Master Enable (`bit 2 = 0`) and keep legacy INTx masked (`bit 10 = 1`).
-        pci_write_u16(vdev.bus, vdev.dev, vdev.func, 0x04, (cmd & !0x0004) | 0x0402);
-        let _ = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
     }
     with_dma_lock(dev_idx, |slot, pins| {
         if slot.owner_cspace.load(Ordering::Acquire) == cspace_id {

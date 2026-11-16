@@ -4,6 +4,8 @@
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::iommu::dmar::{DrhdUnit, ParsedDmar};
+use crate::pci::PCI_DEV_COUNT;
 use crate::pmm::{
     alloc_pages, free_pages, phys_to_hhdm, AllocFlags, FrameHandle, PageOrder, PAGE_SIZE,
 };
@@ -11,16 +13,18 @@ use crate::security::{SecDomain, SecFlags, SecLabel};
 
 pub(super) const VTD_KERNEL_LABEL: SecLabel =
     SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0);
+pub(super) const BOOT_RMRR_DID: u16 = (PCI_DEV_COUNT + 1) as u16;
 
 pub(super) const SLPT_R: u64 = 1 << 0;
 pub(super) const SLPT_W: u64 = 1 << 1;
 pub(super) const SLPT_PHYS_MASK: u64 = 0x000f_ffff_ffff_f000;
-pub(super) const MAX_BUSES_PER_UNIT: usize = 8;
-pub(super) const MAX_PT_FRAMES_PER_DOMAIN: usize = 96;
+pub(super) const MAX_BUSES_PER_UNIT: usize = 16;
+pub(super) const MAX_PT_FRAMES_PER_DOMAIN: usize = 256;
 
 #[derive(Clone, Copy)]
 pub(super) struct BusContextSlot {
     pub(super) active: bool,
+    pub(super) rmrr_pinned: bool,
     pub(super) bus: u8,
     pub(super) attach_count: u8,
     pub(super) frame: Option<FrameHandle>,
@@ -30,6 +34,7 @@ impl BusContextSlot {
     pub(super) const fn empty() -> Self {
         Self {
             active: false,
+            rmrr_pinned: false,
             bus: 0,
             attach_count: 0,
             frame: None,
@@ -40,6 +45,8 @@ impl BusContextSlot {
 #[derive(Clone, Copy)]
 pub(super) struct VtdUnit {
     pub(super) active: bool,
+    pub(super) translation_enabled: bool,
+    pub(super) gop_scanout_deferred: bool,
     pub(super) mmio_virt: u64,
     pub(super) mmio_bytes: usize,
     pub(super) segment: u16,
@@ -59,6 +66,8 @@ impl VtdUnit {
     pub(super) const fn empty() -> Self {
         Self {
             active: false,
+            translation_enabled: false,
+            gop_scanout_deferred: false,
             mmio_virt: 0,
             mmio_bytes: 0,
             segment: 0,
@@ -232,6 +241,7 @@ pub(super) fn get_or_alloc_bus_ctx(unit: &mut VtdUnit, bus: u8) -> Result<usize,
     }
     unit.ctx_buses[idx] = BusContextSlot {
         active: true,
+        rmrr_pinned: false,
         bus,
         attach_count: 0,
         frame: Some(fh),
@@ -241,7 +251,7 @@ pub(super) fn get_or_alloc_bus_ctx(unit: &mut VtdUnit, bus: u8) -> Result<usize,
 
 pub(super) fn release_bus_ctx_if_idle(unit: &mut VtdUnit, bus: u8) -> Option<FrameHandle> {
     let idx = unit.ctx_buses.iter().position(|c| c.active && c.bus == bus)?;
-    if unit.ctx_buses[idx].attach_count > 0 {
+    if unit.ctx_buses[idx].attach_count > 0 || unit.ctx_buses[idx].rmrr_pinned {
         return None;
     }
     if let Some(root_h) = unit.root_frame {
@@ -256,4 +266,141 @@ pub(super) fn release_bus_ctx_if_idle(unit: &mut VtdUnit, bus: u8) -> Option<Fra
     let fh = unit.ctx_buses[idx].frame.take();
     unit.ctx_buses[idx] = BusContextSlot::empty();
     fh
+}
+
+pub(crate) fn is_dedicated_gop_drhd(src: &DrhdUnit, gop_bdf: Option<(u8, u8, u8)>) -> bool {
+    if src.include_all {
+        return false;
+    }
+    let Some((gb, gd, gf)) = gop_bdf else {
+        return false;
+    };
+    (0..src.scope_count).any(|s| {
+        let sc = src.scopes[s];
+        sc.valid && sc.bus == gb && sc.dev == gd && sc.func == gf
+    })
+}
+
+fn unit_owns_bdf(dmar: &ParsedDmar, unit_idx: usize, seg: u16, bus: u8, dev: u8, func: u8) -> bool {
+    for u in 0..dmar.drhd_count {
+        let src = &dmar.drhds[u];
+        if src.segment != seg {
+            continue;
+        }
+        for s in 0..src.scope_count {
+            let sc = src.scopes[s];
+            if sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func {
+                return u == unit_idx;
+            }
+        }
+    }
+    dmar.drhds[unit_idx].include_all && dmar.drhds[unit_idx].segment == seg
+}
+
+pub(super) fn bdf_has_active_rmrr(
+    dmar: Option<&ParsedDmar>,
+    seg: u16,
+    bus: u8,
+    dev: u8,
+    func: u8,
+) -> bool {
+    let Some(d) = dmar else {
+        return false;
+    };
+    (0..d.rmrr_count).any(|r| {
+        let rmrr = &d.rmrrs[r];
+        rmrr.valid
+            && rmrr.segment == seg
+            && (0..rmrr.scope_count).any(|s| {
+                let sc = rmrr.scopes[s];
+                sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func
+            })
+    })
+}
+
+pub(super) fn write_ctx_entry(
+    ctx_hhdm: *mut u8,
+    coherent: bool,
+    dev: u8,
+    func: u8,
+    levels_4: bool,
+    did: u64,
+    sl_root_phys: u64,
+) {
+    let devfn = (((dev & 0x1f) as usize) << 3) | ((func & 0x07) as usize);
+    let aw = if levels_4 { 2u64 } else { 1u64 };
+    // SAFETY: Writing 128-bit Context Entry inside an allocated 4 KiB per-bus Context Table.
+    unsafe {
+        let ctx_ptr = (ctx_hhdm as *mut u64).add(devfn * 2);
+        write_volatile(ctx_ptr.add(1), aw | (did << 8));
+        write_volatile(ctx_ptr, sl_root_phys | 0x1);
+        flush_descriptor_cacheline(coherent, ctx_ptr as *const u8);
+    }
+}
+
+pub(super) fn premap_unit_rmrrs(
+    dmar: &ParsedDmar,
+    unit_idx: usize,
+    unit: &mut VtdUnit,
+    rmrr_dom: &mut DomainState,
+) -> bool {
+    for r in 0..dmar.rmrr_count {
+        let rmrr = &dmar.rmrrs[r];
+        if !rmrr.valid || rmrr.segment != unit.segment {
+            continue;
+        }
+        let owned = (0..rmrr.scope_count).any(|s| {
+            let sc = rmrr.scopes[s];
+            sc.valid && unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func)
+        });
+        if !owned {
+            continue;
+        }
+        if rmrr_dom.sl_root.is_none() {
+            let Ok(root_h) = alloc_pages(PageOrder::Order4KiB, VTD_KERNEL_LABEL, AllocFlags::ZERO)
+            else {
+                return false;
+            };
+            flush_entire_page(unit.coherent, root_h.hhdm_ptr());
+            rmrr_dom.sl_root = Some(root_h);
+            rmrr_dom.pt_count = 0;
+        }
+        let mut pa = rmrr.base_addr & !((PAGE_SIZE as u64) - 1);
+        let end_pa = rmrr.limit_addr & !((PAGE_SIZE as u64) - 1);
+        while pa <= end_pa {
+            if map_slpt_4k(rmrr_dom, unit.coherent, pa, unit.levels_4).is_err() {
+                free_all_domain_frames(rmrr_dom);
+                return false;
+            }
+            pa = match pa.checked_add(PAGE_SIZE as u64) {
+                Some(n) => n,
+                None => break,
+            };
+        }
+        let Some(rmrr_root) = rmrr_dom.sl_root else {
+            return false;
+        };
+        for s in 0..rmrr.scope_count {
+            let sc = rmrr.scopes[s];
+            if !sc.valid || !unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func) {
+                continue;
+            }
+            let Ok(bus_slot) = get_or_alloc_bus_ctx(unit, sc.bus) else {
+                free_all_domain_frames(rmrr_dom);
+                return false;
+            };
+            unit.ctx_buses[bus_slot].rmrr_pinned = true;
+            let ctx_hhdm = unit.ctx_buses[bus_slot].frame.unwrap().hhdm_ptr();
+            write_ctx_entry(
+                ctx_hhdm,
+                unit.coherent,
+                sc.dev,
+                sc.func,
+                unit.levels_4,
+                BOOT_RMRR_DID as u64,
+                rmrr_root.phys_addr(),
+            );
+        }
+    }
+    true
 }

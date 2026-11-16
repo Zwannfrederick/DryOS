@@ -47,7 +47,7 @@ use crate::syscall::entry::{
 use crate::vspace::pte::{is_canonical_48, USER_VADDR_LIMIT};
 use crate::vspace::{inspect_vspace_live, VSpaceHandle, VSpaceId};
 
-pub const MAX_PROCESSES: usize = 24;
+pub const MAX_PROCESSES: usize = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessHandle {

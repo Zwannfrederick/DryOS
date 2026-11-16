@@ -126,47 +126,79 @@ fn sys_cap_query_impl(
 }
 
 #[inline(never)]
-fn sys_sysinfo_impl(user_out_ptr: u64) -> Result<isize, SysError> {
-    if user_out_ptr == 0 || (user_out_ptr & 7) != 0 {
+fn copy_diag_ring_to_user(log_ptr: u64, log_cap: u64) -> Result<usize, SysError> {
+    if log_ptr == 0 || log_cap == 0 {
         return Err(SysError::Fault);
     }
-    let online = ONLINE_SCHED_CPUS.load(Ordering::Acquire);
-    let mut syscalls = 0u64;
-    for cpu in 0..online {
-        syscalls = syscalls.wrapping_add(get_percpu_by_idx(cpu).syscall_count.load(Ordering::Relaxed));
+    let max_bytes = (log_cap as usize).min(16 * 1024);
+    let mut off = 0usize;
+    let mut chunk = [0u8; 256];
+    let mut target_total = max_bytes;
+    while off < target_total {
+        let want = (target_total - off).min(chunk.len());
+        let (total_avail, n) = crate::serial::copy_diag_ring_window(max_bytes, off, &mut chunk[..want]);
+        target_total = target_total.min(total_avail);
+        if n == 0 {
+            break;
+        }
+        let dst = log_ptr.checked_add(off as u64).ok_or(SysError::Fault)?;
+        copy_to_user(dst, &chunk[..n])?;
+        off += n;
     }
-    let (tsc_mhz, uptime_ms, elapsed_tsc) = uptime_telemetry();
-    let (ext_irqs, _, _, _) = irq_telemetry();
-    let (msi_irqs, _, _) = msi_telemetry();
-    let inv = inventory();
-    let free_frames = free_global_frames_snapshot(online);
+    Ok(off)
+}
 
-    let info = UserSysInfo {
-        abi_version: DRY_SYSCALL_ABI_VERSION,
-        online_cpus: online as u32,
-        apic_mode: active_apic_mode() as u8,
-        ioapic_present: u8::from(ioapic_present()),
-        fb_present: u8::from(is_framebuffer_available()),
-        _pad0: 0,
-        tsc_mhz,
-        uptime_ms,
-        elapsed_tsc,
-        timer_irqs: GLOBAL_TIMER_IRQS.load(Ordering::Relaxed),
-        total_ext_irqs: ext_irqs.saturating_add(msi_irqs),
-        total_syscalls: syscalls,
-        total_ctx_switches: total_ctx_switches(),
-        usable_frames_4k: (inv.usable_frames + inv.reclaimable_frames).min(u32::MAX as u64) as u32,
-        free_frames_4k: free_frames.min(u32::MAX as u64) as u32,
-        irq1_delivered: irq_line_delivered(IRQ_KEYBOARD_PS2),
-        irq12_delivered: irq_line_delivered(IRQ_MOUSE_PS2),
-        total_ipc_msgs: total_ipc_msgs(online),
-    };
+#[inline(never)]
+fn sys_sysinfo_impl(user_out_ptr: u64, log_ptr: u64, log_cap: u64) -> Result<isize, SysError> {
+    if user_out_ptr == 0 && (log_ptr == 0 || log_cap == 0) {
+        return Err(SysError::Fault);
+    }
+    if user_out_ptr != 0 {
+        if (user_out_ptr & 7) != 0 {
+            return Err(SysError::Fault);
+        }
+        let online = ONLINE_SCHED_CPUS.load(Ordering::Acquire);
+        let mut syscalls = 0u64;
+        for cpu in 0..online {
+            syscalls = syscalls.wrapping_add(get_percpu_by_idx(cpu).syscall_count.load(Ordering::Relaxed));
+        }
+        let (tsc_mhz, uptime_ms, elapsed_tsc) = uptime_telemetry();
+        let (ext_irqs, _, _, _) = irq_telemetry();
+        let (msi_irqs, _, _) = msi_telemetry();
+        let inv = inventory();
+        let free_frames = free_global_frames_snapshot(online);
 
-    // SAFETY: `UserSysInfo` is `#[repr(C)]` POD (`104` bytes) with `_pad0 = 0`.
-    let bytes = unsafe {
-        core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<UserSysInfo>())
-    };
-    copy_to_user(user_out_ptr, bytes)?;
+        let info = UserSysInfo {
+            abi_version: DRY_SYSCALL_ABI_VERSION,
+            online_cpus: online as u32,
+            apic_mode: active_apic_mode() as u8,
+            ioapic_present: u8::from(ioapic_present()),
+            fb_present: u8::from(is_framebuffer_available()),
+            _pad0: 0,
+            tsc_mhz,
+            uptime_ms,
+            elapsed_tsc,
+            timer_irqs: GLOBAL_TIMER_IRQS.load(Ordering::Relaxed),
+            total_ext_irqs: ext_irqs.saturating_add(msi_irqs),
+            total_syscalls: syscalls,
+            total_ctx_switches: total_ctx_switches(),
+            usable_frames_4k: (inv.usable_frames + inv.reclaimable_frames).min(u32::MAX as u64) as u32,
+            free_frames_4k: free_frames.min(u32::MAX as u64) as u32,
+            irq1_delivered: irq_line_delivered(IRQ_KEYBOARD_PS2),
+            irq12_delivered: irq_line_delivered(IRQ_MOUSE_PS2),
+            total_ipc_msgs: total_ipc_msgs(online),
+        };
+
+        // SAFETY: `UserSysInfo` is `#[repr(C)]` POD (`104` bytes) with `_pad0 = 0`.
+        let bytes = unsafe {
+            core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<UserSysInfo>())
+        };
+        copy_to_user(user_out_ptr, bytes)?;
+    }
+    if log_ptr != 0 && log_cap != 0 {
+        let copied = copy_diag_ring_to_user(log_ptr, log_cap)?;
+        return Ok(copied as isize);
+    }
     Ok(0)
 }
 
@@ -350,7 +382,7 @@ pub(crate) fn sys_cold_dispatch(
                 Err(e) => (e.as_raw(), 0),
             }
         }
-        SYS_SYSINFO => match sys_sysinfo_impl(a0) {
+        SYS_SYSINFO => match sys_sysinfo_impl(a0, a1, a2) {
             Ok(v) => (v, 0),
             Err(e) => (e.as_raw(), 0),
         },

@@ -42,7 +42,19 @@ use crate::vspace::pte::VmProt;
 
 const BOOT_INFO_VADDR: u64 = 0x0070_0000;
 const BOOT_MANIFEST_OFFSET: usize = 0x0100;
+const BOOT_EXT_INFO_OFFSET: usize = 0x0700;
 const ROOT_INIT_BOOT_MAGIC: u64 = 0x4452_595f_494e_4954;
+const ROOT_BOOT_EXT_MAGIC: u64 = 0x4452_595f_4245_5854;
+
+const BOOT_FLAG_LIVE_USB: u64 = 1 << 0;
+const BOOT_FLAG_STORAGE_RO: u64 = 1 << 1;
+const BOOT_FLAG_RECOVERY: u64 = 1 << 2;
+const BOOT_FLAG_UART_PRESENT: u64 = 1 << 3;
+const BOOT_FLAG_VTD_ENFORCING: u64 = 1 << 4;
+const BOOT_FLAG_VTD_GFX_DEFERRED: u64 = 1 << 5;
+const BOOT_FLAG_SAFE_GOP: u64 = 1 << 6;
+const BOOT_FLAG_USB_PERSIST_PREFER: u64 = 1 << 7;
+const BOOT_FLAG_DIAG_SELFTEST: u64 = 1 << 8;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -90,9 +102,29 @@ struct BootModManifestEntry {
     size_bytes: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RootInitBootExtInfo {
+    magic: u64,
+    usb_mod_cap: u64,
+    pci_xhci_cap: u64,
+    nvme_mod_cap: u64,
+    pci_nvme_cap: u64,
+    lx_net_mod_cap: u64,
+    pci_net_cap: u64,
+    pci_igpu_cap: u64,
+    boot_flags: u64,
+    dgpu_packed: u64,
+    vmd_packed: u64,
+    lpss_i2c_count: u64,
+}
+
 const _: () = assert!(
     BOOT_MANIFEST_OFFSET + MAX_LATCHED_MODULES * size_of::<BootModManifestEntry>()
-        <= crate::pci::BOOT_PCI_ENUM_OFFSET
+        <= BOOT_EXT_INFO_OFFSET
+);
+const _: () = assert!(
+    BOOT_EXT_INFO_OFFSET + size_of::<RootInitBootExtInfo>() <= crate::pci::BOOT_PCI_ENUM_OFFSET
 );
 const _: () = assert!(
     crate::pci::BOOT_PCI_ENUM_OFFSET
@@ -134,6 +166,10 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             28u64
         } else if cmdline.contains("lx_drm=1") {
             29u64
+        } else if cmdline.contains("usb_persist_test=1") {
+            30u64
+        } else if cmdline.contains("lx_net_test=1") {
+            31u64
         } else {
             20u64
         }
@@ -211,6 +247,13 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-calc.elf").unwrap_or(CapPtr::NULL);
             let lx_drm_mod_cap =
                 mint_boot_module_cap(cs, lbl, "dry-lx-drm-bochs.elf").unwrap_or(CapPtr::NULL);
+            let usb_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-usb.elf").unwrap_or(CapPtr::NULL);
+            let nvme_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-nvme.elf").unwrap_or(CapPtr::NULL);
+            let lx_net_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-lx-net.elf").unwrap_or(CapPtr::NULL);
+            let safe_gop = cmdline.contains("safe_gop=1");
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
             } else {
@@ -249,11 +292,85 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 CapPtr::NULL
             };
             let pci_disp_aux_cap = if session_mode >= 20
+                && !safe_gop
                 && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_DISPLAY_AUX)
             {
                 crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_DISPLAY_AUX)?
             } else {
                 CapPtr::NULL
+            };
+            let pci_xhci_cap = if session_mode >= 20
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_XHCI)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_XHCI)?
+            } else {
+                CapPtr::NULL
+            };
+            let pci_nvme_cap = if session_mode >= 20
+                && !safe_gop
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_NVME)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_NVME)?
+            } else {
+                CapPtr::NULL
+            };
+            let pci_net_cap = if session_mode >= 20
+                && !safe_gop
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_NET)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_NET)?
+            } else {
+                CapPtr::NULL
+            };
+            let pci_igpu_cap = if session_mode >= 20
+                && crate::pci::is_pci_dev_present(crate::pci::PCI_OBJ_IGPU)
+            {
+                crate::pci::mint_root_pci_dev_cap(cs, lbl, crate::pci::PCI_OBJ_IGPU)?
+            } else {
+                CapPtr::NULL
+            };
+            let mut boot_flags = 0u64;
+            if cmdline.contains("live_usb=1") {
+                boot_flags |= BOOT_FLAG_LIVE_USB;
+            }
+            if cmdline.contains("storage=ro") {
+                boot_flags |= BOOT_FLAG_STORAGE_RO;
+            }
+            if cmdline.contains("recovery=1") {
+                boot_flags |= BOOT_FLAG_RECOVERY;
+            }
+            if crate::serial::is_uart_hw_present() {
+                boot_flags |= BOOT_FLAG_UART_PRESENT;
+            }
+            if crate::iommu::status() == crate::iommu::VtdStatus::Enforcing {
+                boot_flags |= BOOT_FLAG_VTD_ENFORCING;
+            }
+            if crate::iommu::is_gfx_scanout_deferred() {
+                boot_flags |= BOOT_FLAG_VTD_GFX_DEFERRED;
+            }
+            if safe_gop {
+                boot_flags |= BOOT_FLAG_SAFE_GOP;
+            }
+            if cmdline.contains("usb_persist_prefer=1") {
+                boot_flags |= BOOT_FLAG_USB_PERSIST_PREFER;
+            }
+            if cmdline.contains("diag_selftest=1") {
+                boot_flags |= BOOT_FLAG_DIAG_SELFTEST;
+            }
+            let (dgpu_packed, vmd_packed, lpss_i2c_count) = crate::pci::pci_topology_summary();
+            let boot_ext = RootInitBootExtInfo {
+                magic: ROOT_BOOT_EXT_MAGIC,
+                usb_mod_cap: usb_mod_cap.0,
+                pci_xhci_cap: pci_xhci_cap.0,
+                nvme_mod_cap: nvme_mod_cap.0,
+                pci_nvme_cap: pci_nvme_cap.0,
+                lx_net_mod_cap: lx_net_mod_cap.0,
+                pci_net_cap: pci_net_cap.0,
+                pci_igpu_cap: pci_igpu_cap.0,
+                boot_flags,
+                dgpu_packed,
+                vmd_packed,
+                lpss_i2c_count: lpss_i2c_count as u64,
             };
             let vault_ctrl_cap = if session_mode >= 20 {
                 crate::vault_ctrl::mint_root_vault_cap(cs, lbl)?
@@ -332,6 +449,11 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                         m_idx += 1;
                     }
                 }
+                copy_nonoverlapping(
+                    (&raw const boot_ext).cast::<u8>(),
+                    info_fh.hhdm_ptr().add(BOOT_EXT_INFO_OFFSET),
+                    size_of::<RootInitBootExtInfo>(),
+                );
                 if pci_func_count > 0 {
                     copy_nonoverlapping(
                         pci_recs.as_ptr().cast::<u8>(),
