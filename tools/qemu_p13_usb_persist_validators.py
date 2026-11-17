@@ -144,7 +144,21 @@ def _write_gpt_image(
         return bytes(hdr)
 
     pmbr = bytearray(512)
-    struct.pack_into("<BBB3sB3sII", pmbr, 446, 0x00, 0x00, 0x02, b"\x00", 0xEE, b"\xff\xff\xff", 1, min(0xFFFF_FFFF, total_sectors - 1))
+    struct.pack_into(
+        "<BBBBBBBBII",
+        pmbr,
+        446,
+        0x00,
+        0x00,
+        0x02,
+        0x00,
+        0xEE,
+        0xFF,
+        0xFF,
+        0xFF,
+        1,
+        min(0xFFFF_FFFF, total_sectors - 1),
+    )
     pmbr[510:512] = b"\x55\xaa"
 
     with img_path.open("r+b") as f:
