@@ -24,11 +24,11 @@
         "colors": 32
       },
       "glass21_1280x800_daylight_125dpi.png": {
-        "non_bg_px": 1023287,
+        "non_bg_px": 1023061,
         "colors": 32
       },
       "glass21_1280x800_daylight_150dpi_tiled.png": {
-        "non_bg_px": 1023281,
+        "non_bg_px": 1023055,
         "colors": 32
       },
       "glass21_1280x800_hc_150dpi_tiled.png": {
@@ -36,7 +36,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 8.164
+    "wall_time_sec": 8.062
   },
   "p11b": {
     "resolution": "1024x768",
@@ -48,7 +48,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 3.62
+    "wall_time_sec": 3.806
   },
   "p11c": {
     "resolution": "1920x1080",
@@ -63,6 +63,6 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 5.128
+    "wall_time_sec": 5.208
   }
 }

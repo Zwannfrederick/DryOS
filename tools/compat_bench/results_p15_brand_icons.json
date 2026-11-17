@@ -1,0 +1,80 @@
+{
+  "milestone": "DRY-Brand-Icons-P15",
+  "p15a": {
+    "resolution": "1280x800",
+    "leaked_frames": 0,
+    "screenshots": {
+      "p15_1280x800_dark_desktop.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_launcher.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_files.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_gallery_dark.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_gallery_light.png": {
+        "non_bg_px": 1022954,
+        "colors": 32
+      },
+      "p15_1280x800_gallery_hc.png": {
+        "non_bg_px": 1023336,
+        "colors": 32
+      },
+      "p15_1280x800_gallery_200dpi.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_settings_200dpi.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_overview.png": {
+        "non_bg_px": 1023686,
+        "colors": 32
+      },
+      "p15_1280x800_lock_screen.png": {
+        "non_bg_px": 1022468,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 9.925
+  },
+  "p15b": {
+    "resolution": "1024x768",
+    "leaked_frames": 0,
+    "screenshots": {
+      "p15_1024x768_tiled_gallery_125dpi.png": {
+        "non_bg_px": 786181,
+        "colors": 32
+      },
+      "p15_1024x768_tiled_gallery_150dpi.png": {
+        "non_bg_px": 786181,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 4.408
+  },
+  "p15c": {
+    "resolution": "1920x1080",
+    "leaked_frames": 0,
+    "screenshots": {
+      "p15_1920x1080_tiled_gallery.png": {
+        "non_bg_px": 2073133,
+        "colors": 32
+      },
+      "p15_1920x1080_overview.png": {
+        "non_bg_px": 2073133,
+        "colors": 32
+      }
+    },
+    "wall_time_sec": 5.291
+  }
+}

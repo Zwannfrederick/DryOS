@@ -1,8 +1,8 @@
 # DRY OS — Ürün Vizyonu, Kurulum Profilleri ve Ürün Yol Haritası (`P0` – `P5`)
 
-> **Belge Tarihi:** 14 Kasım 2026 (`Project Ascension 4.0`: `DRY Glass 2.1` + `libdry-lx-compat` Linux DRM Runtime + `bochs.c` Adası + Hedef GPU Doğrulaması + `Live USB`)  
+> **Belge Tarihi:** 17 Kasım 2026 (`Project Ascension 5.0 — v0.5.0`: `dry-usb` + `dry-nvme` RO + `libdry-lx-compat` v2/`8139cp.c` + `118`-SVG/`200%` DPI + `82K1` Salt-Okunur Denetim + `160 MiB` GPT Live USB)  
 > **Başlangıç Referansları:** `Milestone 1C` (`1df3842e3ff1676c46349f072c623836a56f846a`) & `Low-Level Optimization Pass v1` (`69522a3482d3000dc796a6717446dbc8bb1cb25e`)  
-> **Durum Sözleşmesi:** Bu belgedeki her hedef açıkça **`DONE`**, **`IN PROGRESS`**, **`PLANNED`** veya **`BLOCKED`** olarak işaretlenmiştir. `ROADMAP.md` içindeki mevcut teknik milestone numaraları (`Faz 0..5`, `Milestone 1A..1C`) değiştirilmeden korunmuş ve Bölüm 3'te ürün aşamalarıyla eşlenmiştir.
+> **Durum Sözleşmesi:** Bu belgedeki her hedef açıkça **`DONE (QEMU/OVMF)`**, **`READY FOR USER PHYSICAL EXECUTION`**, **`IN PROGRESS`**, **`PLANNED`** veya **`BLOCKED`** olarak işaretlenmiştir. `ROADMAP.md` içindeki mevcut teknik milestone numaraları (`Faz 0..5`, `Milestone 1A..1C`) değiştirilmeden korunmuş ve Bölüm 3'te ürün aşamalarıyla eşlenmiştir.
 
 ---
 
@@ -40,11 +40,11 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 | Ürün Aşaması | Durum | Eşleşen Teknik Milestone (`ROADMAP.md`) | Temel Çıktı ve Doğrulama Kapısı |
 | :--- | :---: | :--- | :--- |
 | **`P0` — Mikroçekirdek Temeli** | **`DONE` (QEMU `56/56`)** | `Faz 0` (`H1`, `H2`), `Milestone 1A`, `1B-A..1B-D`, `1C` (`1df3842`), `Opt Pass v1` (`69522a3`) | SMP (`1..20 vCPU`), `H1`, `PMM`, `VSpace`, `CSpace`/`ADR-007`, Ring 3 ELF64, IPC, kök servisler ve ilk Ring 3 GOP ekranı |
-| **`P1` — Etkileşimli DRY OS** | **`IN PROGRESS`** *(`Milestone 2A-1..2C-2` + `PCI 0x0212` + `Live USB`: `DONE`, `105/105` QEMU + `5/5` Matris)* | `Faz 2 — 2A-1..2B`, `2A-4a`, `2C-2`, `Ascension 4.0 PCI/USB` (`DONE`) + `NVMe` (`PLANNED`) | PS/2 klavye/fare, Ring 3 `dry-vfs` (`/boot`, `/ram`, `/persist` `DRYFS_v1`), `dry-blk` (`VirtIO-Blk` + `IoRing`), `dry-power`, `VT-d` (`DMAR`), `MSI/MSI-X`, `>4 GiB BAR`, `0x0212` `PCI_OBJ_DISPLAY_AUX` + `96 MiB` UEFI `Live USB` (`DONE`); `NVMe` & fiziksel `xHCI` HID (`PLANNED`) |
-| **`P2` — DRY Desktop Alpha/Beta** | **`DONE` (QEMU/KVM)** *(`DRY Glass 2.0` + `2.1`: `--p11-only` `3/3 PASS`, `9` PNG)* | `Milestone 2A-2..2B`, `Priority C`, `DRY Glass v1 / 2.0 / 2.1` (`DONE`); `Clean/Diagnostic Boot` (`PLANNED`) | `DRY Glass 2.1` AA compositor, `Adaptive Window Strip` + `Alt+W` önizleme, `IconRail`, `100%/125%/150%` DPI, `Obsidian`/`Daylight`/`HC` temalar, `6` yerel uygulama (`dry-editor`, `dry-calc`), `1024x768..1920x1080` `VirtIO-GPU` + canlı `GOP Fallback` |
-| **`P3` — Linux & Windows Uyumluluğu** | **`IN PROGRESS`** *(`H2` + `2C-0..2C-2` + `libdry-lx-compat` + `v6.18 bochs.c`: `DONE` [`--p12-only`])* | `2C-0..2C-2` + `libdry-lx-compat` (`DONE`) -> `2C-3` (`igc`/`e1000e` NIC & `dry-linux-abi`) -> `Faz 5` (Win32) | `dry-lx-rng.elf` (`1af4:1044`) + `libdry-lx-compat` üzerinde `v6.18` `bochs.c` (`dry-lx-drm-bochs.elf`) + `nv_os_shim_check.c` + `DRY_HOST_ONLY` GPU envanteri (`DONE`); `dry-linux-abi` ELF64 & fiziksel `Xe`/`gsp_ga10x` (`PLANNED`, `0` çekirdek Linux ABI kodu) |
+| **`P1` — Etkileşimli DRY OS** | **`DONE (QEMU/OVMF)`** / Fiziksel: **`READY FOR USER PHYSICAL EXECUTION`** | `Faz 2 — 2A-1..2B`, `2A-4a`, `2C-2`, `Ascension 5.0` M1 & M2 (`--p13-only`, `25/25`) | PS/2 + USB `xHCI` HID (`dry-usb`), BOT Part 2 `DRYFS_V1` RW/RO, salt-okunur `dry-nvme` (`INV-DISK-SAFE-01/02`), `12+` Linux CLI komutu, `32G` PMM, `DIAG_RING` + GOP panik, `VT-d`/RMRR/`<4K` BAR (`DONE (QEMU/OVMF)`); fiziksel `82K1` xHCI/VMD NVMe kullanıcı yürütmesine hazır |
+| **`P2` — DRY Desktop Alpha/Beta** | **`DONE (QEMU/OVMF)`** *(`DRY Glass 2.1` + `118`-SVG + `200%` DPI: `--p11-only` `3/3`, `--p15-only` `4/4`, `15` PNG)* | `Milestone 2A-2..2B`, `Priority C`, `DRY Glass 2.0/2.1`, Team A Kimlik (`1e15333`) | `DRY Glass 2.1` AA compositor, `Iso-Kernel Prism` + `118` SVG (`6` marka, `21` app, `91` sistem), `Adaptive Window Strip`, `Alt+W`, `100%..200%` DPI, `Obsidian`/`Daylight`/`HC`, `6` uygulama, `VirtIO-GPU` + `GOP Fallback` |
+| **`P3` — Linux & Windows Uyumluluğu** | **`IN PROGRESS`** *(`virtio-rng`, `bochs.c`, `8139cp+mii`: `DONE (QEMU/OVMF)`; `dry-linux-abi`: `PLANNED`)* | `2C-0..2C-2`, `libdry-lx-compat` v2 (6 dosya), `8139cp.c+mii.c` (`dry-lx-net.elf`), `82K1` GPU FW/WPR2/PRIME (`7d72cd3`) -> `Faz 3A` -> `Faz 5` | `dry-lx-rng`, `dry-lx-drm-bochs`, modüler `libdry-lx-compat` (`2,164` C LOC), 15-adımlı yaşam döngüsü + `linux-microvm` sözleşmesi, `56/56` SHA-256 + `8139cp.c+mii.c` (`--p14-only` `1/1 PASS`, `leaked_frames=0`); `dry-linux-abi` ELF64 (`PLANNED`) & fiziksel `Xe`/`gsp_ga10x` modeset (`BLOCKED`) |
 | **`P4` — Paketleme ve Dağıtım** | **`PLANNED`** | `Faz 3` (`drypkg` çekirdeği) & `Faz 4` (`DRY Store` + Profiller) | Tasarım-öncelikli `drypkg` + `DRY Store`, isteğe bağlı runtime, imzalı paket, `Desktop`/`Server` kurulum profilleri, atomik *rollback* |
-| **`P5` — Production Readiness** | **`IN PROGRESS`** *(`96 MiB` MBR (`0xEF`) + FAT32 UEFI `Live USB` QEMU `xHCI` boot `PASS`; Bare-Metal: `PLANNED`)* | `Ascension 4.0 Track E` (`Live USB` builder `DONE`) -> `Faz 4` (Bare-Metal, IOMMU, Soak, Benchmark) | `build_live_usb_image.py` ile doğrulanmış `96 MiB` UEFI `Live USB`; gerçek bare-metal donanım, Desktop/Server iş yükleri, adil Linux A/B benchmarkları ve 72s+ soak testleri (`PLANNED`) |
+| **`P5` — Production Readiness** | **`DONE (QEMU xHCI Live USB)`** / Fiziksel Gates 3–7: **`READY FOR USER PHYSICAL EXECUTION`** | `Ascension 5.0` M5 (`160 MiB` GPT Live USB `--verify-boot`) -> `Faz 4` (Fiziksel `82K1`, Soak, Benchmark) | `96 MiB` `DRYOS_ESP` + `DRYOS_PERSIST` `DRYFS_V1` (`27/32` modül, `5` Limine profili, `5.491s` `PASS`; tam paket `135/135 PASS`); fiziksel Lenovo `82K1` USB önyükleme, Linux A/B benchmarkları ve 72s+ soak (`READY FOR USER PHYSICAL EXECUTION` / `PLANNED`) |
 
 ---
 
@@ -64,13 +64,12 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P1` — Etkileşimli DRY OS — Durum: `IN PROGRESS` *(`Milestone 2A-1..2C-2`: `DONE` — `95/95` QEMU [`8d230df`] + `5/5` SMP/RAM Matrisi; Native NVMe/USB HID: `PLANNED`)*
+### `P1` — Etkileşimli DRY OS — Durum: `DONE (QEMU/OVMF)` *(M1 & M2 `--p13-only`: `25/25 PASS`; Fiziksel `82K1` xHCI/VMD NVMe: `READY FOR USER PHYSICAL EXECUTION`)*
 
 - **Alt Hedefler (Dürüst Bileşen Durumu):**
-  - Donanım IRQ yönlendirme ilkeli (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoApicHwCache`), PCI `MSI`/`MSI-X` (`0x40..=0x5F`), 64-bit `>4 GiB` `BAR` + `PAT4` `WC` eşlemesi, ACPI `DMAR` + `VT-d` per-BDF `SLPT` DMA izolasyonu, `TCB`-bağlı birleşik `Notification`, dar `IoPortCap` (`IOPL=0`), `PciDev`/`SYS_DMA_ALLOC` (`BME=0` susturma) ve yetenek-kapılı güç kontrolü (`CapObjectKind::PowerCtrl` + `SYS_POWER_CTL`: ACPI S5, FADT Reset, `sti; hlt`): **`DONE` (`IOAPIC`/`MSI`/`MSI-X`/`VT-d`/`>4 GiB BAR`/ACPI S5/Reset)** / **`PLANNED` (Gerçek-mod `ACPI S3` uyanma trampolini)**
-  - Gerçek klavye girdisi (QEMU `PS/2 i8042` `IRQ1` -> Ring 3 `dry-input.elf`, canlı `UsQwerty` + `TurkishQ` haritaları, `0xE0` navigasyon ve 64-olay taşma koruması): **`DONE` (`PS/2` `UsQwerty` + `TurkishQ`)** / **`PLANNED` (`VirtIO-Input`, USB HID)**
-  - Fare / işaretçi girdisi (Tek `i8042` sahibi `dry-input.elf` içinde PS/2 IntelliMouse 4-bayt tekerlek protokolü, `MouseMove`/`MouseButtonDown`/`MouseButtonUp`/`MouseScroll`, imleç hız çarpanı ve `1x`/`2x` yazılımsal imleç): **`DONE` (`PS/2 AUX + IntelliMouse`)** / **`PLANNED` (`VirtIO-Input`, USB `xHCI` HID)**
-  - İzole Ring 3 dosya sistemi ve kalıcı depolama (`dry-vfs.elf` + `dry-blk.elf`: salt-okunur `/boot` + uçucu `/ram` + çift A/B `CRC32` CoW kalıcı `/persist` `DRYFS_v1` `VirtIO-Blk` `IoRing`): **`DONE` (`/boot` + `/ram` + kalıcı `VirtIO-Blk` `/persist`)** / **`PLANNED` (Native `NVMe` arka ucu — `Milestone 2C-3`)**
+  - Donanım IRQ yönlendirme (`SYS_IRQ_BIND`/`SYS_IRQ_ACK` + `IoApicHwCache`), PCI `MSI`/`MSI-X` (`0x40..=0x5F`), 64-bit `>4 GiB` & `< 4 KiB` alt-sayfa BAR (`page_suboff`), `preserve_active_gop`, çoklu-DRHD `VT-d` erteleme + `premap_unit_rmrrs` + 39-bit `SLPT`, `32 GiB` PMM, UART-sız `probe_com1_uart` + `16 KiB` `DIAG_RING` (`dmesg`) + `panic_fb.rs` GOP konsolu, `SYS_POWER_CTL` (ACPI S5, FADT Reset): **`DONE (QEMU/OVMF)`** / `ACPI S3` uyanma trampolini: **`PLANNED` (`-ENOSYS`)**
+  - Gerçek klavye ve işaretçi girdisi (`dry-input` PS/2 `i8042` `UsQwerty`+`TurkishQ`+IntelliMouse + **`dry-usb` `xHCI` Boot HID klavye/fare**): **`DONE (QEMU/OVMF)`** / Fiziksel `82K1` `xHCI` & Synaptics `I2C-HID` (`06cb:ce78`): **`READY FOR USER PHYSICAL EXECUTION` / `PLANNED`**
+  - İzole Ring 3 depolama ve CLI (`dry-vfs` `/boot` RO + `/ram` + `/persist` `DRYFS_V1` RW/RO, `dry-blk` VirtIO-Blk, **`dry-usb` BOT Bölüm 2 `DRYFS_V1` [`INV-DISK-SAFE-02`]**, **salt-okunur `dry-nvme` [`INV-DISK-SAFE-01`]**, `/persist/boot.log` ve `12+` Linux CLI komutu `dmesg`/`lspci`/`lsusb`/`lsblk`/`nvme`/`drvctl`/`uname`/`free`/`mounts`/`cat`/`write`/`sync`): **`DONE (QEMU/OVMF — --p13-only 25/25)`** / Fiziksel VMD sub-bus NVMe: **`PLANNED`**
   - Canlı tuş/fare girdisi -> çoklu çözünürlük `1024x768`/`1280x800`/`1920x1080` `VirtIO-GPU` + `GOP Fallback` ekran güncellemesi ve `1/2/4/8/20 vCPU` & `256M..2G` RAM donanım matrisi doğrulaması: **`DONE`**
   - Yüksek bant genişlikli blok/sürücü veri düzlemi (`IoRingSharedPage`, `Milestone 2B`/`2C-0`/`2C-1` & `2C-2` `TCB`-bağlı `Notification`, `AUD-K6/K7/K8` + `AUD-U3/U4/U8` kapatıldı): **`DONE`**
 - **Bağımlılıklar:** `P0` (`DONE`); `Milestone 2A-1..2C-2` etkileşim, kalıcı `/persist`, FPU/SIMD `XSAVEOPT`, `FaultEndpoint`, `VT-d`, `MSI/MSI-X` ve `>4 GiB BAR` tamamlandı; yalnızca USB HID/NVMe sonraki adıma kaldı.
@@ -78,10 +77,10 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P2` — `DRY Desktop` Alpha/Beta — Durum: `DONE` *(QEMU/KVM `1024x768..1920x1080` — `DRY Glass 2.1`: `--p11-only` `3/3 PASS` + `9` PNG; `Clean/Diagnostic Boot`: `PLANNED`)*
+### `P2` — `DRY Desktop` Alpha/Beta — Durum: `DONE (QEMU/OVMF)` *(`DRY Glass 2.1` `--p11-only` `3/3` + `118`-SVG/`200%` DPI `--p15-only` `4/4` & `15` PNG)*
 
 - **Alt Hedefler:**
-  - Birleşik Ring 3 Display & Input servisi, saf `#![no_std]` TrueType AA (`DrySans`/`DryMono`, SIL OFL 1.1), SDF vektör `IconRail`, ortak `ui/` kiti, `100%/125%/150%` DPI ölçekleme + `VirtIO-GPU` (`MAX_BACKBUF_2M = 8`, `MAX_GPU_SCANOUT_2M = 5`) ve canlı `UEFI GOP Fallback` (`gen=2` kurtarma): **`DONE`**
+  - Birleşik Ring 3 Display & Input servisi (`PS/2` + `dry-usb` HID), `#![no_std]` TrueType AA (`DrySans`/`DryMono`, SIL OFL 1.1), `118` özgün SVG (`Iso-Kernel Prism`, `6` marka + `21` uygulama + `91` sistem, `vector_assets_{sys,apps}.rs`), `100%/125%/150%/200%` DPI ölçekleme, `VirtIO-GPU` + canlı `UEFI GOP Fallback` (`gen=2`): **`DONE (QEMU/OVMF)`**
   - Tek Ring 3 `DRY Glass 2.1` Compositor üzerinde **varsayılan `Floating`** + tek komutla **`SideBySideTiled` / `Stacked` / `Tabbed`**, **`Adaptive Window Strip`** + `+N` taşma, `Alt+W` aranabilir önizleme ve arka düzeni bozmayan **`WindowRole::DialogTransient`** pencereler: **`DONE`**
   - `DRY Shell` / `DRY Glass`: buzlu arka plan bulanıklığı, üst sistem çubuğu, floating `Dock`, `Alt+Space` aranabilir `Launcher`, `Quick Settings`, `Notification Center`, canlı **`Obsidian Night` / `Frosted Daylight` / `High Contrast`** tema geçişi + `low_overhead_glass`, `/persist/desktop.cfg` tercihleri ve `DRY Vault` doğrulamalı `Session Lock`: **`DONE`**; tek olay akışlı `Clean/Diagnostic Boot`: **`PLANNED`**
   - Fare, klavye kısayolları ve üst çubuğu birleştiren ortak **`Action API` (`DesktopAction`)**: **`DONE`**
@@ -92,13 +91,12 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P3` — Linux ve Windows Uyumluluğu — Durum: `IN PROGRESS` *(`H2` + `2C-0..2C-2` + `libdry-lx-compat` + `v6.18 bochs.c` [`--p12-only`]: `DONE`)*
+### `P3` — Linux ve Windows Uyumluluğu — Durum: `IN PROGRESS` *(`virtio-rng`, `bochs.c`, `8139cp.c+mii.c`: `DONE (QEMU/OVMF --p14-only 1/1 PASS)`; `dry-linux-abi`: `PLANNED`)*
 
-- **Kesin Uygulama Sırası ve Ring 3 Mimari Sınırı (`ADR-011`, `ADR-016..022`):**
-  1. **Adım 1 — `Milestone 2A-4a`, `2C-1`, `2C-2` & `Ascension 4.0 Tracks C/D` (`DONE`):** Modül tavanı (`16 -> 32`, `24/32` aktif), `XSAVEOPT`/`XRSTOR`, `FaultEndpoint`, Linux `v6.18` `virtio-rng.c` adası (`dry-lx-rng.elf`), ACPI `DMAR` + `VT-d`, `MSI/MSI-X`, `>4 GiB BAR`, `TCB`-bağlı `Notification`, ortak statik C `libdry-lx-compat` runtime (`56` sembol, `.ko` reddi) + `v6.18` `bochs.c` DRM adası (`dry-lx-drm-bochs.elf`, `0x0212` + GOP BAR0 koruması) ve `DRY_HOST_ONLY` `8086:9a49` / `10de:25a0` + `nv_os_shim_check.c` doğrulaması tamamlandı (`dry-kernel` içinde `0` satır Linux ABI/GPL kodu).
-  2. **Adım 2 — `Ascension 5.0 / Milestone 2C-3` (`PLANNED`):** `H2` `igc`/`e1000e` NIC adası ve `FaultEndpoint` + `TCB`-bağlı `Notification` üzerinde ilk Ring 3 `dry-linux-abi` (`musl` ELF64).
-  3. **Adım 3 — Genişletilmiş Linux ELF ABI / Sürücü Uyumluluğu (`PLANNED`):** `< 400` sembollü sürücü adaları (`xHCI`) ve `Faz 5` (`Win32`).
-  4. **Adım 4 — Fiziksel DMA/IOMMU (`P5`) ve Uzun Vadeli Seçilmiş Win32 (`Faz 5`, `PLANNED`):** Fiziksel `VT-d`/`AMD-Vi` IOMMU, dar `Xe/GuC` KMS veya ayrık GPU MicroVM (`P5`) doğrulaması; Linux katmanı kararlılığa ulaştıktan sonra seçilmiş kullanıcı alanı Win32 iş yükleri için Ring 3 `dry-ntos` + Wine DLL + `DXVK`.
+- **Kesin Uygulama Sırası ve Ring 3 Mimari Sınırı (`ADR-011`, `ADR-016..023`):**
+  1. **Adım 1 — `Milestone 2A-4a`, `2C-1`, `2C-2`, `Ascension 4.0/5.0 M3/M4` (`DONE (QEMU/Host RO)`):** Modül tavanı (`27/32` aktif), `XSAVEOPT`/`XRSTOR`, `FaultEndpoint`, `virtio-rng.c` (`--lx-island-only`), `bochs.c` (`--p12-only`), 6 dosyalı modüler `libdry-lx-compat` (`2,164` C LOC), 15-adımlı `dry-broker` yaşam döngüsü + `linux-microvm` sözleşmesi, `56/56` SHA-256 doğrulamalı `8139cp.c+mii.c` (`dry-lx-net.elf`, `--p14-only` `1/1 PASS`: `3.95s`, `udp_echo=1`, `#UD gen=2`, `leaked_frames=0`), ve Lenovo `82K1` salt-okunur M4 envanter/FW/WPR2/PRIME (`22/162` `os-interface.h`) doğrulaması (`0` çekirdek Linux ABI/GPL satırı; özgün DRY kodu `Apache-2.0 OR MIT`).
+  2. **Adım 2 — `Faz 3A–3B` (`PLANNED`):** `FaultEndpoint` + `ET_DYN` PIE üzerinde Ring 3 `dry-linux-abi` (`musl` ELF64) ve `H2` `igc`/`e1000e`/`r8168` (`10ec:8168`) NIC adaları.
+  3. **Adım 3 — Fiziksel DMA/IOMMU (`P5`) ve Uzun Vadeli Seçilmiş Win32 (`Faz 5`, `PLANNED`):** Fiziksel `VT-d`/`AMD-Vi`, dar `Xe/GuC` KMS veya ayrık GPU MicroVM; Linux katmanı kararlılığa ulaştıktan sonra Ring 3 `dry-ntos` + Wine DLL + `DXVK`.
 - **Bağımlılıklar:** `Milestone 2A-4a` (`MAX_LATCHED_MODULES = 32`, `XSAVEOPT`, `FaultEndpoint`), dinamik ELF/`mmap`, etiketli `VFS`.
 - **Teknik Riskler & Dürüst Sınır:** `libdry-lx-compat` kaynak-bazlı statik derleme (`GPL-2.0-only` Ring 3) kullanır, ham `.ko` dosyaları reddedilir (`R-19`); konak `8086:9a49` (`Iris Xe`) ve `10de:25a0` (`RTX 3050 Ti`) henüz bare-metal modeset için `BLOCKED` durumundadır; **Linux/Windows uygulamalarının `%100` çalışmama sınırı** (`0` çekirdek modu `.sys` / anti-cheat — `R-13`) şeffaf tutulur.
 
@@ -116,10 +114,10 @@ Her iki kurulum profili **aynı `dry-kernel` ikilisini**, **aynı `Endpoint`/`No
 
 ---
 
-### `P5` — Production Readiness — Durum: `IN PROGRESS` *(`Live USB` xHCI QEMU `PASS`; Fiziksel Donanım & Soak: `PLANNED`)*
+### `P5` — Production Readiness — Durum: `DONE (QEMU xHCI Live USB)` / Fiziksel Gates 3–7: `READY FOR USER PHYSICAL EXECUTION`
 
 - **Alt Hedefler:**
-  - UEFI MBR (`0xEF`) + FAT32 `Live USB` imaj üreticisi & QEMU `xHCI` önyükleme doğrulaması: **`DONE` (`tools/build_live_usb_image.py`, `--verify-boot`)** / Gerçek fiziksel x86-64 donanım (`bare-metal`) kurulumu ve fiziksel Intel VT-d / AMD-Vi IOMMU doğrulaması: **`PLANNED`**
+  - UEFI `160 MiB` 2-bölümlü GPT (`96 MiB` FAT32 `DRYOS_ESP` + `DRYOS_PERSIST` `DRYFS_V1`, `27` modül, `5` Limine profili) `Live USB` üreticisi & QEMU `xHCI` önyükleme doğrulaması: **`DONE (QEMU xHCI)` (`tools/build_live_usb_image.py --verify-boot`, `results_live_usb_boot.json`, `5.491s`; birleşik paket `135/135 PASS`)** / Fiziksel Lenovo `82K1` Gates 3–7 (fiziksel USB önyükleme, xHCI HID/Bölüm 2 kalıcılık, Iris Xe GOP + çift-DRHD VT-d + VMD NVMe RO, RTX 3050 Ti): **`READY FOR USER PHYSICAL EXECUTION`** (bkz. `docs/ASCENSION_5_0_VALIDATION_MATRIX.md`)
   - `DRY Desktop` günlük kullanım kararlılık, uyku/uyanma, ses/ekran/girdi gecikme testleri: **`PLANNED`**
   - `DRY Server` çok-çekirdekli ağ, NVMe depolama, kompartman izolasyonu ve AI inference iş yükü testleri: **`PLANNED`**
   - Aynı fiziksel makine ve özdeş iş yükleri üzerinde **Linux ile adil, şeffaf ve yeniden üretilebilir A/B performans karşılaştırması**: **`PLANNED`**

@@ -9,35 +9,35 @@
     "irq12": 30,
     "screenshots": {
       "glass_1280x800_dark_home.png": {
-        "non_bg_px": 1023687,
+        "non_bg_px": 1023686,
         "colors": 32
       },
       "glass_1280x800_launcher.png": {
-        "non_bg_px": 1023687,
+        "non_bg_px": 1023686,
         "colors": 32
       },
       "glass_1280x800_calc.png": {
-        "non_bg_px": 1023688,
+        "non_bg_px": 1023686,
         "colors": 32
       },
       "glass_1280x800_editor.png": {
-        "non_bg_px": 1023690,
+        "non_bg_px": 1023686,
         "colors": 32
       },
       "glass_1280x800_quick_settings.png": {
-        "non_bg_px": 1023690,
+        "non_bg_px": 1023686,
         "colors": 32
       },
       "glass_1280x800_frosted_daylight.png": {
-        "non_bg_px": 1023299,
+        "non_bg_px": 1023098,
         "colors": 32
       },
       "glass_1280x800_notifications.png": {
-        "non_bg_px": 1023301,
+        "non_bg_px": 1023100,
         "colors": 32
       }
     },
-    "wall_time_sec": 8.522
+    "wall_time_sec": 8.695
   },
   "p9b": {
     "resolution": "1920x1080",
@@ -47,15 +47,15 @@
     "leaked_frames": 0,
     "screenshots": {
       "glass_1920x1080_tiled_gpu.png": {
-        "non_bg_px": 2073136,
+        "non_bg_px": 2073133,
         "colors": 32
       },
       "glass_1920x1080_recovered_gen2.png": {
-        "non_bg_px": 2073136,
+        "non_bg_px": 2073133,
         "colors": 32
       }
     },
-    "wall_time_sec": 4.984
+    "wall_time_sec": 5.183
   },
   "p9c": {
     "resolution": "1024x768",
@@ -63,10 +63,10 @@
     "leaked_frames": 0,
     "screenshots": {
       "glass_1024x768_compact.png": {
-        "non_bg_px": 786183,
+        "non_bg_px": 786181,
         "colors": 32
       }
     },
-    "wall_time_sec": 4.624
+    "wall_time_sec": 4.764
   }
 }

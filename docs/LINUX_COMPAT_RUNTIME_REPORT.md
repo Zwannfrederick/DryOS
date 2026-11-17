@@ -58,3 +58,31 @@ From [`tools/compat_bench/results_p12_lx_compat.json`](../tools/compat_bench/res
 ### Visual Scanout Coexistence Proofs
 1. Secondary Linux DRM `bochs.c` `gen=2` `800x600` scanout (`device="bochs0"`): [`p12_bochs_drm_scanout.png`](screenshots/glass21/p12_bochs_drm_scanout.png)
 2. Concurrent Primary UEFI GOP DRY Glass 2.1 desktop: [`p12_gop_desktop_coexist.png`](screenshots/glass21/p12_gop_desktop_coexist.png)
+
+---
+
+## 4. Ascension 5.0 (`v0.5.0`) M3: Modular `libdry-lx-compat` v2, 15-Step Lifecycle & `8139cp.c` + `mii.c`
+
+Project Ascension 5.0 promotes `libdry-lx-compat` (`MIT OR GPL-2.0-only`) from a single DRM shim into a modular multi-subsystem Ring-3 Linux driver compatibility runtime without adding a single GPL line to `kernel/`:
+
+### 4.1. 6-File Modular `libdry-lx-compat` (`2,164` Reusable C LOC, All `< 600` Lines)
+
+| Module (`drivers/libdry-lx-compat/src/`) | LOC | Capabilities Provided |
+| :--- | :---: | :--- |
+| `lx_core_sync_wq.c` | `419` | `spinlock`/`mutex`, `completion`, `jiffies`, bounded single-threaded `workqueue`/`delayed_work`/`napi_struct` polling |
+| `lx_pci_dma_irq.c` | `453` | `pci_enable_device`/`pci_set_master`, `pci_iomap` with `< 4 KiB` sub-page `UserPciBarInfo.page_suboff`, coherent `sys_dma_alloc` + `2M` arena, `dma_map_single`, `request_irq` (MSI `sys_irq_bind` + deterministic INTx `IntrStatus`/NAPI poll fallback) |
+| `lx_firmware_pm.c` | `162` | `request_firmware`/`release_firmware` registration + runtime PM transitions (`RPM_ACTIVE`/`RPM_SUSPENDED`) |
+| `lx_dmabuf_fence.c` | `173` | `dma_fence` refcounting/signaling + `dma_buf` handle wrappers over DRY `FrameCap` (`READ_ONLY_EXPORT`/`DEVICE_DMA`) |
+| `lx_drm_compat.c` | `464` | `drm_dev_alloc`, `devm_ioremap[_wc]`, EDID probe, atomic shadow-plane damage commit hooks (`bochs.c`) |
+| `lx_net_compat.c` | `493` | `alloc_etherdev`, `sk_buff` ring pool (`128 x 2048 B`), `eth_type_trans`, NAPI RX/TX, `mii_if_info` bridge, and QEMU SLIRP (`10.0.2.15`) ARP + UDP echo (`port 7777`) responder |
+
+### 4.2. 15-Step Broker Lifecycle & Multi-Backend Contracts
+
+- **15-Step Lifecycle State Machine (`userspace/src/broker_lifecycle.rs`, `233` lines & `lx_driver_manager.py`, `517` lines):** Explicit verified transitions across `DETECTED -> MATCHED -> ASSESSED -> SOURCE_RESOLVED -> DEPS_FIRMWARE_OK -> BUILT_VERIFIED -> ISLAND_CREATED -> CAPS_ASSIGNED -> RESOURCES_MAPPED -> INITIALIZED -> PUBLISHED -> MONITORING -> FAULT_RECOVERY -> UNLOADED -> ROLLED_BACK`.
+- **Multi-Backend Contracts (`COMPAT_CATALOG.json` & `dry_broker.rs`, `793` lines):** Supports `native-driver-island`, `lx-compat-island`, and `linux-microvm` backend contracts, uniformly enforcing `CONTRACT_FLAG_REQUIRE_RING0_KO -> -EPERM`, `CONTRACT_FLAG_ASSUME_IGPU_PASSTHROUGH -> -EINVAL`, and mandatory `FaultEndpoint` supervision, surfaced to `Terminal` `drvctl` via `BROKER_OP_DRVCTL_QUERY`.
+
+### 4.3. Third Unmodified Linux `v6.18` Driver: Realtek `8139cp.c` + `mii.c` (`--p14-only`)
+
+- **Upstream Sources (`56/56` SHA-256 Verified):** `tools/lx_compat/fetch_8139cp_sources.py` + `vendor/linux-drivers/MANIFEST.json` pin unmodified `v6.18` `drivers/net/ethernet/realtek/8139cp.c` (`2,121` LOC) and `drivers/net/mii.c` (`668` LOC).
+- **Isolated `GPL-2.0-only` Island (`drivers/lx-net-8139cp-island/src/main.rs`, `613` lines):** Compiles `dry-lx-net.elf` (`comp_id = 0x0214`, `SecDomain::RootSystem` for non-MSI INTx/PCI access, `FaultEndpoint`-supervised). Uses Wave-1 `< 4 KiB` sub-page BAR1 (`page_suboff`) mapping (`eff_bar_limit = bar.size_bytes.max(4096)`), `2 MiB` pinned DMA arena, and `libdry-lx-compat` (`2,164` shared C LOC vs `613` LOC island glue).
+- **Verification Status (`--p14-only` PASS):** `lx_driver_manager.py verify --all` (`56/56` files, `0` modified), `test_lx_driver_manager.py` (`5/5 OK`), `qemu_boot_test.py --build-only` (`clippy -D warnings` + `liblx_net_8139cp.a` + `dry-lx-net.elf`), and `python3 tools/qemu_boot_test.py --p14-only` (**`1/1 PASS`**, `3.95s` standalone / `3.85s` in combined `135/135` suite) all pass: QEMU Q35 `-device rtl8139` observed `8139cp+mii`, `mac=0x563412005452`, `bar1_suboff=0`, `tx=2`, `rx=2`, `arp=1`, `udp_echo=1`, `#UD vec=6`, `restarts=1` (`gen=2`), `drvctl=0x1fff`, and `leaked_frames=0`.

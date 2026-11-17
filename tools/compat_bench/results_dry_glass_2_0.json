@@ -36,7 +36,7 @@
         "colors": 32
       },
       "glass2_1280x800_daylight_125dpi.png": {
-        "non_bg_px": 1023293,
+        "non_bg_px": 1023153,
         "colors": 32
       },
       "glass2_1280x800_high_contrast.png": {
@@ -52,7 +52,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 11.97
+    "wall_time_sec": 12.055
   },
   "p10b": {
     "resolution": "1920x1080",
@@ -70,7 +70,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 5.29
+    "wall_time_sec": 5.445
   },
   "p10c": {
     "resolution": "1024x768",
@@ -84,6 +84,6 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 3.752
+    "wall_time_sec": 8.115
   }
 }

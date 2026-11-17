@@ -1,8 +1,8 @@
 # DRY OS — Teknik ve Ürün Risk Kaydı (`RISK_REGISTER.md`)
 
-> **Son Güncelleme:** 14 Kasım 2026 (`Project Ascension 4.0`: `DRY Glass 2.1` + `libdry-lx-compat` DRM Runtime + Hedef GPU Doğrulaması + `Live USB`)  
+> **Son Güncelleme:** 17 Kasım 2026 (`Project Ascension 5.0 — v0.5.0`: M1..M5, Team A `118`-SVG Kimlik, `Apache-2.0 OR MIT`, `160 MiB` GPT Live USB)  
 > **Sıralama:** Teknik şiddet ve mimari yıkıcılık derecesine göre (`P0` Kritik/Varoluşsal -> `P2` Orta).  
-> **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
+> **Durum Etiketleri:** `MITIGATED (QEMU/Formal)` (kodda ve testlerde koruma altında; sürekli regresyon zorunlu), `READY FOR USER PHYSICAL EXECUTION` (fiziksel kapılar kullanıcı çalıştırmasına hazır), `OPEN / PLANNED` (gelecek fazlarda aktif risk), `BOUNDED BY DESIGN` (mimari sınırla kapsam dışı tutuldu).
 
 ---
 
@@ -55,13 +55,13 @@
 - **Azaltma:** `IRQF_ONESHOT` zorlaması, `raw_spinlock_t`/`IRQF_NO_THREAD` derleme reddi ve tüm `dry_lx_dma_map_*` girişlerinde açık `[arena_base, arena_end)` sınır doğrulaması.
 
 ### R-08: `GPL-2.0-only` Sürücü Adaları ile `Apache-2.0` / `GPL-3.0` Lisans Çatışması
-- **Durum:** `BOUNDED BY DESIGN` (`ADR-005`).
-- **Azaltma:** Çekirdek ve native servisler `MIT OR GPL-2.0-only`; Linux sürücü adaları ayrı süreç sınırında `GPL-2.0-only`; saf `Apache-2.0` ve `GPL-3.0` bağımlılıkları yasak.
+- **Durum:** `BOUNDED BY DESIGN` (`ADR-005` & `LICENSING.md`).
+- **Azaltma:** Özgün DRY OS kodu (`kernel/`, `userspace/`, `assets/brand/`, `assets/icons/`, `tools/`, `docs/`) `Apache-2.0 OR MIT` ikili lisanslıdır; `libdry-lx-compat/` `MIT OR GPL-2.0-only`, Ring 3 Linux sürücü adaları ayrı süreç sınırında `GPL-2.0-only`/`GPL-2.0-or-later` altında tutulur (`kernel/` içinde `0` GPL satırı); saf `Apache-2.0` (MIT seçeneksiz) ve `GPL-3.0` bağımlılıkları yasaktır.
 
-### R-12: `DRY Glass` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Güncelleme — 14 Kasım 2026)
-- **Durum:** `MITIGATED (QEMU — DRY Glass v1 / 2.0 / 2.1)` / `OPEN (Bare-Metal iGPU)` (`ADR-009`, `ADR-020`, `ADR-021`, `P2`).
-- **Teknik Mekanizma:** Buzlu cam arka plan bulanıklığı, yuvarlatılmış yarı saydam kartlar, `Floating + Tiling + Stacking/Tabbed` geçişleri ve `100%/125%/150%` HiDPI yeniden ölçeklemenin yazılımsal GOP veya düşük uç donanımda kare süresini uzatması ya da UI mantığının çekirdeğe sızması.
-- **Uygulanan Savunma:** Tüm görsel/cam/WM/TrueType AA mantığı Ring 3 `dry-display` (`userspace/src/{ttf,ui,glass}/*`, `compositor.rs`) içinde tutuldu (`0` çekirdek UI satırı); `DirtyRegion` + `expand_blur_damage` kırpma, `Adaptive Window Strip` + `Alt+W` önizleme ile üst çubuk taşmasının önlenmesi (`DRY Glass 2.1`), `low_overhead_glass` (`Solid Fallback`) anahtarı ve donanım `VirtIO-GPU` `#UD` -> anlık `UEFI GOP` fallback (`--p9/p10/p11-only`) ile doğrulandı (`9` PNG `DRY Glass 2.1`).
+### R-12: `DRY Glass` Görsel Efekt / Hibrit WM Karmaşıklığının Düşük Donanımı veya Mikroçekirdek Sınırını Zorlaması (Güncelleme — 17 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU — DRY Glass 2.1 + 118 SVGs + 200% DPI)` / `OPEN (Bare-Metal iGPU)` (`ADR-009`, `ADR-020..023`, `P2`).
+- **Teknik Mekanizma:** Buzlu cam arka plan bulanıklığı, yuvarlatılmış yarı saydam kartlar, `Floating + Tiling + Stacking/Tabbed` geçişleri ve `100%/125%/150%/200%` HiDPI yeniden ölçeklemenin yazılımsal GOP veya düşük uç donanımda kare süresini uzatması ya da UI mantığının çekirdeğe sızması.
+- **Uygulanan Savunma:** Tüm görsel/cam/WM/vektör/TrueType AA mantığı Ring 3 `dry-display` (`userspace/src/{ttf,ui,glass}/*`, `vector_assets_{sys,apps}.rs`) içinde tutuldu (`0` çekirdek UI satırı); `DirtyRegion` + `expand_blur_damage` kırpma, `Adaptive Window Strip` + `Alt+W` önizleme (`DRY Glass 2.1`), `low_overhead_glass` anahtarı ve `VirtIO-GPU` `#UD` -> canlı `UEFI GOP` fallback (`--p9/p10/p11/p15-only`, `15` PNG) ile doğrulandı.
 
 ### R-13: `drypkg` Runtime Şişmesi ve Linux/Windows Uyumluluğunda Aşırı Vaat Riski (Yeni)
 - **Durum:** `BOUNDED BY DESIGN` (`ADR-011`, `P3/P4`).
@@ -89,12 +89,27 @@
 - **Teknik Mekanizma:** (a) Uyuyan bir GPU MicroVM'in vCPU'ları `HLT` durumunda `%1.3` CPU tüketse bile VFIO/IOMMU DMA eşlemesinin misafir RAM'ini kalıcı sabitlemesi (`Exp-B2`: `256 MiB` misafir için `309.41 MiB` `VmRSS`); (b) TigerLake-H dizüstünde `01:00.0` RTX 3050 Ti Mobile cihazının muxless (`0302`) olması, IOMMU Grup 13'ü `00:01.0` PCIe Kök Portuyla paylaşması ve `D0` boşta bırakıldığında `~8–15 W` pil tüketmesi.
 - **Azaltma:** `Kademe 4` GPU MicroVM varsayılan açılışta kesinlikle çalıştırılmaz (*opt-in / on-demand*); birincil ekran taraması her zaman Intel `00:02.0` üzerinde yerel `dry-display` mülkiyetinde kalır; GPU kiralaması sona erdiğinde MicroVM kapatılıp cihaz `FLR` + ACPI `RTD3 D3cold` durumuna indirilir (`P5` fiziksel silikon kabul kapısı).
 
-### R-18: Önyükleme Modül Tablosu Tavanı (`MAX_LATCHED_MODULES = 16 -> 32`) ve `Mock` vs Gerçek Linux Sürücü Adası Sınırları (Güncelleme — 14 Kasım 2026)
-- **Durum:** `MITIGATED (QEMU — 2A-4a / 2C-1 / Ascension 4.0)` (`ADR-017`, `ADR-022`).
-- **Teknik Mekanizma:** (a) Önyükleme modül dizisinin `16` yuvada doyup sessiz kırpma yapması; (b) `dry-mock-drv.elf` (`2C-0`) yalnızca CPU düzlemi PoC iken gerçek `virtio-rng` ve `drm/tiny/bochs` sürücü adalarının `PCI`/`DMA`/IRQ/kurtarma ile çalışması gerekiyordu.
-- **Uygulanan Savunma:** `MAX_LATCHED_MODULES = 32` (`24/32` modül aktif) ve `MAX_BOOT_ENTRIES = 36` artırıldı; `dry-lx-rng.elf` (`1af4:1044`, `v6.18` `virtio-rng.c`) ve `dry-lx-drm-bochs.elf` (`1234:1111`, `v6.18` `bochs.c`) gerçek QEMU aygıtları üzerinde tam `quiesce=3` + `gen=2` yeniden bağlanmayla doğrulandı (`--p6-only`, `--p12-only`, `leaked_frames=0`).
+### R-18: Önyükleme Modül Tablosu Tavanı (`MAX_LATCHED_MODULES = 32`, `27/32` Aktif) ve Çoklu-Sürücü Adası Sınırları (Güncelleme — 17 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU — 2A-4a .. Ascension 5.0)` (`ADR-017`, `ADR-022`, `ADR-023`).
+- **Teknik Mekanizma:** Önyükleme modül dizisinin dolup sessiz kırpma yapması; gerçek donanım sürücülerinin (`virtio-rng`, `drm/tiny/bochs`, `8139cp+mii`, `dry-usb`, `dry-nvme`) güvenli PCI/DMA/IRQ ve kurtarma sınırlarında kalması.
+- **Uygulanan Savunma:** `MAX_LATCHED_MODULES = 32` (`27/32` aktif) ve `MAX_BOOT_ENTRIES = 36` artırıldı; `dry-lx-rng` (`--lx-island-only`), `dry-lx-drm-bochs` (`--p12-only`), `dry-usb`/`dry-nvme` (`--p13-only`, `25/25`) ve `dry-lx-net` (`8139cp.c+mii.c`, `--p14-only` Step 2) tam kurtarma + `leaked_frames=0` ile ayrıldı.
 
-### R-19: İkili Linux `.ko` ABI Kayması, Çoklu-GPU BAR0 Çakışması ve Fiziksel Iris Xe / GSP Karmaşıklığı (Yeni — 14 Kasım 2026)
-- **Durum:** `.ko` Reddi & BAR0 Koruması `MITIGATED (QEMU — Ascension 4.0)` / Fiziksel `i915`/`xe` & `NVIDIA GSP` `OPEN / PLANNED (P5)` (`ADR-022`).
-- **Teknik Mekanizma:** (a) Ham `.ko` yükleme girişimleri çekirdek içi Linux modül sembol/struct ABI kaymasına yol açar; (b) İkincil bir DRM sürücü adasının (`PCI_OBJ_DISPLAY_AUX = 6`) birincil UEFI `GOP` çerçeve tamponu `BAR0`'ına yazması masaüstünü bozabilir; (c) Konak fiziksel GPU'lar (`8086:9a49` `Iris Xe`, `10de:25a0` `RTX 3050 Ti`) henüz bare-metal KMS/GEM/TTM veya `27.04 MB` `gsp_ga10x.bin` RPC katmanına sahip değildir.
-- **Uygulanan Savunma & Açık Sınır:** `lx_driver_manager.py` ve `COMPAT_CATALOG.json` ham `.ko` paketlerini açıkça reddederek kaynak bazlı `libdry-lx-compat` statik derlemesini ve SHA-256 doğrulamasını zorunlu kılar (`4/4` birim testi, `54` kaynak dosyası); çekirdek `pci.rs` ve `vtd.rs` ikinci DRM adası için `PCI_OBJ_DISPLAY_AUX = 6` + GOP çakışma koruması uygular (`--p12-only`: `800x600` Bochs + `1280x800` GOP masaüstü eş-varoluş `PASS`). Fiziksel `8086:9a49` (`GuC`/`GEM`/`TTM`) ve `10de:25a0` (`gsp_ga10x.bin` + `RTD3`) yalnızca `DRY_HOST_ONLY` salt-okunur doğrulama + `nv_os_shim_check.c` ön-derleme aşamasındadır ve bare-metal `modeset` iddiası yapılmaz.
+### R-19: İkili Linux `.ko` ABI Kayması, Çoklu-GPU BAR0 Çakışması ve Fiziksel Iris Xe / GSP Karmaşıklığı (Güncelleme — 17 Kasım 2026)
+- **Durum:** `.ko` Reddi & BAR0/FW Doğrulayıcıları `MITIGATED (QEMU/Offline)` / Fiziksel `i915`/`xe` & `NVIDIA GSP` `OPEN / BLOCKED (P5)` (`ADR-022`, `ADR-023`).
+- **Teknik Mekanizma:** (a) Ham `.ko` yüklemesi çekirdek ABI kırılmasına yol açar; (b) İkincil DRM adası (`PCI_OBJ_DISPLAY_AUX = 6`) birincil UEFI `GOP` `BAR0`'ına yazabilir; (c) Konak fiziksel GPU'lar (`8086:9a49`, `10de:25a0`) henüz GEM/TTM veya `27.04 MB` `gsp_ga10x.bin` RPC katmanına sahip değildir.
+- **Uygulanan Savunma & Açık Sınır:** `lx_driver_manager.py` ve `COMPAT_CATALOG.json` `.ko` paketlerini reddeder (`56` SHA-256 doğrulamalı kaynak, `5/5` birim testi); `preserve_active_gop` + `PCI_OBJ_DISPLAY_AUX = 6` GOP'u korur (`--p12-only` `PASS`); `gpu_fw_validators.py --self-test` (`tgl_dmc`/`tgl_guc`/`$VBT`/EDID, `gsp_ga10x` WPR2, `22/162` `os-interface.h`, PRIME `RO`) salt-okunur doğrulandı. Fiziksel GPU modeset **`BLOCKED`**, fiziksel testler **`READY FOR USER PHYSICAL EXECUTION`** durumundadır.
+
+### R-20: Bare-Metal Live USB İç Disk Güvenliği & GPT Bölüm 2 Sınır İhlali (`INV-DISK-SAFE-01/02`) (Yeni — 17 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU/Static — --p13-only 25/25 & --verify-boot)` / `Gate 3–4 READY FOR USER PHYSICAL EXECUTION` (`ADR-023`).
+- **Teknik Mekanizma:** Fiziksel bilgisayarda Live USB denenirken iç NVMe/SATA disklere (`nvme0n1`, `sda`) yanlışlıkla yazılması veya USB sürücüsünün LBA `0..33` GPT/Bölüm 1 `DRYOS_ESP` alanını bozması.
+- **Uygulanan Savunma:** (a) `dry-nvme` (`INV-DISK-SAFE-01`) yalnızca Admin `0x06/0x05/0x01` ve NVM `READ (0x02)` derler (`0` yazma/biçimlendirme opkodu), Intel VMD (`8086:9a0b`) salt-okunur kapılı tutulur; (b) `dry-usb` (`INV-DISK-SAFE-02`) her yazımı `rel_sector + count <= part2_sectors`, `dryfs_verified == true` ve `storage=ro` (`-EROFS`) kapısından geçirir (`--p13-only`: 3 önyükleme sonunda NVMe & Bölüm 1 SHA-256 değişmedi); (c) `docs/LIVE_USB_OPERATOR_GUIDE.md` yalnızca `/dev/disk/by-id/usb-*` yazımını zorunlu kılar.
+
+### R-21: UART-sız Dizüstü Önyükleme Kilitlenmesi (`8250.nr_uarts=0`) ve Kör Panik Riski (Yeni — 17 Kasım 2026)
+- **Durum:** `MITIGATED (Kernel + Limine)` / `Gate 5 READY FOR USER PHYSICAL EXECUTION` (`ADR-023`).
+- **Teknik Mekanizma:** Lenovo `15IHU6` (`82K1`) donanımında fiziksel `COM1` (`0x3F8`) yoktur (`8250.nr_uarts=0`). `limine.conf` içinde `serial: yes` bırakılması veya çekirdeğin `LSR` bitini körü körüne yoklaması önyüklemeyi yavaşlatır/kilitler ve seri kablo olmadan çekirdek paniğini görünmez kılar.
+- **Uygulanan Savunma:** `tools/build_live_usb_image.py` `limine.conf` içinden `serial: yes` yönergesini çıkardı; `kernel/src/serial.rs` `probe_com1_uart` ile `COM1+7` karalama yazmacını (`0x5a/0xa5`) ve `LSR != 0xff` denetleyerek UART yoksa I/O yazımını atlar, tüm günlükleri `16 KiB` `DIAG_RING` içinde tutar (`dmesg` + `/persist/boot.log`) ve `kernel/src/panic_fb.rs` ölümcül panikleri doğrudan UEFI GOP'a (`KERNEL_GOP_DIAG_BASE`) çizer.
+
+### R-22: Çift-DRHD Tiger Lake Aktif-GOP `VT-d` Karartması & `RMRR` DMA Hatası (Yeni — 17 Kasım 2026)
+- **Durum:** `MITIGATED (QEMU --p8-only + Unit Tests)` / `Gate 6 READY FOR USER PHYSICAL EXECUTION` (`ADR-023`).
+- **Teknik Mekanizma:** Tiger Lake dizüstülerde `00:02.0` (`Iris Xe`) ayrı bir `DRHD` birimi arkasında olabilir; ACPI `RMRR` ön-eşlemesi yapılmadan veya aktif UEFI GOP tarama birimi ayrılmadan `VT-d` `TE=1` açılması GOP ekranını karartabilir ya da `xHCI` USB önyükleme DMA'sını durdurabilir.
+- **Uygulanan Savunma:** `kernel/src/iommu/{slpt,vtd}.rs` içinde `dmar.drhd_count > 1 && is_dedicated_gop_drhd` yalnızca birden fazla `DRHD` varsa adanmış GOP birimini erteler (tek-DRHD QEMU'da `VTD_ACTIVE` korunur, aksi halde fail-closed); `premap_unit_rmrrs` `xHCI`/firmware `RMRR` aralıklarını `TE=1` öncesi `BOOT_RMRR_DID` ile ön-eşler; `39-bit` 3-seviyeli `SLPT` (`slpt39_rmrr_unit=2`) ve `preserve_active_gop` birim testleri + `--p8-only` (`vtd_rogue_faults=1`, `leaked_frames=0`) doğrulandı.

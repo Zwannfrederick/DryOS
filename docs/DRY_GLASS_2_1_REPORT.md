@@ -62,3 +62,22 @@ All 9 captured screenshots were visually inspected directly:
 7. [glass21_1024x768_narrow_150dpi_tiled.png](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/dryos/docs/screenshots/glass21/glass21_1024x768_narrow_150dpi_tiled.png) — Narrow `1024x768` `150%` DPI workspace renders readable KPI cards, `/persist` status badge, and Settings rail.
 8. [glass21_1920x1080_tiled_workspace.png](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/dryos/docs/screenshots/glass21/glass21_1920x1080_tiled_workspace.png) — Full `1920x1080` workspace displays `Live DRY Glass 2.1 Settings` and crisp tiled proportions.
 9. [glass21_1920x1080_overview.png](file:///home/zwannfrederick/Masaüstü/Sektor/Coding/dryos/docs/screenshots/glass21/glass21_1920x1080_overview.png) — Centered Window Overview over blurred `1920x1080` workspace (`5 open`).
+
+---
+
+## 4. Ascension 5.0 (`v0.5.0`) Visual Identity, 118 SVGs & `200%` DPI (`--p15-only`)
+
+Project Ascension 5.0 replaces ad-hoc placeholder glyphs with a complete, original DRY OS vector design system (`Apache-2.0 OR MIT`) integrated directly into `DRY Glass 2.1`:
+
+- **Original Vector Inventory (`118` SVGs, `0` third-party packs, `0` `<text>` tags, `0` emojis):**
+  - `assets/brand/` (`6` SVGs): `Iso-Kernel Prism` primary emblem (`64x64`), optically simplified `16x16` mark (`dryos-symbol-small-16.svg`), pure-path dark/light/HC wordmarks, and `dryos-lockup-boot.svg`.
+  - `assets/icons/apps/` (`21` SVGs): `64x64` rounded-squircle badges with 2-stop vertical gradients across 5 semantic domain palettes (`terminal`, `files`, `settings`, `life-station`, `notes`, `calculator`, `text-editor`, `system-monitor`, `launcher`, `storage-manager`, `network-manager`, `audio-settings`, `display-settings`, `security-vault`, `software-store`, `update-manager`, `driver-manager`, `device-manager`, `power-manager`, `system-info`, `help-diagnostics`).
+  - `assets/icons/system/` (`91` SVGs): `24x24` UI icons spanning navigation/actions, files/storage, hardware, system status, and desktop controls.
+- **Deterministic Asset Pipeline & UI Integration:**
+  - `tools/build_vector_assets.py` (`686` lines) compiles all `118` SVGs into `#![no_std]` Rust `Q12` integer POD tables: `userspace/src/ui/vector_assets_sys.rs` (`577` lines, `1,227` shapes) and `userspace/src/ui/vector_assets_apps.rs` (`661` lines, `1,712` shapes), verified with `python3 tools/build_vector_assets.py --verify` and `rustc -D warnings`, plus `4` multi-scale contact sheets (`contact_sheet_{dark,light,hc,scales}.png` across `16..256 px`).
+  - Integrated into `userspace/src/ui/{mod,brand,app_icons,theme,icons,canvas}.rs`, `userspace/src/glass/{chrome,dock_bar,overlays,overview,window_strip}.rs`, `userspace/src/apps/{files_ui,settings_ui,sysmon_ui}.rs`, `userspace/src/display_banner.rs`, and `userspace/src/bin/dry_settings.rs`.
+  - **`200%` HiDPI Support:** `UiTheme::new` scales `100% / 125% / 150% / 200%` (`dpi_pct >= 185 => 200`), bound to key `[9]` and Settings UI controls while preserving key `[0]` (`100 -> 125 -> 150 -> 100`) backward compatibility for `--p11-only`. Key `[V]` / `Identity` renders a live 21-app + system icon gallery inside Settings.
+- **QEMU/QMP E2E Verification (`--p15-only`, `tools/qemu_p15_brand_icons_validators.py`, `384` lines):**
+  - **`4/4` PASS (`leaked_frames=0`):** `p15_boot_banner` (`1280x800`, `non_bg_px=255880`, `colors=32`), `p15a_1280x800_brand_themes_dpi` (`Dark`/`Daylight`/`HC` + `200%` DPI gallery/settings + overview + lock screen), `p15b_1024x768_125_150dpi` (`125%`/`150%` tiled gallery), and `p15c_1920x1080_showcase`.
+  - All **`15`** captured PNG screenshots reside in `docs/screenshots/brand_icons/` (`p15_boot_banner.png`, `p15_1280x800_{dark_desktop,launcher,files,gallery_dark,gallery_light,gallery_hc,gallery_200dpi,settings_200dpi,overview,lock_screen}.png`, `p15_1024x768_tiled_gallery_{125dpi,150dpi}.png`, `p15_1920x1080_{tiled_gallery,overview}.png`).
+  - **Combined Post-Merge Verification:** `python3 tools/qemu_boot_test.py` passed **`135/135`** deterministic checks (`leaked_frames=0`), and [`tools/compat_bench/results_p15_brand_icons.json`](../tools/compat_bench/results_p15_brand_icons.json) records `p15a` (`1280x800`, `10` PNGs, `9.925s`), `p15b` (`1024x768`, `2` PNGs, `4.408s`), and `p15c` (`1920x1080`, `2` PNGs, `5.291s`) alongside `p15_boot_banner.png` (all `leaked_frames=0`).
