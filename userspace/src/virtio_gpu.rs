@@ -47,7 +47,7 @@ const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 
 const VIRTIO_GPU_F_VIRGL: u32 = 1 << 0;
 
-const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+pub(crate) const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
@@ -66,7 +66,7 @@ struct VirtqDesc {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct VirtioGpuCtrlHdr {
+pub struct VirtioGpuCtrlHdr {
     kind: u32,
     flags: u32,
     fence_id: u64,
@@ -75,12 +75,37 @@ struct VirtioGpuCtrlHdr {
 }
 
 impl VirtioGpuCtrlHdr {
-    const fn new(kind: u32) -> Self {
+    pub(crate) const fn new(kind: u32) -> Self {
         Self {
             kind,
             flags: 0,
             fence_id: 0,
             ctx_id: 0,
+            padding: 0,
+        }
+    }
+
+    pub(crate) const fn with_ctx_fence(kind: u32, ctx_id: u32, fence_id: u64) -> Self {
+        Self {
+            kind,
+            flags: 0,
+            fence_id,
+            ctx_id,
+            padding: 0,
+        }
+    }
+
+    pub(crate) const fn with_ctx_fence_flag(
+        kind: u32,
+        ctx_id: u32,
+        fence_id: u64,
+        flags: u32,
+    ) -> Self {
+        Self {
+            kind,
+            flags,
+            fence_id,
+            ctx_id,
             padding: 0,
         }
     }
@@ -234,6 +259,7 @@ pub struct VirtioGpu2d {
     pub msi_irqs: u64,
     pub transfer_bytes: u64,
     pub probe_3d: Virtio3dProbeInfo,
+    pub smoke_3d: crate::virtio_gpu_3d::Virtio3dSmokeResult,
 }
 
 #[inline]
@@ -418,6 +444,7 @@ impl VirtioGpu2d {
                     virgl_supported,
                     ..Virtio3dProbeInfo::default()
                 },
+                smoke_3d: crate::virtio_gpu_3d::Virtio3dSmokeResult::default(),
             };
 
             if let Err(err) = dev.setup_scanout_2d() {
@@ -425,6 +452,7 @@ impl VirtioGpu2d {
                 return Err(err);
             }
             dev.probe_3d_capsets();
+            dev.smoke_3d = crate::virtio_gpu_3d::run_virgl_3d_smoke_test(&mut dev);
             Ok(dev)
         }
     }
@@ -519,6 +547,64 @@ impl VirtioGpu2d {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn pci_cap(&self) -> u64 {
+        self.pci_cap
+    }
+
+    pub(crate) unsafe fn submit_raw_cmd(&mut self, req_bytes: &[u8], resp_len: u32) -> Result<u32, i32> {
+        if req_bytes.len() > CMD_RESP_OFF as usize {
+            return Err(197);
+        }
+        // SAFETY: Caller ensures valid command bytes fitting in `[+0x000..+0x400)` of `GPU_CMD_VADDR`.
+        unsafe {
+            copy_nonoverlapping(req_bytes.as_ptr(), GPU_CMD_VADDR as *mut u8, req_bytes.len());
+            self.submit_sync(req_bytes.len() as u32, resp_len)
+        }
+    }
+
+    pub(crate) unsafe fn attach_backing_single_page(
+        &mut self,
+        res_id: u32,
+        pa: u64,
+        len: u32,
+    ) -> Result<u32, i32> {
+        #[repr(C)]
+        struct SingleAttach {
+            hdr: VirtioGpuResourceAttachBacking,
+            ent: VirtioGpuMemEntry,
+        }
+        let pkt = SingleAttach {
+            hdr: VirtioGpuResourceAttachBacking {
+                hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
+                resource_id: res_id,
+                nr_entries: 1,
+            },
+            ent: VirtioGpuMemEntry {
+                addr: pa,
+                length: len,
+                padding: 0,
+            },
+        };
+        // SAFETY: POD packet fits cleanly inside `[+0x000..+0x400)` of `GPU_CMD_VADDR`.
+        unsafe {
+            copy_nonoverlapping((&raw const pkt).cast::<u8>(), GPU_CMD_VADDR as *mut u8, size_of::<SingleAttach>());
+            self.submit_sync(size_of::<SingleAttach>() as u32, size_of::<VirtioGpuCtrlHdr>() as u32)
+        }
+    }
+
+    pub(crate) unsafe fn unref_resource(&mut self, res_id: u32) -> Result<(), i32> {
+        unsafe {
+            self.cmd_simple(
+                &VirtioGpuResourceUnref {
+                    hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_UNREF),
+                    resource_id: res_id,
+                    padding: 0,
+                },
+                VIRTIO_GPU_RESP_OK_NODATA,
+            )
+        }
     }
 
     unsafe fn setup_scanout_2d(&mut self) -> Result<(), i32> {

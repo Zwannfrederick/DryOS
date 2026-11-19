@@ -28,6 +28,7 @@ pub mod lx_drv_proto;
 pub mod lx_island_audit;
 pub mod persist_fs;
 pub mod virtio_gpu;
+pub mod virtio_gpu_3d;
 pub mod ps2;
 pub mod nvme_ro;
 pub mod shell;

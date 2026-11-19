@@ -146,6 +146,30 @@ fn emit_gpu_init_log(gpu: &VirtioGpu2d) {
     pb.push_bytes(b" max_sz=");
     pb.push_u64(u64::from(gpu.probe_3d.max_size));
     log_line(&pb);
+
+    let mut sb = LineBuilder::new();
+    let s3 = &gpu.smoke_3d;
+    sb.push_bytes(b"[DRY-GPU] 3D_SMOKE unit_ok=");
+    sb.push_u64(u64::from(s3.unit_ok));
+    sb.push_bytes(b" exec=");
+    sb.push_u64(u64::from(s3.executed));
+    sb.push_bytes(b" ctx=");
+    sb.push_u64(u64::from(s3.ctx_ok));
+    sb.push_bytes(b" res=");
+    sb.push_u64(u64::from(s3.res_ok));
+    sb.push_bytes(b" submit=");
+    sb.push_u64(u64::from(s3.submit_fenced_ok));
+    sb.push_bytes(b" xfer=0x");
+    sb.push_hex_u64(s3.xfer_resp_kind as u64);
+    sb.push_bytes(b" px=0x");
+    sb.push_hex_u64(s3.readback_pixel as u64);
+    sb.push_bytes(b" match=");
+    sb.push_u64(u64::from(s3.pixel_match));
+    sb.push_bytes(b" neg_err=0x");
+    sb.push_hex_u64(s3.neg_err_kind as u64);
+    sb.push_bytes(b" clean=");
+    sb.push_u64(u64::from(s3.cleaned_up));
+    log_line(&sb);
 }
 
 #[no_mangle]

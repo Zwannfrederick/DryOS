@@ -1,14 +1,19 @@
 {
-  "status": "HOST_VIRGL_UNAVAILABLE",
+  "status": "HOST_VIRGL_QEMU_GL_AVAILABLE",
+  "isolated_virgl_env_used": true,
   "qemu_binary": "/usr/bin/qemu-system-x86_64",
+  "qemu_module_dir": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/.toolchains/virgl-env/qemu-modules",
+  "ld_library_path_prefix": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/.toolchains/virgl-env/lib",
   "virtio_gpu_pci_available": true,
-  "virtio_gpu_gl_pci_available": false,
+  "virtio_gpu_gl_pci_available": true,
   "virtio_gpu_pci_virgl_prop": false,
-  "virtio_gpu_gl_props": [],
-  "egl_headless_available": false,
-  "virglrenderer_lib_present": false,
-  "virglrenderer_lib_path": null,
-  "qmp_gl_instantiation_ok": false,
-  "qmp_gl_detail": "skipped_missing_gl_or_egl",
+  "virtio_gpu_gl_props": [
+    "blob=<bool>            - on/off (default: off)"
+  ],
+  "egl_headless_available": true,
+  "virglrenderer_lib_present": true,
+  "virglrenderer_lib_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/.toolchains/virgl-env/lib/libvirglrenderer.so.1",
+  "qmp_gl_instantiation_ok": true,
+  "qmp_gl_detail": "qmp_instantiated",
   "notes": "Read-only QEMU probe; no host /dev/* mutation or GPU unbind performed."
 }

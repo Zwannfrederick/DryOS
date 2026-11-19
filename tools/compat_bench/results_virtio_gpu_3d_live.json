@@ -1,0 +1,22 @@
+{
+  "status": "VERIFIED_QEMU",
+  "renderer": "QEMU virtio-gpu-gl-pci + egl-headless (Mesa software llvmpipe)",
+  "isolated_virgl_env_used": true,
+  "probe_line": "[DRY-GPU] 3D_PROBE virgl=1 capsets=2 id=1 max_ver=1 max_sz=308",
+  "smoke_line": "[DRY-GPU] 3D_SMOKE unit_ok=1 exec=1 ctx=1 res=1 submit=1 xfer=0x1100 px=0xffff0000 match=1 neg_err=0x1205 clean=1",
+  "virgl_supported": true,
+  "num_capsets": 2,
+  "first_capset_id": 1,
+  "unit_ok": true,
+  "executed": true,
+  "ctx_ok": true,
+  "res_ok": true,
+  "submit_fenced_ok": true,
+  "xfer_resp_kind": "0x1100",
+  "readback_pixel": "0xffff0000",
+  "pixel_match": true,
+  "neg_err_kind": "0x1205",
+  "cleaned_up": true,
+  "leaked_frames": 0,
+  "wall_time_sec": 16.295
+}
