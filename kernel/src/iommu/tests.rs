@@ -3,19 +3,21 @@
 
 use core::ptr::read_volatile;
 
-use crate::iommu::dmar::{parse_dmar_bytes, DmarError};
+use crate::iommu::dmar::{parse_dmar_bytes, DmarDevScope, DmarError};
 use crate::iommu::ivrs::parse_ivrs_bytes;
 use crate::iommu::ops::{
     cmdline_has_token, evaluate_iommu_policy_flags, is_dma_allowed_status,
     is_hw_enforcing_status, IommuBackendKind, IommuCaps, IommuOps, IommuPerms, IommuStatus,
 };
 use crate::iommu::{
-    active_iommu_ops, backend_kind, caps, fail_closed_ops_for_test, status,
+    active_iommu_ops, backend_kind, caps, fail_closed_ops_for_test, map_dma_range_iova,
+    overlaps_rmrr, status,
 };
 use crate::iommu::slpt::{
     clear_slpt_4k, flush_entire_page, free_all_domain_frames, is_dedicated_gop_drhd, map_slpt_4k,
     DomainState, VTD_KERNEL_LABEL,
 };
+use crate::iommu::vtd_domain::pick_did;
 use crate::pmm::{alloc_pages, phys_to_hhdm, AllocFlags, PageOrder};
 use crate::serial_println;
 
@@ -162,9 +164,51 @@ pub fn run_dmar_unit_tests() {
     // SAFETY: `root_h` is a mapped 4 KiB HHDM page populated by `map_slpt_4k`.
     let root_entry = unsafe { read_volatile((phys_to_hhdm(root_h.phys_addr()) as *const u64).add(lvl2_idx)) };
     assert_ne!(root_entry & 0x3, 0);
+    clear_slpt_4k(true, root_h.phys_addr(), gpa_oob, false);
     clear_slpt_4k(true, root_h.phys_addr(), gpa_ok, false);
     free_all_domain_frames(&mut dom39);
     assert_eq!(dom39.pt_count, 0);
+
+    // 7b. Dynamic DID allocation (`nd=16` & `nd=64`), DMAR scope_type filtering & IOVA overflow guards
+    let mut used14 = [0u16; 14];
+    for (idx, dst) in used14.iter_mut().enumerate() {
+        *dst = (idx + 2) as u16;
+    }
+    assert_eq!(pick_did(16, &used14), None);
+    assert_eq!(pick_did(64, &used14), Some(16));
+    assert_eq!(pick_did(16, &[]), Some(2));
+
+    let ioapic_sc = DmarDevScope {
+        valid: true,
+        scope_type: 3,
+        bus: 0,
+        dev: 2,
+        func: 0,
+        sec_bus: 0,
+        sub_bus: 0,
+    };
+    let hpet_sc = DmarDevScope {
+        scope_type: 4,
+        ..ioapic_sc
+    };
+    let bridge_sc = DmarDevScope {
+        valid: true,
+        scope_type: 2,
+        bus: 0,
+        dev: 1,
+        func: 0,
+        sec_bus: 1,
+        sub_bus: 4,
+    };
+    assert!(!ioapic_sc.matches_pci_bdf(0, 2, 0));
+    assert!(!hpet_sc.matches_pci_bdf(0, 2, 0));
+    assert!(bridge_sc.matches_pci_bdf(1, 0, 0));
+    assert!(bridge_sc.matches_pci_bdf(4, 31, 7));
+    assert!(!bridge_sc.matches_pci_bdf(5, 0, 0));
+    assert!(map_dma_range_iova(0, u64::MAX - 0xfff, 0x1000, 0x2000, IommuPerms::RW).is_err());
+    assert!(map_dma_range_iova(0, 0x1000, 0x1000, 0, IommuPerms::RW).is_err());
+    assert!(map_dma_range_iova(0, 0x1001, 0x1000, 0x1000, IommuPerms::RW).is_err());
+    let _ = overlaps_rmrr(0, 4096);
 
     serial_println!("[DRY-IOMMU] PASS: slpt39_rmrr_unit=2");
 

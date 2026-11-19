@@ -306,16 +306,6 @@ pub unsafe extern "C" fn dry_lx_rust_dma_sg_alloc(
     }
     let bytes = u64::from(n_pages) * 4096;
     let base_va = SG_VA_NEXT.fetch_add(bytes, Ordering::Relaxed);
-    for i in 0..n_pages {
-        let Ok(fcap) = sys_frame_alloc(0) else {
-            return dry_userspace::ENOMEM as i32;
-        };
-        let va = base_va + u64::from(i) * 4096;
-        if let Err(e) = sys_vspace_map(fcap, va, VSPACE_MAP_OP_4K_RW) {
-            let _ = sys_cap_revoke(fcap, 1);
-            return e as i32;
-        }
-    }
     match sys_dma_alloc_sg(pci_cap, base_va, n_pages as u16, dir_flags as u8, None) {
         Ok(desc) => {
             // SAFETY: Out pointers checked non-null above.

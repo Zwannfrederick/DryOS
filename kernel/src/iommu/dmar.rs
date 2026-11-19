@@ -36,6 +36,8 @@ pub struct DmarDevScope {
     pub bus: u8,
     pub dev: u8,
     pub func: u8,
+    pub sec_bus: u8,
+    pub sub_bus: u8,
 }
 
 impl DmarDevScope {
@@ -46,6 +48,26 @@ impl DmarDevScope {
             bus: 0,
             dev: 0,
             func: 0,
+            sec_bus: 0,
+            sub_bus: 0,
+        }
+    }
+
+    /// True when `(bus, dev, func)` matches a PCI Endpoint (`type 1`) or PCI Sub-hierarchy (`type 2`).
+    pub fn matches_pci_bdf(&self, bus: u8, dev: u8, func: u8) -> bool {
+        if !self.valid {
+            return false;
+        }
+        match self.scope_type {
+            1 => self.bus == bus && self.dev == dev && self.func == func,
+            2 => {
+                (self.bus == bus && self.dev == dev && self.func == func)
+                    || (self.sec_bus != 0
+                        && self.sub_bus >= self.sec_bus
+                        && bus >= self.sec_bus
+                        && bus <= self.sub_bus)
+            }
+            _ => false,
         }
     }
 }
@@ -175,11 +197,21 @@ fn parse_device_scopes(
         let mut cur_bus = start_bus;
         let path_bytes = &bytes[off + 6..off + scope_len];
         let hops = path_bytes.len() / 2;
+        let mut hop_valid = true;
         for h in 0..(hops - 1) {
-            let b_dev = path_bytes[h * 2] & 0x1f;
-            let b_func = path_bytes[h * 2 + 1] & 0x07;
+            let b_dev = path_bytes[h * 2];
+            let b_func = path_bytes[h * 2 + 1];
+            if b_dev > 31 || b_func > 7 {
+                return Err(DmarError::InvalidScope);
+            }
             if resolve_live_bridges {
-                cur_bus = crate::pci::pci_read_u8(cur_bus, b_dev, b_func, 0x19);
+                let vid = crate::pci::pci_read_u16(cur_bus, b_dev, b_func, 0x00);
+                let sec = crate::pci::pci_read_u8(cur_bus, b_dev, b_func, 0x19);
+                if vid == 0xffff || sec == 0 || sec == 0xff || sec <= cur_bus {
+                    hop_valid = false;
+                    break;
+                }
+                cur_bus = sec;
             }
         }
         let leaf_dev = path_bytes[(hops - 1) * 2];
@@ -187,13 +219,27 @@ fn parse_device_scopes(
         if leaf_dev > 31 || leaf_func > 7 {
             return Err(DmarError::InvalidScope);
         }
+        let (sec_bus, sub_bus) = if resolve_live_bridges && hop_valid && scope_type == 2 {
+            let vid = crate::pci::pci_read_u16(cur_bus, leaf_dev, leaf_func, 0x00);
+            let sec = crate::pci::pci_read_u8(cur_bus, leaf_dev, leaf_func, 0x19);
+            let sub = crate::pci::pci_read_u8(cur_bus, leaf_dev, leaf_func, 0x1a);
+            if vid == 0xffff || sec == 0 || sec == 0xff || sub < sec {
+                (0, 0)
+            } else {
+                (sec, sub)
+            }
+        } else {
+            (0, 0)
+        };
         if count < MAX_DEV_SCOPES {
             out[count] = DmarDevScope {
-                valid: true,
+                valid: hop_valid,
                 scope_type,
                 bus: cur_bus,
                 dev: leaf_dev,
                 func: leaf_func,
+                sec_bus,
+                sub_bus,
             };
             count += 1;
         }
@@ -363,4 +409,26 @@ pub(crate) fn set_drhd_mapped_pages(unit_idx: usize, pages: u8) {
     unsafe {
         (*DMAR_DATA.0.get()).drhds[unit_idx].mapped_pages = pages;
     }
+}
+
+/// True if `[base .. base + len_bytes)` overlaps any valid latched firmware `RMRR` range.
+pub fn overlaps_rmrr(base: u64, len_bytes: u64) -> bool {
+    if len_bytes == 0 {
+        return false;
+    }
+    let Some(end_incl) = base.checked_add(len_bytes - 1) else {
+        return true;
+    };
+    let Some(dmar) = dmar_snapshot() else {
+        return false;
+    };
+    let page_mask = !((PAGE_SIZE as u64) - 1);
+    dmar.rmrrs.iter().take(dmar.rmrr_count).any(|rmrr| {
+        if !rmrr.valid {
+            return false;
+        }
+        let r_start = rmrr.base_addr & page_mask;
+        let r_end_incl = rmrr.limit_addr | ((PAGE_SIZE as u64) - 1);
+        base <= r_end_incl && end_incl >= r_start
+    })
 }

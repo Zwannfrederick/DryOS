@@ -17,8 +17,8 @@ use crate::cspace::revoke::cspace_destroy_object;
 use crate::cspace::with_pinned_cap;
 use crate::iommu::ops::IommuPerms;
 use crate::iommu::{
-    detach_and_scrub_domain, is_hw_enforcing, map_dma_range, map_dma_range_iova,
-    poll_and_clear_faults, unmap_dma_range,
+    detach_and_scrub_domain, is_device_coherent, is_hw_enforcing, map_dma_range,
+    map_dma_range_iova, overlaps_rmrr, poll_and_clear_faults, unmap_dma_range,
 };
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci::{
@@ -26,12 +26,14 @@ use crate::pci::{
     reset_pci_slot_owner, validated_pci_slot, MAX_MANAGED_PCI_DEVS,
 };
 use crate::pmm::{
-    adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
+    adjust_frame_iommu_pin, alloc_pages, free_pages, inspect_frame_live, phys_to_hhdm, AllocFlags,
+    FrameHandle, FrameState, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
 };
 use crate::proc::process_vspace_cap;
 use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
 use crate::uaccess::{copy_from_user, copy_to_user, SysError};
 use crate::vspace::pte::{VmProt, USER_VADDR_LIMIT};
+use crate::vspace::{inspect_vspace_live, map_4k_cap_authorized, unmap_4k, VSpaceHandle};
 
 const MAX_DMA_PINS_PER_DEV: usize = 32;
 const MAX_SG_BUFS_PER_DEV: usize = 4;
@@ -95,11 +97,13 @@ struct SgBufEntry {
     active: bool,
     buf_id: u64,
     owner_cspace: CSpaceId,
+    vs_h: VSpaceHandle,
+    dma_label: SecLabel,
     direction: u8,
     page_count: u16,
     iova_base: u64,
     user_vaddr: u64,
-    frames: [Option<(u64, FrameHandle)>; DMA_MAX_SG_SEGS],
+    frames: [Option<FrameHandle>; DMA_MAX_SG_SEGS],
 }
 
 impl SgBufEntry {
@@ -107,6 +111,11 @@ impl SgBufEntry {
         active: false,
         buf_id: 0,
         owner_cspace: 0,
+        vs_h: VSpaceHandle {
+            id: 0,
+            generation: 0,
+        },
+        dma_label: SecLabel::new(SecDomain::RootSystem, SecFlags::NONE, 0, 0),
         direction: 0,
         page_count: 0,
         iova_base: 0,
@@ -198,8 +207,30 @@ fn unmap_and_destroy_dma_frame(
     let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
 }
 
+fn release_sg_frames(entry: &SgBufEntry) {
+    let vs_live = inspect_vspace_live(entry.vs_h.id)
+        .is_some_and(|(gen, _, _)| gen == entry.vs_h.generation);
+    let pages = entry.page_count as usize;
+    for (i, item) in entry.frames.iter().take(pages).enumerate() {
+        if let Some(fh) = *item {
+            if vs_live {
+                let va = entry.user_vaddr + (i as u64) * (PAGE_SIZE as u64);
+                let _ = unmap_4k(entry.vs_h, va);
+            }
+            if matches!(
+                inspect_frame_live(fh.pfn),
+                Some((FrameState::AllocatedFrame, 0, 0, g, _)) if g == fh.generation
+            ) {
+                free_pages(fh, PageOrder::Order4KiB, entry.dma_label);
+            }
+        }
+    }
+}
+
 /// Release all IOMMU mappings, `iommu_pin_count` pins, and reset IOVA cursor for `dev_idx`.
 pub(crate) fn quiesce_dma_for_slot(dev_idx: usize, cspace_id: CSpaceId) {
+    let mut drained = [SgBufEntry::EMPTY; MAX_SG_BUFS_PER_DEV];
+    let mut drained_cnt = 0usize;
     with_dma_slot_lock(dev_idx, |st| {
         detach_and_scrub_domain(dev_idx);
         for pin in st.pinned_frames.iter_mut() {
@@ -209,19 +240,24 @@ pub(crate) fn quiesce_dma_for_slot(dev_idx: usize, cspace_id: CSpaceId) {
         }
         for sg in st.sg_bufs.iter_mut() {
             if sg.active {
-                for item in sg.frames.iter_mut() {
-                    if let Some((_, fh)) = item.take() {
+                let pages = sg.page_count as usize;
+                for item in sg.frames.iter().take(pages) {
+                    if let Some(fh) = *item {
                         let _ = adjust_frame_iommu_pin(fh, -1);
                     }
                 }
-                sg.active = false;
-                sg.buf_id = 0;
+                drained[drained_cnt] = *sg;
+                drained_cnt += 1;
+                *sg = SgBufEntry::EMPTY;
             }
         }
         st.mapped_iova_bytes = 0;
         st.iova_next = DMA_IOVA_BASE;
         reset_pci_slot_owner(dev_idx, cspace_id);
     });
+    for entry in drained.iter().take(drained_cnt) {
+        release_sg_frames(entry);
+    }
 }
 
 fn check_pci_cap(
@@ -371,6 +407,53 @@ pub fn sys_dma_alloc(
     Ok((0, frame_cap.0))
 }
 
+fn ranges_overlap(a0: u64, len_a: u64, b0: u64, len_b: u64) -> bool {
+    if len_a == 0 || len_b == 0 {
+        return false;
+    }
+    let a1 = a0.saturating_add(len_a - 1);
+    let b1 = b0.saturating_add(len_b - 1);
+    a0 <= b1 && a1 >= b0
+}
+
+fn find_free_iova_range(
+    st: &DmaSlotInner,
+    pages: usize,
+    total_bytes: u64,
+    frames: &[Option<FrameHandle>; DMA_MAX_SG_SEGS],
+) -> Option<u64> {
+    let aw_bits = crate::iommu::caps().max_aw_bits.clamp(32, 48);
+    let max_iova_end = 1u64 << aw_bits;
+    if total_bytes > max_iova_end.saturating_sub(DMA_IOVA_BASE) {
+        return None;
+    }
+    let mut cand = st.iova_next.max(DMA_IOVA_BASE);
+    let step = PAGE_SIZE as u64;
+    for _ in 0..256 {
+        if cand.checked_add(total_bytes).is_none_or(|end| end > max_iova_end) {
+            cand = DMA_IOVA_BASE;
+        }
+        let sg_conflict = st.sg_bufs.iter().any(|s| {
+            s.active && ranges_overlap(cand, total_bytes, s.iova_base, (s.page_count as u64) * step)
+        });
+        let pin_conflict = st.pinned_frames.iter().any(|p| {
+            p.is_some_and(|fh| ranges_overlap(cand, total_bytes, fh.phys_addr(), 2 * 1024 * 1024))
+        });
+        let self_conflict = frames.iter().take(pages).enumerate().any(|(i, item)| {
+            item.is_some_and(|fh| cand + (i as u64) * step == fh.phys_addr())
+        });
+        if !sg_conflict
+            && !pin_conflict
+            && !self_conflict
+            && !overlaps_rmrr(cand, total_bytes)
+        {
+            return Some(cand);
+        }
+        cand = cand.saturating_add(total_bytes);
+    }
+    None
+}
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn dma_op_alloc_sg(
@@ -410,6 +493,33 @@ fn dma_op_alloc_sg(
     }
     let perms = perms_for_dir(desc.direction)?;
     let vs_cap = process_vspace_cap(pid).ok_or(SysError::Perm)?;
+    let vs_h = with_pinned_cap(
+        cspace_id,
+        subj_label,
+        vs_cap,
+        CapRights::MAP,
+        current_lease_epoch(),
+        |res| {
+            if res.obj_kind != CapObjectKind::VSpace {
+                return Err(CapError::WrongObjectKind);
+            }
+            let h = VSpaceHandle {
+                id: res.obj_id as u16,
+                generation: res.expected_obj_gen,
+            };
+            let Some((live_gen, _, owner_lbl)) = inspect_vspace_live(h.id) else {
+                return Err(CapError::InvalidHandle);
+            };
+            if live_gen != h.generation
+                || owner_lbl.domain != subj_label.domain
+                || owner_lbl.compartment_id != subj_label.compartment_id
+            {
+                return Err(CapError::StaleGenerationAba);
+            }
+            Ok(h)
+        },
+    )
+    .map_err(map_cap_err_to_sys)?;
     let Some(vdev) = validated_pci_slot(dev_idx) else {
         return Err(SysError::Inval);
     };
@@ -425,33 +535,35 @@ fn dma_op_alloc_sg(
         subj_label.compartment_id,
         subj_label.policy_tag,
     );
-    let mut frames: [Option<(u64, FrameHandle)>; DMA_MAX_SG_SEGS] = [None; DMA_MAX_SG_SEGS];
+    let mut frames: [Option<FrameHandle>; DMA_MAX_SG_SEGS] = [None; DMA_MAX_SG_SEGS];
     for (idx, dst) in frames.iter_mut().take(pages).enumerate() {
         let va = desc.user_vaddr + (idx as u64) * (PAGE_SIZE as u64);
-        let Ok((fr_cap, fh)) =
-            cspace_alloc_frame(cspace_id, subj_label, dma_label, PageOrder::Order4KiB, false, 0)
-        else {
-            for (rb_idx, rb) in frames.iter_mut().take(idx).enumerate() {
-                if let Some((rcap, _)) = rb.take() {
-                    let rva = desc.user_vaddr + (rb_idx as u64) * (PAGE_SIZE as u64);
-                    unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, CapPtr(rcap), rva, false);
-                }
-            }
+        let Ok(fh) = alloc_pages(PageOrder::Order4KiB, dma_label, AllocFlags::ZERO) else {
+            let rb = SgBufEntry {
+                page_count: idx as u16,
+                vs_h,
+                dma_label,
+                user_vaddr: desc.user_vaddr,
+                frames,
+                ..SgBufEntry::EMPTY
+            };
+            release_sg_frames(&rb);
             return Err(SysError::NoMem);
         };
-        if let Err(e) =
-            cspace_vspace_map_4k(cspace_id, subj_label, vs_cap, fr_cap, va, VmProt::USER_RW, 0)
-        {
-            let _ = cspace_destroy_object(cspace_id, subj_label, fr_cap, 0);
-            for (rb_idx, rb) in frames.iter_mut().take(idx).enumerate() {
-                if let Some((rcap, _)) = rb.take() {
-                    let rva = desc.user_vaddr + (rb_idx as u64) * (PAGE_SIZE as u64);
-                    unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, CapPtr(rcap), rva, false);
-                }
-            }
-            return Err(map_cap_err_to_sys(e));
+        if map_4k_cap_authorized(vs_h, va, fh, VmProt::USER_RW).is_err() {
+            free_pages(fh, PageOrder::Order4KiB, dma_label);
+            let rb = SgBufEntry {
+                page_count: idx as u16,
+                vs_h,
+                dma_label,
+                user_vaddr: desc.user_vaddr,
+                frames,
+                ..SgBufEntry::EMPTY
+            };
+            release_sg_frames(&rb);
+            return Err(SysError::Inval);
         }
-        *dst = Some((fr_cap.0, fh));
+        *dst = Some(fh);
     }
 
     let hw = is_hw_enforcing();
@@ -460,37 +572,24 @@ fn dma_op_alloc_sg(
 
     let map_res = with_dma_slot_lock(dev_idx, |st| {
         let claimed_new = claim_pci_slot(dev_idx, cspace_id, &vdev).map_err(map_cap_err_to_sys)?;
-        let Some(sg_slot) = st.sg_bufs.iter_mut().find(|s| !s.active) else {
+        if !st.sg_bufs.iter().any(|s| !s.active) {
             release_claimed_pci_slot(dev_idx, claimed_new);
             return Err(SysError::NoMem);
-        };
+        }
 
         let iova_base = if hw {
-            let mut candidate = st.iova_next;
-            // Ensure no segment in `[candidate .. candidate + total_bytes)` aliases its own HPA.
-            for _ in 0..8 {
-                let conflict = frames
-                    .iter()
-                    .take(pages)
-                    .enumerate()
-                    .any(|(i, item)| {
-                        item.is_some_and(|(_, fh)| {
-                            candidate + (i as u64) * (PAGE_SIZE as u64) == fh.phys_addr()
-                        })
-                    });
-                if !conflict {
-                    break;
-                }
-                candidate = candidate.saturating_add(total_bytes);
-            }
-            candidate
+            let Some(cand) = find_free_iova_range(st, pages, total_bytes, &frames) else {
+                release_claimed_pci_slot(dev_idx, claimed_new);
+                return Err(SysError::NoMem);
+            };
+            cand
         } else {
-            frames[0].map_or(0, |(_, fh)| fh.phys_addr())
+            frames[0].map_or(0, |fh| fh.phys_addr())
         };
 
         let mut mapped_cnt = 0usize;
         for (i, item) in frames.iter().take(pages).enumerate() {
-            let Some((_, fh)) = *item else {
+            let Some(fh) = *item else {
                 continue;
             };
             let hpa = fh.phys_addr();
@@ -501,7 +600,7 @@ fn dma_op_alloc_sg(
             };
             if adjust_frame_iommu_pin(fh, 1).is_err() {
                 for (rb_i, rb_item) in frames.iter().take(mapped_cnt).enumerate() {
-                    if let Some((_, rfh)) = *rb_item {
+                    if let Some(rfh) = *rb_item {
                         if hw {
                             unmap_dma_range(
                                 dev_idx,
@@ -518,7 +617,7 @@ fn dma_op_alloc_sg(
             if hw && map_dma_range_iova(dev_idx, seg_iova, hpa, PAGE_SIZE as u64, perms).is_err() {
                 let _ = adjust_frame_iommu_pin(fh, -1);
                 for (rb_i, rb_item) in frames.iter().take(mapped_cnt).enumerate() {
-                    if let Some((_, rfh)) = *rb_item {
+                    if let Some(rfh) = *rb_item {
                         unmap_dma_range(
                             dev_idx,
                             iova_base + (rb_i as u64) * (PAGE_SIZE as u64),
@@ -546,10 +645,13 @@ fn dma_op_alloc_sg(
             st.iova_next = iova_base.saturating_add(total_bytes);
             st.mapped_iova_bytes = st.mapped_iova_bytes.saturating_add(total_bytes);
         }
+        let sg_slot = st.sg_bufs.iter_mut().find(|s| !s.active).unwrap();
         *sg_slot = SgBufEntry {
             active: true,
             buf_id,
             owner_cspace: cspace_id,
+            vs_h,
+            dma_label,
             direction: desc.direction,
             page_count: desc.page_count,
             iova_base,
@@ -562,12 +664,15 @@ fn dma_op_alloc_sg(
     let (iova_base, claimed_new) = match map_res {
         Ok(pair) => pair,
         Err(e) => {
-            for (rb_idx, rb) in frames.iter_mut().take(pages).enumerate() {
-                if let Some((rcap, _)) = rb.take() {
-                    let rva = desc.user_vaddr + (rb_idx as u64) * (PAGE_SIZE as u64);
-                    unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, CapPtr(rcap), rva, false);
-                }
-            }
+            let rb = SgBufEntry {
+                page_count: pages as u16,
+                vs_h,
+                dma_label,
+                user_vaddr: desc.user_vaddr,
+                frames,
+                ..SgBufEntry::EMPTY
+            };
+            release_sg_frames(&rb);
             return Err(e);
         }
     };
@@ -581,7 +686,7 @@ fn dma_op_alloc_sg(
             .take(pages)
             .enumerate()
             .all(|(i, item)| {
-                item.is_some_and(|(_, fh)| iova_base + (i as u64) * (PAGE_SIZE as u64) != fh.phys_addr())
+                item.is_some_and(|fh| iova_base + (i as u64) * (PAGE_SIZE as u64) != fh.phys_addr())
             });
         DMA_SG_FLAG_HW_IOMMU | if distinct { DMA_SG_FLAG_IOVA_DISTINCT } else { 0 }
     } else {
@@ -614,8 +719,8 @@ fn dma_op_alloc_sg(
 
 fn dma_free_internal(
     cspace_id: CSpaceId,
-    subj_label: SecLabel,
-    pid: u32,
+    _subj_label: SecLabel,
+    _pid: u32,
     dev_idx: usize,
     buf_id: u64,
     release_on_empty: bool,
@@ -640,13 +745,16 @@ fn dma_free_internal(
             st.mapped_iova_bytes = st.mapped_iova_bytes.saturating_sub(len_bytes);
         }
         for item in sg.frames.iter().take(pages) {
-            if let Some((_, fh)) = *item {
+            if let Some(fh) = *item {
                 let _ = adjust_frame_iommu_pin(fh, -1);
             }
         }
         let copy = *sg;
         *sg = SgBufEntry::EMPTY;
         removed = Some(copy);
+        if st.sg_bufs.iter().all(|s| !s.active) {
+            st.iova_next = DMA_IOVA_BASE;
+        }
         if release_on_empty
             && st.pinned_frames.iter().all(|p| p.is_none())
             && st.sg_bufs.iter().all(|s| !s.active)
@@ -658,16 +766,8 @@ fn dma_free_internal(
     let Some(entry) = removed else {
         return Err(SysError::Inval);
     };
-    let pages = entry.page_count as usize;
-    if let Some(vs_cap) = process_vspace_cap(pid) {
-        for (i, item) in entry.frames.iter().take(pages).enumerate() {
-            if let Some((fr_cap, _)) = *item {
-                let va = entry.user_vaddr + (i as u64) * (PAGE_SIZE as u64);
-                unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, CapPtr(fr_cap), va, false);
-            }
-        }
-    }
-    Ok(pages)
+    release_sg_frames(&entry);
+    Ok(entry.page_count as usize)
 }
 
 #[inline(never)]
@@ -675,19 +775,36 @@ fn dma_op_sync(cspace_id: CSpaceId, dev_idx: usize, buf_id: u64, direction: u8) 
     if buf_id == 0 || direction > DMA_DIR_FROM_DEV {
         return Err(SysError::Inval);
     }
-    let found = with_dma_slot_lock(dev_idx, |st| {
-        st.sg_bufs.iter().any(|s| {
+    let (pages, handles) = with_dma_slot_lock(dev_idx, |st| {
+        if let Some(sg) = st.sg_bufs.iter().find(|s| {
             s.active
                 && s.buf_id == buf_id
                 && s.owner_cspace == cspace_id
                 && (s.direction == DMA_DIR_BIDIR || s.direction == direction)
-        })
+        }) {
+            (sg.page_count as usize, Some(sg.frames))
+        } else {
+            (0usize, None)
+        }
     });
-    if !found {
+    let Some(frames) = handles else {
         return Err(SysError::Inval);
+    };
+    if !is_device_coherent(dev_idx) {
+        for item in frames.iter().take(pages) {
+            if let Some(fh) = *item {
+                let va = phys_to_hhdm(fh.phys_addr());
+                for off in (0..PAGE_SIZE).step_by(64) {
+                    // SAFETY: Flush DMA buffer cachelines via kernel HHDM mapping for non-snooping DMARs.
+                    unsafe {
+                        asm!("clflush [{p}]", p = in(reg) (va as usize + off), options(nostack, preserves_flags));
+                    }
+                }
+            }
+        }
     }
     fence(Ordering::SeqCst);
-    // SAFETY: Serializing fence on x86-64 ensuring store visibility prior to device doorbell / CPU read.
+    // SAFETY: Serializing fence on x86-64 ensuring store/flush visibility prior to device doorbell / CPU read.
     unsafe {
         asm!("mfence", options(nostack, preserves_flags));
     }

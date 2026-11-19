@@ -125,8 +125,7 @@ impl GpuBackend for SyntheticGpuBackend {
     }
 
     fn wait_fence(&mut self, fence_seq: u64, spin_budget: u64) -> Result<(), isize> {
-        let cur_sig = self.fences.signaled_seq;
-        self.fences.wait_spin_budget(fence_seq, spin_budget, |s| s <= cur_sig)
+        self.fences.wait_spin_budget(fence_seq, spin_budget, |_| false)
     }
 
     fn quiesce_recover(&mut self) -> Result<(), isize> {

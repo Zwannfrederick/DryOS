@@ -228,10 +228,12 @@ pub fn handle_wm_admin_op(
                             }
                         }
                     }
-                    if attach_ok {
-                        let _ = wm
+                    if attach_ok
+                        && wm
                             .handover
-                            .promote_to_kms(crate::gpu_svc::GpuBackendKind::VirtioGpu);
+                            .promote_to_kms(crate::gpu_svc::GpuBackendKind::VirtioGpu)
+                            .is_ok()
+                    {
                         let mut glb = LineBuilder::new();
                         glb.push_bytes(b"[DRY-WM] GPU_SCANOUT_BOUND back_2m=");
                         glb.push_u64(need as u64);

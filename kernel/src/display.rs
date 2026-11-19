@@ -270,6 +270,7 @@ pub fn sys_fb_map(
     let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
     let now_epoch = current_lease_epoch();
     let ptr = CapPtr(fb_cap_raw);
+    let mut fb_global_slot = 0u32;
 
     with_pinned_cap(cspace_id, subj_label, ptr, req, now_epoch, |res| {
         if res.obj_kind != CapObjectKind::Framebuffer {
@@ -300,6 +301,7 @@ pub fn sys_fb_map(
             }
             return Err(e);
         }
+        fb_global_slot = res.global_slot;
         Ok(())
     })
     .map_err(|e| match e {
@@ -317,6 +319,11 @@ pub fn sys_fb_map(
         )
     };
     if let Err(fault) = copy_to_user(user_info_out_ptr, info_bytes) {
+        let _ = crate::cspace::revoke::detach_matching_cap_mapping_record(
+            fb_global_slot,
+            vs_h.id,
+            user_vaddr,
+        );
         for rb in 0..(vfb.num_pages as usize) {
             let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
         }

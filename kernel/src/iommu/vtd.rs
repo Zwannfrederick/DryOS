@@ -15,13 +15,11 @@ use crate::iommu::dmar::{
 use crate::iommu::ivrs::{is_ivrs_present_or_malformed, ivrs_snapshot};
 use crate::iommu::ops::{
     evaluate_iommu_policy, is_dma_allowed_status, is_hw_enforcing_status, IommuBackendKind,
-    IommuCaps, IommuPerms, IommuStatus,
+    IommuCaps, IommuStatus,
 };
 use crate::iommu::slpt::{
-    bdf_has_active_rmrr, clear_slpt_4k, flush_descriptor_cacheline, flush_entire_page,
-    free_all_domain_frames, get_or_alloc_bus_ctx, is_dedicated_gop_drhd, map_slpt_4k,
-    map_slpt_4k_iova, premap_unit_rmrrs, release_bus_ctx_if_idle, write_ctx_entry, DomainState,
-    VtdUnit, BOOT_RMRR_DID, VTD_KERNEL_LABEL,
+    flush_entire_page, free_all_domain_frames, is_dedicated_gop_drhd, premap_unit_rmrrs,
+    release_bus_ctx_if_idle, DomainState, VtdUnit, BOOT_RMRR_DID, VTD_KERNEL_LABEL,
 };
 use crate::pci::{active_gop_bdf, MAX_MANAGED_PCI_DEVS};
 use crate::pmm::{alloc_pages, free_pages, AllocFlags, PageOrder, PAGE_SIZE};
@@ -46,30 +44,24 @@ const GSTS_PERSISTENT_MASK: u32 = (1 << 31) | (1 << 28) | (1 << 26) | (1 << 25) 
 
 const CCMD_ICC: u64 = 1 << 63;
 const CCMD_CIRG_GLOBAL: u64 = 1 << 61;
-const CCMD_CIRG_DEVICE: u64 = 3 << 61;
+pub(super) const CCMD_CIRG_DEVICE: u64 = 3 << 61;
 
 const IOTLB_IVT: u64 = 1 << 63;
 const IOTLB_IIRG_GLOBAL: u64 = 1 << 60;
-const IOTLB_IIRG_DOMAIN: u64 = 2 << 60;
+pub(super) const IOTLB_IIRG_DOMAIN: u64 = 2 << 60;
 const IOTLB_DR: u64 = 1 << 49;
 const IOTLB_DW: u64 = 1 << 48;
 
 const VTD_POLL_SPIN_LIMIT: usize = 1_000_000;
 
 const fn init_device_domains() -> [DomainState; MAX_MANAGED_PCI_DEVS] {
-    let mut arr = [const { DomainState::empty(0) }; MAX_MANAGED_PCI_DEVS];
-    let mut i = 0;
-    while i < MAX_MANAGED_PCI_DEVS {
-        arr[i] = DomainState::empty((i + 1) as u16);
-        i += 1;
-    }
-    arr
+    [const { DomainState::empty(0) }; MAX_MANAGED_PCI_DEVS]
 }
 
-struct VtdEngineState {
-    units: [VtdUnit; MAX_DRHD_UNITS],
-    domains: [DomainState; MAX_MANAGED_PCI_DEVS],
-    rmrr_domains: [DomainState; MAX_DRHD_UNITS],
+pub(super) struct VtdEngineState {
+    pub(super) units: [VtdUnit; MAX_DRHD_UNITS],
+    pub(super) domains: [DomainState; MAX_MANAGED_PCI_DEVS],
+    pub(super) rmrr_domains: [DomainState; MAX_DRHD_UNITS],
 }
 
 impl VtdEngineState {
@@ -104,7 +96,7 @@ pub fn is_gfx_scanout_deferred() -> bool {
     VTD_GFX_SCANOUT_DEFERRED.load(Ordering::Acquire)
 }
 
-fn with_vtd_lock<R>(f: impl FnOnce(&mut VtdEngineState) -> R) -> R {
+pub(super) fn with_vtd_lock<R>(f: impl FnOnce(&mut VtdEngineState) -> R) -> R {
     let saved_if = irq_save_cli();
     while VTD_ENGINE
         .locked
@@ -227,7 +219,7 @@ fn flush_write_buffers(unit: &VtdUnit) -> bool {
     }
 }
 
-fn invalidate_context_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
+pub(super) fn invalidate_context_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
     if !flush_write_buffers(unit) {
         return false;
     }
@@ -238,7 +230,7 @@ fn invalidate_context_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
     }
 }
 
-fn invalidate_iotlb_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
+pub(super) fn invalidate_iotlb_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
     // SAFETY: `unit.iotlb_off + 8` verified inside `unit.mmio_bytes` during init.
     unsafe {
         write64(
@@ -250,7 +242,7 @@ fn invalidate_iotlb_cache(unit: &VtdUnit, cmd_bits: u64) -> bool {
     }
 }
 
-fn maybe_release_bus_ctx(unit: &mut VtdUnit, bus: u8) {
+pub(super) fn maybe_release_bus_ctx(unit: &mut VtdUnit, bus: u8) {
     if let Some(fh) = release_bus_ctx_if_idle(unit, bus) {
         let _ = invalidate_context_cache(unit, CCMD_CIRG_GLOBAL);
         let _ = invalidate_iotlb_cache(unit, IOTLB_IIRG_GLOBAL);
@@ -307,7 +299,7 @@ fn init_single_unit(
     };
 
     let nd = 1usize << (4 + (((cap & 0x7) as usize) * 2).min(12));
-    if nd <= BOOT_RMRR_DID as usize {
+    if nd <= (BOOT_RMRR_DID as usize) + 1 {
         serial_println!("[DRY-IOMMU] INIT_FAIL: domain count too small nd={}", nd);
         return false;
     }
@@ -346,6 +338,7 @@ fn init_single_unit(
     unit.coherent = coherent;
     unit.caching_mode = ((cap >> 7) & 1) != 0;
     unit.need_rwbf = ((cap >> 4) & 1) != 0;
+    unit.max_domains = nd;
     unit.root_frame = Some(root_h);
 
     // SAFETY: Disable translation cleanly if firmware left it on, mask fault IRQ, pre-map RMRRs, set RTADDR.
@@ -373,6 +366,30 @@ fn init_single_unit(
     unit.translation_enabled = true;
     poll_and_clear_unit_faults(unit);
     true
+}
+
+fn rollback_all_units(eng: &mut VtdEngineState, count: usize) {
+    for idx in 0..count.min(MAX_DRHD_UNITS) {
+        if eng.units[idx].active && !eng.units[idx].gop_scanout_deferred {
+            // SAFETY: Disable translation if active before tearing down root/context frames.
+            let te_on = unsafe { (read32(eng.units[idx].mmio_virt, REG_GSTS) & GSTS_TES) != 0 };
+            if te_on {
+                let _ = send_gcmd(&eng.units[idx], GCMD_TE, false);
+            }
+            for b in eng.units[idx].ctx_buses.iter_mut() {
+                if let Some(fh) = b.frame.take() {
+                    free_pages(fh, PageOrder::Order4KiB, VTD_KERNEL_LABEL);
+                }
+                *b = crate::iommu::slpt::BusContextSlot::empty();
+            }
+            free_all_domain_frames(&mut eng.rmrr_domains[idx]);
+            if let Some(rf) = eng.units[idx].root_frame.take() {
+                free_pages(rf, PageOrder::Order4KiB, VTD_KERNEL_LABEL);
+            }
+        }
+        eng.units[idx] = VtdUnit::empty();
+    }
+    VTD_GFX_SCANOUT_DEFERRED.store(false, Ordering::Release);
 }
 
 /// Initialize hardware IOMMU (Intel VT-d or AMD-Vi IVRS discovery) and apply fail-closed DMA policy.
@@ -412,14 +429,25 @@ pub fn init_vtd_units(cmdline: &str) {
                     vtd_unit_vaddr(u),
                     src,
                 ) {
+                    rollback_all_units(eng, u + 1);
                     return (false, 0usize, 0u8, false, true);
                 }
-                if eng.units[u].translation_enabled && !have_enforced {
-                    bits = if eng.units[u].levels_4 { 48 } else { 39 };
-                    cm = eng.units[u].caching_mode;
-                    coh = eng.units[u].coherent;
-                    have_enforced = true;
+                if eng.units[u].translation_enabled {
+                    let u_bits = if eng.units[u].levels_4 { 48 } else { 39 };
+                    if !have_enforced {
+                        bits = u_bits;
+                        cm = eng.units[u].caching_mode;
+                        coh = eng.units[u].coherent;
+                        have_enforced = true;
+                    } else {
+                        bits = bits.min(u_bits);
+                        cm |= eng.units[u].caching_mode;
+                        coh &= eng.units[u].coherent;
+                    }
                 }
+            }
+            if !have_enforced {
+                rollback_all_units(eng, dmar.drhd_count);
             }
             (have_enforced, dmar.drhd_count, bits, cm, coh)
         });
@@ -493,340 +521,7 @@ pub fn init_vtd_units(cmdline: &str) {
     }
 }
 
-fn find_unit_for_bdf(eng: &VtdEngineState, bus: u8, dev: u8, func: u8) -> Option<usize> {
-    let dmar = dmar_snapshot()?;
-    for u in 0..dmar.drhd_count {
-        if !eng.units[u].active {
-            continue;
-        }
-        let src = &dmar.drhds[u];
-        for &sc in src.scopes.iter().take(src.scope_count) {
-            if sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func {
-                return if eng.units[u].translation_enabled {
-                    Some(u)
-                } else {
-                    None
-                };
-            }
-        }
-    }
-    (0..dmar.drhd_count).find(|&u| eng.units[u].active && eng.units[u].translation_enabled && eng.units[u].include_all)
-}
-
-/// Fail-closed gate checked before claiming a PCI device or enabling `Command.BME = 1`.
-pub fn attach_device_domain(dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
-    if dev_idx >= MAX_MANAGED_PCI_DEVS {
-        return Err(());
-    }
-    match status() {
-        IommuStatus::Enforcing => {}
-        IommuStatus::TestUnsafeNoIommu => return Ok(()),
-        IommuStatus::Uninitialized
-        | IommuStatus::UnsupportedFailClosed
-        | IommuStatus::FailedClosed => return Err(()),
-    }
-    let rmrr_snap = dmar_snapshot();
-
-    with_vtd_lock(|eng| {
-        if eng.domains[dev_idx].attached {
-            return Ok(());
-        }
-        let unit_idx = find_unit_for_bdf(eng, bus, dev, func).ok_or(())?;
-        let (coherent, levels_4, seg) = (
-            eng.units[unit_idx].coherent,
-            eng.units[unit_idx].levels_4,
-            eng.units[unit_idx].segment,
-        );
-        let root_h =
-            alloc_pages(PageOrder::Order4KiB, VTD_KERNEL_LABEL, AllocFlags::ZERO).map_err(|_| ())?;
-        flush_entire_page(coherent, root_h.hhdm_ptr());
-        eng.domains[dev_idx].sl_root = Some(root_h);
-        eng.domains[dev_idx].pt_count = 0;
-
-        if let Some(dmar) = rmrr_snap {
-            for rmrr in dmar.rmrrs.iter().take(dmar.rmrr_count) {
-                if !rmrr.valid || rmrr.segment != seg {
-                    continue;
-                }
-                let matched = (0..rmrr.scope_count).any(|s| {
-                    let sc = rmrr.scopes[s];
-                    sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func
-                });
-                if !matched {
-                    continue;
-                }
-                let mut pa = rmrr.base_addr & !((PAGE_SIZE as u64) - 1);
-                let end_pa = rmrr.limit_addr & !((PAGE_SIZE as u64) - 1);
-                while pa <= end_pa {
-                    if map_slpt_4k(&mut eng.domains[dev_idx], coherent, pa, levels_4).is_err() {
-                        free_all_domain_frames(&mut eng.domains[dev_idx]);
-                        return Err(());
-                    }
-                    pa = match pa.checked_add(PAGE_SIZE as u64) {
-                        Some(n) => n,
-                        None => break,
-                    };
-                }
-            }
-        }
-
-        let bus_slot = match get_or_alloc_bus_ctx(&mut eng.units[unit_idx], bus) {
-            Ok(i) => i,
-            Err(()) => {
-                free_all_domain_frames(&mut eng.domains[dev_idx]);
-                return Err(());
-            }
-        };
-        let ctx_fh = eng.units[unit_idx].ctx_buses[bus_slot].frame.unwrap();
-        let devfn = (((dev & 0x1f) as usize) << 3) | ((func & 0x07) as usize);
-        let sid = ((bus as u64) << 8) | (devfn as u64);
-        let did = eng.domains[dev_idx].domain_id as u64;
-        let has_boot_rmrr = bdf_has_active_rmrr(rmrr_snap, seg, bus, dev, func)
-            && eng.rmrr_domains[unit_idx].sl_root.is_some();
-
-        // VT-d §6.2.2: Clear a pre-mapped Present RMRR Context Entry & invalidate before reprogramming.
-        // SAFETY: Context Entry sits inside allocated per-bus Context Table page `ctx_fh`.
-        let was_present = unsafe {
-            let ctx_ptr = (ctx_fh.hhdm_ptr() as *const u64).add(devfn * 2);
-            (read_volatile(ctx_ptr) & 0x1) != 0
-        };
-        if was_present {
-            // SAFETY: Clearing old Present bit before invalidating cached RMRR translation.
-            unsafe {
-                let ctx_ptr = (ctx_fh.hhdm_ptr() as *mut u64).add(devfn * 2);
-                write_volatile(ctx_ptr, 0);
-                write_volatile(ctx_ptr.add(1), 0);
-                flush_descriptor_cacheline(coherent, ctx_ptr as *const u8);
-            }
-            let rdid = BOOT_RMRR_DID as u64;
-            let _ = invalidate_context_cache(
-                &eng.units[unit_idx],
-                CCMD_CIRG_DEVICE | rdid | (sid << 16),
-            );
-            let _ = invalidate_iotlb_cache(&eng.units[unit_idx], IOTLB_IIRG_DOMAIN | (rdid << 32));
-        }
-
-        write_ctx_entry(
-            ctx_fh.hhdm_ptr(),
-            coherent,
-            dev,
-            func,
-            levels_4,
-            did,
-            root_h.phys_addr(),
-        );
-
-        let inv_ok = invalidate_context_cache(
-            &eng.units[unit_idx],
-            CCMD_CIRG_DEVICE | did | (sid << 16),
-        ) && invalidate_iotlb_cache(&eng.units[unit_idx], IOTLB_IIRG_DOMAIN | (did << 32));
-        if !inv_ok {
-            if has_boot_rmrr {
-                if let Some(rmrr_root) = eng.rmrr_domains[unit_idx].sl_root {
-                    write_ctx_entry(
-                        ctx_fh.hhdm_ptr(),
-                        coherent,
-                        dev,
-                        func,
-                        levels_4,
-                        BOOT_RMRR_DID as u64,
-                        rmrr_root.phys_addr(),
-                    );
-                }
-            } else {
-                // SAFETY: Clearing Context Entry on invalidation failure rollback.
-                unsafe {
-                    let ctx_ptr = (ctx_fh.hhdm_ptr() as *mut u64).add(devfn * 2);
-                    write_volatile(ctx_ptr, 0);
-                    write_volatile(ctx_ptr.add(1), 0);
-                    flush_descriptor_cacheline(coherent, ctx_ptr as *const u8);
-                }
-                maybe_release_bus_ctx(&mut eng.units[unit_idx], bus);
-            }
-            free_all_domain_frames(&mut eng.domains[dev_idx]);
-            return Err(());
-        }
-
-        eng.units[unit_idx].ctx_buses[bus_slot].attach_count += 1;
-        eng.domains[dev_idx].attached = true;
-        eng.domains[dev_idx].unit_idx = unit_idx as u8;
-        eng.domains[dev_idx].segment = seg;
-        eng.domains[dev_idx].bus = bus;
-        eng.domains[dev_idx].dev = dev;
-        eng.domains[dev_idx].func = func;
-        Ok(())
-    })
-}
-
-/// Map `[iova_base .. iova_base + len_bytes)` -> `[phys_base .. phys_base + len_bytes)`
-/// into `dev_idx`'s isolated SLPT with explicit DMA direction permissions (`R`/`W`).
-pub fn map_dma_range_iova(
-    dev_idx: usize,
-    iova_base: u64,
-    phys_base: u64,
-    len_bytes: u64,
-    perms: IommuPerms,
-) -> Result<(), ()> {
-    if dev_idx >= MAX_MANAGED_PCI_DEVS
-        || (iova_base & ((PAGE_SIZE as u64) - 1)) != 0
-        || (phys_base & ((PAGE_SIZE as u64) - 1)) != 0
-        || (len_bytes & ((PAGE_SIZE as u64) - 1)) != 0
-        || len_bytes == 0
-    {
-        return Err(());
-    }
-    match status() {
-        IommuStatus::Enforcing => {}
-        IommuStatus::TestUnsafeNoIommu => return Ok(()),
-        IommuStatus::Uninitialized
-        | IommuStatus::UnsupportedFailClosed
-        | IommuStatus::FailedClosed => return Err(()),
-    }
-    let pages = (len_bytes / (PAGE_SIZE as u64)) as usize;
-    with_vtd_lock(|eng| {
-        let dom = &mut eng.domains[dev_idx];
-        if !dom.attached {
-            return Err(());
-        }
-        let u = &eng.units[dom.unit_idx as usize];
-        let (coherent, levels_4, did) = (u.coherent, u.levels_4, dom.domain_id as u64);
-        for p in 0..pages {
-            let iova = iova_base + (p as u64) * (PAGE_SIZE as u64);
-            let pa = phys_base + (p as u64) * (PAGE_SIZE as u64);
-            if map_slpt_4k_iova(dom, coherent, iova, pa, perms, levels_4).is_err() {
-                if let Some(root_h) = dom.sl_root {
-                    let rpa = root_h.phys_addr();
-                    for rb in 0..p {
-                        clear_slpt_4k(
-                            coherent,
-                            rpa,
-                            iova_base + (rb as u64) * (PAGE_SIZE as u64),
-                            levels_4,
-                        );
-                    }
-                }
-                return Err(());
-            }
-        }
-        if !invalidate_iotlb_cache(u, IOTLB_IIRG_DOMAIN | (did << 32)) {
-            return Err(());
-        }
-        Ok(())
-    })
-}
-
-/// Map `len_bytes` (`4 KiB` or `2 MiB` pinned `DEVICE_DMA`) identity (`IOVA = phys_base`).
-pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(), ()> {
-    map_dma_range_iova(dev_idx, phys_base, phys_base, len_bytes, IommuPerms::RW)
-}
-
-/// Unmap `len_bytes` from `dev_idx`'s SLPT (`iova_base`) and synchronize IOTLB.
-pub fn unmap_dma_range(dev_idx: usize, iova_base: u64, len_bytes: u64) {
-    if status() != IommuStatus::Enforcing || dev_idx >= MAX_MANAGED_PCI_DEVS {
-        return;
-    }
-    let pages = (len_bytes / (PAGE_SIZE as u64)) as usize;
-    with_vtd_lock(|eng| {
-        let dom = &mut eng.domains[dev_idx];
-        if !dom.attached {
-            return;
-        }
-        let u = &eng.units[dom.unit_idx as usize];
-        if let Some(root_h) = dom.sl_root {
-            let rpa = root_h.phys_addr();
-            for p in 0..pages {
-                clear_slpt_4k(
-                    u.coherent,
-                    rpa,
-                    iova_base + (p as u64) * (PAGE_SIZE as u64),
-                    u.levels_4,
-                );
-            }
-        }
-        let _ = invalidate_iotlb_cache(u, IOTLB_IIRG_DOMAIN | ((dom.domain_id as u64) << 32));
-    });
-}
-
-/// Clear Context Entry, invalidate Context + Domain IOTLB, and free all SLPT frames (`leaked_frames == 0`).
-pub fn detach_and_scrub_domain(dev_idx: usize) {
-    if status() != IommuStatus::Enforcing || dev_idx >= MAX_MANAGED_PCI_DEVS {
-        return;
-    }
-    let rmrr_snap = dmar_snapshot();
-    with_vtd_lock(|eng| {
-        if !eng.domains[dev_idx].attached {
-            return;
-        }
-        let unit_idx = eng.domains[dev_idx].unit_idx as usize;
-        let seg = eng.domains[dev_idx].segment;
-        let bus = eng.domains[dev_idx].bus;
-        let dev = eng.domains[dev_idx].dev;
-        let func = eng.domains[dev_idx].func;
-        let did = eng.domains[dev_idx].domain_id as u64;
-        let devfn = (((dev & 0x1f) as usize) << 3) | ((func & 0x07) as usize);
-
-        let bs_opt = eng.units[unit_idx]
-            .ctx_buses
-            .iter()
-            .position(|c| c.active && c.bus == bus);
-        if let Some(bs) = bs_opt {
-            if let Some(ctx_fh) = eng.units[unit_idx].ctx_buses[bs].frame {
-                // SAFETY: Clear present bit on Context Entry before invalidating caches.
-                unsafe {
-                    let ctx_ptr = (ctx_fh.hhdm_ptr() as *mut u64).add(devfn * 2);
-                    write_volatile(ctx_ptr, 0);
-                    write_volatile(ctx_ptr.add(1), 0);
-                    flush_descriptor_cacheline(eng.units[unit_idx].coherent, ctx_ptr as *const u8);
-                }
-            }
-            if eng.units[unit_idx].ctx_buses[bs].attach_count > 0 {
-                eng.units[unit_idx].ctx_buses[bs].attach_count -= 1;
-            }
-        }
-
-        let sid = ((bus as u64) << 8) | (devfn as u64);
-        let _ = invalidate_context_cache(
-            &eng.units[unit_idx],
-            CCMD_CIRG_DEVICE | did | (sid << 16),
-        );
-        let _ = invalidate_iotlb_cache(&eng.units[unit_idx], IOTLB_IIRG_DOMAIN | (did << 32));
-        poll_and_clear_unit_faults(&mut eng.units[unit_idx]);
-
-        if bdf_has_active_rmrr(rmrr_snap, seg, bus, dev, func) {
-            if let (Some(bs), Some(rmrr_root)) = (bs_opt, eng.rmrr_domains[unit_idx].sl_root) {
-                if let Some(ctx_fh) = eng.units[unit_idx].ctx_buses[bs].frame {
-                    let (coherent, levels_4) =
-                        (eng.units[unit_idx].coherent, eng.units[unit_idx].levels_4);
-                    write_ctx_entry(
-                        ctx_fh.hhdm_ptr(),
-                        coherent,
-                        dev,
-                        func,
-                        levels_4,
-                        BOOT_RMRR_DID as u64,
-                        rmrr_root.phys_addr(),
-                    );
-                    let rdid = BOOT_RMRR_DID as u64;
-                    let _ = invalidate_context_cache(
-                        &eng.units[unit_idx],
-                        CCMD_CIRG_DEVICE | rdid | (sid << 16),
-                    );
-                    let _ = invalidate_iotlb_cache(
-                        &eng.units[unit_idx],
-                        IOTLB_IIRG_DOMAIN | (rdid << 32),
-                    );
-                }
-            }
-        } else {
-            maybe_release_bus_ctx(&mut eng.units[unit_idx], bus);
-        }
-
-        free_all_domain_frames(&mut eng.domains[dev_idx]);
-        eng.domains[dev_idx].attached = false;
-    });
-}
-
-fn poll_and_clear_unit_faults(unit: &mut VtdUnit) -> u64 {
+pub(super) fn poll_and_clear_unit_faults(unit: &mut VtdUnit) -> u64 {
     if !unit.active || !unit.translation_enabled {
         return 0;
     }

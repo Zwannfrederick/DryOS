@@ -7,15 +7,16 @@ pub mod ops;
 pub mod slpt;
 pub mod tests;
 pub mod vtd;
+pub mod vtd_domain;
 
-pub use dmar::{dmar_snapshot, parse_and_latch_dmar};
+pub use dmar::{dmar_snapshot, overlaps_rmrr, parse_and_latch_dmar};
 pub use ivrs::parse_and_latch_ivrs;
 pub use ops::{IommuBackendKind, IommuCaps, IommuOps, IommuPerms, IommuStatus};
 pub use tests::run_dmar_unit_tests;
-pub use vtd::{
-    attach_device_domain, backend_kind, caps, detach_and_scrub_domain, init_vtd_units,
-    is_dma_permitted, is_gfx_scanout_deferred, is_hw_enforcing, map_dma_range,
-    map_dma_range_iova, poll_and_clear_faults, status, unmap_dma_range,
+pub use vtd::{backend_kind, caps, init_vtd_units, is_dma_permitted, is_gfx_scanout_deferred, is_hw_enforcing, poll_and_clear_faults, status};
+pub use vtd_domain::{
+    attach_device_domain, detach_and_scrub_domain, is_device_coherent, map_dma_range,
+    map_dma_range_iova, unmap_dma_range,
 };
 
 struct VtdIommuOps;

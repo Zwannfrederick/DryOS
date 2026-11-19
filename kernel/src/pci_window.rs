@@ -401,6 +401,30 @@ fn is_protected_cfg_write_offset(
             return true;
         }
     }
+    if vdev.ext_caps.pcie_cap_off != 0 {
+        let s = vdev.ext_caps.pcie_cap_off as u16;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(10)) {
+            return true;
+        }
+    }
+    if vdev.ext_caps.rebar_cap_off != 0 {
+        let s = vdev.ext_caps.rebar_cap_off;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(0x30)) {
+            return true;
+        }
+    }
+    if vdev.ext_caps.sriov_cap_off != 0 {
+        let s = vdev.ext_caps.sriov_cap_off;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(0x40)) {
+            return true;
+        }
+    }
+    if vdev.ext_caps.acs_cap_off != 0 {
+        let s = vdev.ext_caps.acs_cap_off;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(0x10)) {
+            return true;
+        }
+    }
     false
 }
 

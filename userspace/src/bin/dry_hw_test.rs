@@ -20,22 +20,23 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use dry_userspace::init_legacy::log_line;
+use dry_userspace::ioring::verify_ioring_corrupt_tail_guard;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::surface_pool::verify_surface_pool_invariants;
 use dry_userspace::{
-    msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_dev_cfg_read,
-    sys_dev_cfg_write, sys_dev_map_window, sys_dev_map_window_2m, sys_dev_mint_slot,
-    sys_dev_query_bars, sys_dma_alloc, sys_dma_alloc_sg, sys_dma_free, sys_dma_query_stats,
-    sys_dma_sync, sys_ep_create, sys_exit, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_irq_ack,
-    sys_irq_bind, sys_notify_bind_tcb, sys_notify_create, sys_notify_signal,
-    sys_notify_unbind_tcb, sys_notify_wait, sys_proc_spawn_with_fault_ep, sys_proc_wait,
-    sys_sysinfo, UserDmaSgSeg, UserDmaStats, UserIpcRecvExt, UserPciDeviceInfo, UserSysInfo,
-    DMA_DIR_BIDIR, DMA_DIR_FROM_DEV, DMA_DIR_TO_DEV, DMA_SG_FLAG_HW_IOMMU,
-    DMA_SG_FLAG_IOVA_DISTINCT, EBUSY, EINVAL, EPERM, FAULT_MSG_LABEL, FAULT_REPLY_KILL,
-    IPC_OP_BOUND_NOTIF, IRQF_ONESHOT, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, MSG_FLAG_NON_BLOCKING,
-    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G, PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE,
-    PCI_DEV_FLAG_ECAM, PCI_DEV_FLAG_IOMMU_ACTIVE, PCI_DEV_FLAG_MSI, RIGHT_CALL, RIGHT_GRANT,
-    RIGHT_MAP, RIGHT_READ, RIGHT_SEND, RIGHT_WRITE,
+    msg_tag_label, pack_msg_tag, raw_syscall6, rdtsc_user, sys_cap_derive, sys_cap_revoke,
+    sys_dev_cfg_read, sys_dev_cfg_write, sys_dev_map_window, sys_dev_map_window_2m,
+    sys_dev_mint_slot, sys_dev_query_bars, sys_dma_alloc, sys_dma_alloc_sg, sys_dma_free,
+    sys_dma_query_stats, sys_dma_sync, sys_ep_create, sys_exit, sys_ipc_recv_ext,
+    sys_ipc_reply_inline, sys_irq_ack, sys_irq_bind, sys_notify_bind_tcb, sys_notify_create,
+    sys_notify_signal, sys_notify_unbind_tcb, sys_notify_wait, sys_proc_spawn_with_fault_ep,
+    sys_proc_wait, sys_sysinfo, UserDmaSgSeg, UserDmaStats, UserIpcRecvExt, UserPciDeviceInfo,
+    UserSysInfo, DEV_MAP_OP_QUERY_BARS, DMA_DIR_BIDIR, DMA_DIR_FROM_DEV, DMA_DIR_TO_DEV,
+    DMA_SG_FLAG_HW_IOMMU, DMA_SG_FLAG_IOVA_DISTINCT, EBUSY, EFAULT, EINVAL, EPERM, FAULT_MSG_LABEL,
+    FAULT_REPLY_KILL, IPC_OP_BOUND_NOTIF, IRQF_ONESHOT, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK,
+    MSG_FLAG_NON_BLOCKING, PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G, PCI_BAR_FLAG_MMIO,
+    PCI_BAR_FLAG_PREFETCHABLE, PCI_DEV_FLAG_ECAM, PCI_DEV_FLAG_IOMMU_ACTIVE, PCI_DEV_FLAG_MSI,
+    RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_SEND, RIGHT_WRITE, SYS_DEV_MAP,
 };
 
 const HW_TEST_BOOT_MAGIC: u64 = 0x4452_595f_4857_5431;
@@ -728,6 +729,49 @@ fn test_ascension6_m2_cfg_enum_and_sg_iova(edu_cap: u64, identity_dma_pa: u64, t
 
     if !verify_surface_pool_invariants() {
         fail(426);
+    }
+
+    // Ascension 7.0 Milestone A negative & resource-exhaustion hardening tests.
+    if sys_dev_cfg_write(edu_cap, 0x3c, 2, 0) != Err(EPERM) {
+        fail(428);
+    }
+    if sys_dev_cfg_write(edu_cap, 0x05, 2, 0) != Err(EINVAL) {
+        fail(429);
+    }
+    let (bad_ptr_rc, _) = raw_syscall6(
+        SYS_DEV_MAP,
+        edu_cap,
+        DEV_MAP_OP_QUERY_BARS,
+        0xdead_0000,
+        0,
+        0,
+        0,
+    );
+    if bad_ptr_rc != EFAULT {
+        fail(434);
+    }
+    for iter in 0..20u64 {
+        let cyc = sys_dma_alloc_sg(edu_cap, EDU_SG_DMA_VA, 16, DMA_DIR_BIDIR, None)
+            .unwrap_or_else(|_| fail(430));
+        if cyc.iova_base != 0xc000_0000 || cyc.total_bytes != 16 * 4096 {
+            fail(431);
+        }
+        // SAFETY: `EDU_SG_DMA_VA .. +64 KiB` is mapped `USER_RW` for the active SG allocation.
+        unsafe {
+            write_volatile((EDU_SG_DMA_VA + 15 * 4096) as *mut u64, 0xa7a7_0000 | iter);
+        }
+        if sys_dma_free(edu_cap, cyc.buf_id) != Ok(16) {
+            fail(432);
+        }
+    }
+    if sys_dma_query_stats(edu_cap, &mut stats).is_err()
+        || stats.active_sg_bufs != 0
+        || stats.mapped_iova_bytes != 0
+    {
+        fail(433);
+    }
+    if !verify_ioring_corrupt_tail_guard() {
+        fail(435);
     }
 }
 

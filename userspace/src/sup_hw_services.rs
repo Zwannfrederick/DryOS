@@ -388,17 +388,38 @@ fn spawn_pci_driver(
     let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
 
     let ep = sys_ep_create(ipc_spec).map_err(|_| 181)?;
-    let sup_cap = sys_cap_derive(ep, cli_rights, 0, BADGE_SUPERVISOR).map_err(|_| 182)?;
-    let pci_deleg = sys_cap_derive(pci_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT, 0, 0)
-        .map_err(|_| 183)?;
-    let (handle, pid) = sys_proc_spawn(
+    let sup_cap = match sys_cap_derive(ep, cli_rights, 0, BADGE_SUPERVISOR) {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = sys_cap_revoke(ep, 2);
+            return Err(182);
+        }
+    };
+    let pci_deleg =
+        match sys_cap_derive(pci_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_GRANT, 0, 0) {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = sys_cap_revoke(sup_cap, 1);
+                let _ = sys_cap_revoke(ep, 2);
+                return Err(183);
+            }
+        };
+    let (handle, pid) = match sys_proc_spawn(
         mod_cap,
         1,
         comp_id,
         (ep, srv_rights, badge),
         (pci_deleg, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP),
-    )
-    .map_err(|_| 184)?;
+    ) {
+        Ok(res) => res,
+        Err(_) => {
+            let _ = sys_cap_revoke(pci_deleg, 1);
+            let _ = sys_cap_revoke(sup_cap, 1);
+            let _ = sys_cap_revoke(ep, 2);
+            return Err(184);
+        }
+    };
+    let _ = sys_cap_revoke(pci_deleg, 1);
     Ok((handle, pid, ep, sup_cap))
 }
 

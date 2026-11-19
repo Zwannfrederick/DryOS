@@ -5,7 +5,7 @@
 use crate::broker_lifecycle::verify_broker_lifecycle_15_stages;
 use crate::shell::LineBuilder;
 use crate::vault_crypto::{ct_eq_32, Sha256};
-use crate::{sys_write_debug, EINVAL, ENOSPC};
+use crate::{sys_write_debug, EEXIST, EINVAL, ENOSPC};
 
 pub const MAX_FW_ENTRIES: usize = 8;
 pub const MAX_FW_BLOB_BYTES: usize = 16 * 1024 * 1024;
@@ -56,6 +56,13 @@ impl<'a> FwStore<'a> {
         if name.is_empty() || blob.is_empty() || blob.len() > MAX_FW_BLOB_BYTES {
             return Err(EINVAL);
         }
+        if self.entries[..self.count]
+            .iter()
+            .flatten()
+            .any(|e| e.name == name)
+        {
+            return Err(EEXIST);
+        }
         if self.count >= MAX_FW_ENTRIES {
             return Err(ENOSPC);
         }
@@ -97,6 +104,49 @@ impl<'a> FwStore<'a> {
     }
 }
 
+/// Incremental streaming SHA-256 verifier for large (`> 16 MiB`, e.g. `27 MiB` GSP) firmware blobs.
+pub struct FwStreamVerifier {
+    hasher: Sha256,
+    total_bytes: u64,
+}
+
+impl FwStreamVerifier {
+    pub fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            total_bytes: 0,
+        }
+    }
+
+    pub fn update(&mut self, chunk: &[u8]) {
+        if !chunk.is_empty() {
+            self.hasher.update(chunk);
+            self.total_bytes = self.total_bytes.saturating_add(chunk.len() as u64);
+        }
+    }
+
+    pub const fn bytes_hashed(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn finish(self, expected_sha256: &[u8; 32]) -> Result<u64, FwVerifyError> {
+        if self.total_bytes == 0 {
+            return Err(FwVerifyError::EmptyBlob);
+        }
+        let digest = self.hasher.finalize();
+        if !ct_eq_32(&digest, expected_sha256) {
+            return Err(FwVerifyError::DigestMismatch);
+        }
+        Ok(self.total_bytes)
+    }
+}
+
+impl Default for FwStreamVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for FwStore<'_> {
     fn default() -> Self {
         Self::new()
@@ -126,6 +176,9 @@ pub fn verify_fw_store_invariants() -> Option<(usize, usize)> {
         return None;
     }
     store.register(b"tgl_guc_70.1.1.bin", guc_sha, GOOD_GUC).ok()?;
+    if store.register(b"tgl_guc_70.1.1.bin", guc_sha, GOOD_GUC) != Err(EEXIST) {
+        return None;
+    }
     store.register(b"gsp_ga10x.bin", gsp_sha, GOOD_GSP).ok()?;
     store.register(b"tgl_guc_tampered.bin", guc_sha, TAMPERED_GUC).ok()?;
 
@@ -141,6 +194,22 @@ pub fn verify_fw_store_invariants() -> Option<(usize, usize)> {
         return None;
     }
     if store.lookup_verified(b"nonexistent_ucode.bin") != Err(FwVerifyError::NotFound) {
+        return None;
+    }
+
+    if FwStreamVerifier::new().finish(&guc_sha) != Err(FwVerifyError::EmptyBlob) {
+        return None;
+    }
+    let mut sv = FwStreamVerifier::new();
+    for ch in GOOD_GUC.chunks(7) {
+        sv.update(ch);
+    }
+    if sv.finish(&guc_sha) != Ok(GOOD_GUC.len() as u64) {
+        return None;
+    }
+    let mut bad_sv = FwStreamVerifier::new();
+    bad_sv.update(TAMPERED_GUC);
+    if bad_sv.finish(&guc_sha) != Err(FwVerifyError::DigestMismatch) {
         return None;
     }
     Some((store.len(), 2))

@@ -442,7 +442,7 @@ pub(crate) fn probe_pci_function(
             (Some(slot), v, false)
         } else {
             match (class_code, subclass, prog_if) {
-                (0x03, _, _) => {
+                (0x03, 0x00, _) | (0x03, 0x80, _) => {
                     let ro = read_bars_readonly(bus, dev, func);
                     let active_gop = is_active_gop_display(bus, subclass, &ro);
                     ro_bars_cache = Some(ro);
@@ -458,7 +458,6 @@ pub(crate) fn probe_pci_function(
                 (0x0c, 0x03, 0x30) => (Some(PCI_OBJ_XHCI), false, false),
                 (0x01, 0x08, 0x02) => (Some(PCI_OBJ_NVME), false, false),
                 (0x02, 0x00, _) => (Some(PCI_OBJ_NET), vendor_id == VIRTIO_VENDOR_ID, false),
-                (0x01 | 0x02 | 0x0c | 0xff, _, _) => (None, false, false),
                 _ => return None,
             }
         };

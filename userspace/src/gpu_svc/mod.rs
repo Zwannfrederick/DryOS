@@ -164,6 +164,9 @@ pub fn verify_gpu_svc_e2e_invariants(tsc_mhz: u64) -> Option<GpuSvcVerifySummary
     if synth.quiesce_count != 1 || r2.fence_seq != 1 {
         return None;
     }
+    if synth.wait_fence(9999, 128) != Err(crate::ETIMEDOUT) {
+        return None;
+    }
     verified += 1;
 
     let any_broker_in_data = gop.contract().broker_in_data_path

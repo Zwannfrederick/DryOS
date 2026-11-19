@@ -23,7 +23,7 @@ use crate::ipc::map_cap_err_to_sys;
 use crate::ipc::notif::notif_signal_from_irq;
 use crate::pci::{
     claim_pci_slot_for_irq, is_pci_cap_live, pci_read_u16, pci_read_u32, pci_write_u16,
-    pci_write_u32, validated_pci_slot,
+    pci_write_u32, release_claimed_pci_slot, validated_pci_slot,
 };
 use crate::percpu::current_percpu;
 use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
@@ -341,6 +341,10 @@ pub fn bind_pci_msi(
         let Some(vdev) = validated_pci_slot(dev_idx) else {
             return Err(CapError::InvalidHandle);
         };
+        if vdev.preserve_active_gop {
+            sub_err = Some(SysError::Perm);
+            return Err(CapError::InsufficientRights);
+        }
         if vdev.msix_cap_off == 0 && vdev.msi_cap_off == 0 {
             sub_err = Some(SysError::Inval);
             return Err(CapError::InvalidHandle);
@@ -359,9 +363,10 @@ pub fn bind_pci_msi(
             return Err(CapError::InvalidHandle);
         }
 
-        claim_pci_slot_for_irq(dev_idx, cspace_id, &vdev)?;
+        let claimed_new = claim_pci_slot_for_irq(dev_idx, cspace_id, &vdev)?;
 
-        with_pinned_cap(cspace_id, subj_label, notif_cap, notif_req, now_epoch, |n_res| {
+        let bind_res =
+            with_pinned_cap(cspace_id, subj_label, notif_cap, notif_req, now_epoch, |n_res| {
             if n_res.obj_kind != CapObjectKind::Notification {
                 return Err(CapError::WrongObjectKind);
             }
@@ -428,7 +433,11 @@ pub fn bind_pci_msi(
                 program_msi_cap(&hw_cfg, vec);
             }
             Ok(vec)
-        })
+        });
+        if bind_res.is_err() {
+            release_claimed_pci_slot(dev_idx, claimed_new);
+        }
+        bind_res
     });
 
     if let Some(se) = sub_err {

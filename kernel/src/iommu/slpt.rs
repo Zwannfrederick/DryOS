@@ -6,7 +6,6 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::iommu::dmar::{DrhdUnit, ParsedDmar};
 use crate::iommu::ops::IommuPerms;
-use crate::pci::MAX_MANAGED_PCI_DEVS;
 use crate::pmm::{
     alloc_pages, free_pages, phys_to_hhdm, AllocFlags, FrameHandle, PageOrder, PAGE_SIZE,
 };
@@ -14,7 +13,7 @@ use crate::security::{SecDomain, SecFlags, SecLabel};
 
 pub(super) const VTD_KERNEL_LABEL: SecLabel =
     SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0);
-pub(super) const BOOT_RMRR_DID: u16 = (MAX_MANAGED_PCI_DEVS + 1) as u16;
+pub(super) const BOOT_RMRR_DID: u16 = 1;
 
 pub(super) const SLPT_R: u64 = 1 << 0;
 pub(super) const SLPT_W: u64 = 1 << 1;
@@ -59,6 +58,7 @@ pub(super) struct VtdUnit {
     pub(super) coherent: bool,
     pub(super) caching_mode: bool,
     pub(super) need_rwbf: bool,
+    pub(super) max_domains: usize,
     pub(super) root_frame: Option<FrameHandle>,
     pub(super) ctx_buses: [BusContextSlot; MAX_BUSES_PER_UNIT],
 }
@@ -80,6 +80,7 @@ impl VtdUnit {
             coherent: true,
             caching_mode: false,
             need_rwbf: false,
+            max_domains: 0,
             root_frame: None,
             ctx_buses: [BusContextSlot::empty(); MAX_BUSES_PER_UNIT],
         }
@@ -220,6 +221,10 @@ pub(super) fn map_slpt_4k(
 }
 
 pub(super) fn clear_slpt_4k(coherent: bool, root_phys: u64, iova: u64, levels_4: bool) {
+    let max_addr = if levels_4 { 1u64 << 48 } else { 1u64 << 39 };
+    if iova >= max_addr || (iova & ((PAGE_SIZE as u64) - 1)) != 0 {
+        return;
+    }
     let mut table_phys = root_phys;
     let start_level = if levels_4 { 3 } else { 2 };
     for lvl in (1..=start_level).rev() {
@@ -301,10 +306,7 @@ pub(crate) fn is_dedicated_gop_drhd(src: &DrhdUnit, gop_bdf: Option<(u8, u8, u8)
     let Some((gb, gd, gf)) = gop_bdf else {
         return false;
     };
-    (0..src.scope_count).any(|s| {
-        let sc = src.scopes[s];
-        sc.valid && sc.bus == gb && sc.dev == gd && sc.func == gf
-    })
+    (0..src.scope_count).any(|s| src.scopes[s].matches_pci_bdf(gb, gd, gf))
 }
 
 fn unit_owns_bdf(dmar: &ParsedDmar, unit_idx: usize, seg: u16, bus: u8, dev: u8, func: u8) -> bool {
@@ -313,7 +315,7 @@ fn unit_owns_bdf(dmar: &ParsedDmar, unit_idx: usize, seg: u16, bus: u8, dev: u8,
             continue;
         }
         for &sc in src.scopes.iter().take(src.scope_count) {
-            if sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func {
+            if sc.matches_pci_bdf(bus, dev, func) {
                 return u == unit_idx;
             }
         }
@@ -335,10 +337,7 @@ pub(super) fn bdf_has_active_rmrr(
         let rmrr = &d.rmrrs[r];
         rmrr.valid
             && rmrr.segment == seg
-            && (0..rmrr.scope_count).any(|s| {
-                let sc = rmrr.scopes[s];
-                sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func
-            })
+            && (0..rmrr.scope_count).any(|s| rmrr.scopes[s].matches_pci_bdf(bus, dev, func))
     })
 }
 
@@ -375,7 +374,9 @@ pub(super) fn premap_unit_rmrrs(
         }
         let owned = (0..rmrr.scope_count).any(|s| {
             let sc = rmrr.scopes[s];
-            sc.valid && unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func)
+            sc.valid
+                && matches!(sc.scope_type, 1 | 2)
+                && unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func)
         });
         if !owned {
             continue;
@@ -406,7 +407,10 @@ pub(super) fn premap_unit_rmrrs(
         };
         for s in 0..rmrr.scope_count {
             let sc = rmrr.scopes[s];
-            if !sc.valid || !unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func) {
+            if !sc.valid
+                || !matches!(sc.scope_type, 1 | 2)
+                || !unit_owns_bdf(dmar, unit_idx, rmrr.segment, sc.bus, sc.dev, sc.func)
+            {
                 continue;
             }
             let Ok(bus_slot) = get_or_alloc_bus_ctx(unit, sc.bus) else {

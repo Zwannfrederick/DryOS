@@ -274,7 +274,20 @@ impl VirtioGpu2d {
         sys_dev_map(pci_cap, GPU_BAR_VADDR, &mut info).map_err(|_| 191)?;
 
         let (vq_cap, vq_pa) = sys_dma_alloc(pci_cap, GPU_VQ_VADDR).map_err(|_| 192)?;
-        let (cmd_cap, cmd_pa) = sys_dma_alloc(pci_cap, GPU_CMD_VADDR).map_err(|_| 192)?;
+        let (cmd_cap, cmd_pa) = match sys_dma_alloc(pci_cap, GPU_CMD_VADDR) {
+            Ok(pair) => pair,
+            Err(_) => {
+                let _ = sys_vspace_map(vq_cap, GPU_VQ_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+                let _ = sys_cap_revoke(vq_cap, 2);
+                return Err(192);
+            }
+        };
+        let cleanup_init_dma = || {
+            let _ = sys_vspace_map(cmd_cap, GPU_CMD_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+            let _ = sys_cap_revoke(cmd_cap, 2);
+            let _ = sys_vspace_map(vq_cap, GPU_VQ_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+            let _ = sys_cap_revoke(vq_cap, 2);
+        };
 
         // SAFETY: DMA pages are freshly mapped `USER_RW` exclusively inside `dry-gpu`.
         unsafe {
@@ -303,8 +316,10 @@ impl VirtioGpu2d {
             let dev_feat_hi = mmio_r32(common + 0x04);
             if (dev_feat_hi & VIRTIO_F_VERSION_1_HI) == 0 {
                 mmio_w8(common + 0x14, VIRTIO_STATUS_FAILED);
+                cleanup_init_dma();
                 return Err(194);
             }
+            mmio_w32(common, 0);
             mmio_w32(common + 0x08, 0);
             mmio_w32(common + 0x0c, if virgl_supported { VIRTIO_GPU_F_VIRGL } else { 0 });
             mmio_w32(common + 0x08, 1);
@@ -314,12 +329,14 @@ impl VirtioGpu2d {
             mmio_w8(common + 0x14, status);
             if (mmio_r8(common + 0x14) & VIRTIO_STATUS_FEATURES_OK) == 0 {
                 mmio_w8(common + 0x14, VIRTIO_STATUS_FAILED);
+                cleanup_init_dma();
                 return Err(194);
             }
 
             mmio_w16(common + 0x16, 0); // controlq
             let max_qsz = mmio_r16(common + 0x18);
             if max_qsz < 2 {
+                cleanup_init_dma();
                 return Err(195);
             }
             let mut qsz = max_qsz.min(VQ_MAX_SIZE);
@@ -329,6 +346,7 @@ impl VirtioGpu2d {
             mmio_w16(common + 0x18, qsz);
             qsz = mmio_r16(common + 0x18);
             if !(2..=VQ_MAX_SIZE).contains(&qsz) {
+                cleanup_init_dma();
                 return Err(195);
             }
 

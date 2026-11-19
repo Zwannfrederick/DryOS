@@ -645,6 +645,10 @@ pub fn discover_acpi_madt(
             }
         }
 
+        if let Some((mcfg_ptr, mcfg_len)) = tables.mcfg {
+            let bytes = core::slice::from_raw_parts(mcfg_ptr, mcfg_len);
+            summary.mcfg_found = crate::pci_ecam::parse_and_latch_mcfg(bytes).is_ok();
+        }
         if let Some((dmar_ptr, dmar_len)) = tables.dmar {
             let bytes = core::slice::from_raw_parts(dmar_ptr, dmar_len);
             let _ = crate::iommu::parse_and_latch_dmar(bytes);
@@ -652,10 +656,6 @@ pub fn discover_acpi_madt(
         if let Some((ivrs_ptr, ivrs_len)) = tables.ivrs {
             let bytes = core::slice::from_raw_parts(ivrs_ptr, ivrs_len);
             summary.ivrs_found = crate::iommu::parse_and_latch_ivrs(bytes).is_ok();
-        }
-        if let Some((mcfg_ptr, mcfg_len)) = tables.mcfg {
-            let bytes = core::slice::from_raw_parts(mcfg_ptr, mcfg_len);
-            summary.mcfg_found = crate::pci_ecam::parse_and_latch_mcfg(bytes).is_ok();
         }
 
         if let Some(fadt) = tables.fadt {

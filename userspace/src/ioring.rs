@@ -136,7 +136,7 @@ impl IoRingSharedPage {
     pub fn pop_cqe(&self) -> Option<IoCqe> {
         let head = self.cq_head.load(Ordering::Relaxed);
         let tail = self.cq_tail.load(Ordering::Acquire);
-        if head == tail {
+        if head == tail || tail.wrapping_sub(head) > (IORING_RING_CAP as u32) {
             return None;
         }
         let idx = (head & IORING_RING_MASK) as usize;
@@ -181,19 +181,64 @@ impl IoRingClient {
     }
 
     pub fn connect(blk_ep: u64, ring_vaddr: u64, data_vaddr: u64) -> Result<Self, isize> {
-        let ring_cap = sys_frame_alloc(0)?;
-        let data_cap = match sys_frame_alloc(0) {
+        let mut client = Self {
+            blk_ep,
+            ring_vaddr,
+            data_vaddr,
+            ..Self::empty()
+        };
+        let cleanup_partial = |c: &mut Self| {
+            if c.ring_cap != 0 {
+                let _ = sys_vspace_map(c.ring_cap, c.ring_vaddr, VSPACE_MAP_OP_UNMAP_4K);
+                let _ = sys_cap_revoke(c.ring_cap, 2);
+                c.ring_cap = 0;
+            }
+            if c.data_cap != 0 {
+                let _ = sys_vspace_map(c.data_cap, c.data_vaddr, VSPACE_MAP_OP_UNMAP_4K);
+                let _ = sys_cap_revoke(c.data_cap, 2);
+                c.data_cap = 0;
+            }
+            if c.sq_notif != 0 {
+                let _ = sys_cap_revoke(c.sq_notif, 2);
+                c.sq_notif = 0;
+            }
+            if c.cq_notif != 0 {
+                let _ = sys_cap_revoke(c.cq_notif, 2);
+                c.cq_notif = 0;
+            }
+        };
+
+        client.ring_cap = sys_frame_alloc(0)?;
+        client.data_cap = match sys_frame_alloc(0) {
             Ok(c) => c,
             Err(e) => {
-                let _ = sys_cap_revoke(ring_cap, 2);
+                cleanup_partial(&mut client);
                 return Err(e);
             }
         };
-        let sq_notif = sys_notify_create(0)?;
-        let cq_notif = sys_notify_create(0)?;
+        client.sq_notif = match sys_notify_create(0) {
+            Ok(c) => c,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
+        client.cq_notif = match sys_notify_create(0) {
+            Ok(c) => c,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
 
-        sys_vspace_map(ring_cap, ring_vaddr, VSPACE_MAP_OP_4K_RW)?;
-        sys_vspace_map(data_cap, data_vaddr, VSPACE_MAP_OP_4K_RW)?;
+        if let Err(e) = sys_vspace_map(client.ring_cap, ring_vaddr, VSPACE_MAP_OP_4K_RW) {
+            cleanup_partial(&mut client);
+            return Err(e);
+        }
+        if let Err(e) = sys_vspace_map(client.data_cap, data_vaddr, VSPACE_MAP_OP_4K_RW) {
+            cleanup_partial(&mut client);
+            return Err(e);
+        }
         // SAFETY: Both `ring_vaddr` and `data_vaddr` are mapped `USER_RW` 4 KiB frames.
         unsafe {
             let _ = IoRingSharedPage::init_at(ring_vaddr);
@@ -201,65 +246,82 @@ impl IoRingClient {
         }
 
         let rw_map = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP;
-        let (rtag, _, rmrs) = sys_ipc_call_with_grant(
+        let (rtag, _, rmrs) = match sys_ipc_call_with_grant(
             blk_ep,
             BLK_OP_SETUP_RING,
             [0; 4],
-            ring_cap,
+            client.ring_cap,
             rw_map,
             0,
             0,
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
         if msg_tag_label(rtag) != IPC_OP_PONG || rmrs[0] == 0 {
+            cleanup_partial(&mut client);
             return Err(EIO_RING);
         }
-        let total_sectors = rmrs[0];
+        client.total_sectors = rmrs[0];
 
-        let (d0, _, _) = sys_ipc_call_with_grant(
+        let (d0, _, _) = match sys_ipc_call_with_grant(
             blk_ep,
             BLK_OP_ATTACH_DATA,
             [0, 0, 0, 0],
-            data_cap,
+            client.data_cap,
             rw_map,
             0,
             0,
-        )?;
-        let (d1, _, _) = sys_ipc_call_with_grant(
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
+        let (d1, _, _) = match sys_ipc_call_with_grant(
             blk_ep,
             BLK_OP_ATTACH_DATA,
             [1, 0, 0, 0],
-            sq_notif,
+            client.sq_notif,
             RIGHT_READ | RIGHT_WAIT,
             0,
             0,
-        )?;
-        let (d2, _, _) = sys_ipc_call_with_grant(
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
+        let (d2, _, _) = match sys_ipc_call_with_grant(
             blk_ep,
             BLK_OP_ATTACH_DATA,
             [2, 0, 0, 0],
-            cq_notif,
+            client.cq_notif,
             RIGHT_READ | RIGHT_SIGNAL,
             0,
             0,
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_partial(&mut client);
+                return Err(e);
+            }
+        };
         if msg_tag_label(d0) != IPC_OP_PONG
             || msg_tag_label(d1) != IPC_OP_PONG
             || msg_tag_label(d2) != IPC_OP_PONG
         {
+            cleanup_partial(&mut client);
             return Err(EIO_RING);
         }
 
-        Ok(Self {
-            blk_ep,
-            ring_cap,
-            data_cap,
-            sq_notif,
-            cq_notif,
-            ring_vaddr,
-            data_vaddr,
-            total_sectors,
-            next_tag: 1,
-        })
+        client.next_tag = 1;
+        Ok(client)
     }
 
     fn exec_sqe(&mut self, mut sqe: IoSqe) -> Result<IoCqe, isize> {
@@ -401,4 +463,14 @@ impl IoRingClient {
         }
         self.total_sectors = 0;
     }
+}
+
+/// Self-test verifying `IoRingSharedPage::pop_cqe` rejects corrupted `cq_tail - cq_head > CAP`.
+pub fn verify_ioring_corrupt_tail_guard() -> bool {
+    let mut backing = [0u64; 512];
+    // SAFETY: 4 KiB 8-byte-aligned stack buffer exclusively owned for unit test.
+    let ring = unsafe { IoRingSharedPage::init_at(backing.as_mut_ptr() as u64) };
+    ring.cq_head.store(0, Ordering::Relaxed);
+    ring.cq_tail.store((IORING_RING_CAP as u32) + 68, Ordering::Release);
+    ring.pop_cqe().is_none() && ring.cq_head.load(Ordering::Relaxed) == 0
 }
