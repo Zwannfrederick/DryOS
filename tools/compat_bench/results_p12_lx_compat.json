@@ -17,14 +17,14 @@
   "kernel_dma_denied": 5,
   "leaked_frames": 0,
   "tsc_mhz": 3114,
-  "direct_damage_p50_cyc": 55596,
-  "direct_damage_p95_cyc": 67170,
-  "direct_damage_p99_cyc": 67419,
-  "direct_damage_p50_us": 17.854,
-  "ioring_32_flushes_total_cyc": 1589404,
-  "ioring_per_flush_cyc": 49668.9,
-  "crash_recovery_cyc": 19938881,
-  "crash_recovery_us": 6402.98,
+  "direct_damage_p50_cyc": 55756,
+  "direct_damage_p95_cyc": 65735,
+  "direct_damage_p99_cyc": 72863,
+  "direct_damage_p50_us": 17.905,
+  "ioring_32_flushes_total_cyc": 1598213,
+  "ioring_per_flush_cyc": 49944.2,
+  "crash_recovery_cyc": 19004218,
+  "crash_recovery_us": 6102.832,
   "island_rss_frames_4k": 1566,
   "bochs_scanout": {
     "w": 800,
@@ -40,5 +40,5 @@
     "distinct_colors": 32,
     "png": "docs/screenshots/glass21/p12_gop_desktop_coexist.png"
   },
-  "wall_time_sec": 7.476
+  "wall_time_sec": 4.344
 }

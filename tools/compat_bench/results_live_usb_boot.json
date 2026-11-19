@@ -1,6 +1,6 @@
 {
   "image_path": "kernel/build/dryos-ascension7-live-usb.img",
-  "image_sha256": "e1e136a9d13feb686cfa7e5f5e15706139877590d8d886875762977ab4f2f604",
+  "image_sha256": "6165c54f1617094a0ef3a38b2df5326721063fbf30d4fac79417ff1359b2d84b",
   "image_size_mib": 160,
   "esp_mib": 96,
   "module_count": 27,
@@ -13,10 +13,10 @@
   "dryfs_superblocks_verified": true,
   "boot_transport": "intel-iommu (VT-d) + qemu-xhci + usb-storage (RW) + usb-kbd + usb-mouse",
   "iommu_mode": "VTD_ACTIVE",
-  "esp_pre_sha256": "c95b2a79d631c998a7c087878c3b72570f5d85f501db3d0af882a1a6e1586025",
-  "esp_post_sha256": "c95b2a79d631c998a7c087878c3b72570f5d85f501db3d0af882a1a6e1586025",
+  "esp_pre_sha256": "04f320efa41f27368f7b3c73e84a038d682c859bb5986095ed88eb45457f69c3",
+  "esp_post_sha256": "04f320efa41f27368f7b3c73e84a038d682c859bb5986095ed88eb45457f69c3",
   "esp_untouched": true,
   "leaked_frames": 0,
   "exit_code": 33,
-  "boot_to_shutdown_sec": 5.383
+  "boot_to_shutdown_sec": 6.506
 }

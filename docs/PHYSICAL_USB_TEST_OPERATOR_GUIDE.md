@@ -24,7 +24,7 @@ Verified read-only on the host via `python3 tools/hw_profile_lenovo_82k1.py` (`t
 
 | Artifact | Path | Size | SHA-256 |
 | :--- | :--- | :---: | :--- |
-| **Ascension 7.0 Live USB Image** | `kernel/build/dryos-ascension7-live-usb.img` | `160 MiB` (`327,680` sectors) | `e1e136a9d13feb686cfa7e5f5e15706139877590d8d886875762977ab4f2f604` |
+| **Ascension 7.0 Live USB Image** | `kernel/build/dryos-ascension7-live-usb.img` | `160 MiB` (`327,680` sectors) | `6165c54f1617094a0ef3a38b2df5326721063fbf30d4fac79417ff1359b2d84b` |
 | *Preserved Baselines (Untouched)* | `kernel/build/dryos-ascension5-live-usb.img` / `ascension6` | `160 MiB` | Preserved intact |
 
 Before flashing any USB stick on the host:

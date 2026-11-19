@@ -32,27 +32,27 @@ All tiers were measured back-to-back on the **same Linux host**, **same `1920x10
 
 | Tier & Mechanism | Copied / Frame | `p50` (us) | `p95` (us) | `p99` (us) | `mean` (us) | Effective 1080p Throughput (MiB/s) | CPU Util (2-proc) | Max RSS (KiB) | Within 165 Hz (`6,060.61 us` `p95`) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| **`T0` Python Copied SHM + Pipe + `zlib.crc32`** (`proto_bench.py`) | `16.59 MB` (2x) | `8,101.00` | `12,600.22` | `13,861.99` | `9,162.22` | `863.34` | `98.4%` | `57,312` | **NO** (`1.34x–2.08x` over) |
-| **`T1` Native C Double-Buf Single-Copy SHM + `eventfd`** | `8.29 MB` (1x) | `456.33` | `562.75` | `618.94` | `469.31` | `16,776.39` | `99.8%` | `42,368` | **YES** (`17.8x` faster `p50`) |
-| **`T2` Native C Triple-Buf Async Ring + `eventfd`** | `8.29 MB` (1x) | `406.41` | `478.89` | `528.68` | `417.03` | `18,877.44` | `106.5%` | `42,444` | **YES** (`19.9x` faster `p50`) |
-| **`T3` Dirty-Rect Batch `5%` Damage + `eventfd`** | `417,792 B` | `19.30` | `23.04` | `37.09` | `20.16` | `388,832.26` | `107.6%` | `42,104` | **YES** (`0.4%` of budget) |
-| **`T3` Dirty-Rect Batch `15%` Damage + `eventfd`** | `1,245,184 B` | `66.75` | `73.31` | `87.56` | `67.83` | `116,030.15` | `102.4%` | `42,376` | **YES** (`1.2%` of budget) |
-| **`T3` Dirty-Rect Batch `25%` Damage + `eventfd`** | `2,076,672 B` | `108.09` | `119.45` | `153.77` | `110.21` | `71,408.34` | `101.4%` | `42,352` | **YES** (`2.0%` of budget) |
-| **`T4` Recycle Pool + Spin-Then-Futex (Full 1080p)** | `8.29 MB` (1x) | `406.08` | `1,148.41` | `1,740.97` | `536.06` | `14,695.51` | `104.0%` | `42,224` | **YES** (`p50` `19.9x` faster) |
-| **`T4b` Recycle Pool + Spin-Then-Futex (`15%` Dirty)** | `1,245,184 B` | `92.14` | `183.75` | `244.62` | `105.19` | `74,514.20` | `108.7%` | `42,224` | **YES** (`3.0%` of budget) |
-| **`T5` Shared-Pool Slot-Index Handoff** *(host SHM only)* | **`0 B` pixel copy** | `0.06` | `0.27` | `0.53` | `0.15` | `40,999,273.28`* | `163.0%` | `34,244` | **YES** (`0 B` copy) |
+| **`T0` Python Copied SHM + Pipe + `zlib.crc32`** (`proto_bench.py`) | `16.59 MB` (2x) | `8,250.75` | `8,691.71` | `8,788.09` | `8,315.79` | `951.22` | `99.5%` | `57,240` | **NO** (`1.36x–1.43x` over) |
+| **`T1` Native C Double-Buf Single-Copy SHM + `eventfd`** | `8.29 MB` (1x) | `508.05` | `645.69` | `697.82` | `515.47` | `15,292.35` | `100.3%` | `42,096` | **YES** (`16.2x` faster `p50`) |
+| **`T2` Native C Triple-Buf Async Ring + `eventfd`** | `8.29 MB` (1x) | `435.20` | `576.84` | `695.30` | `458.40` | `17,165.43` | `103.6%` | `42,444` | **YES** (`19.0x` faster `p50`) |
+| **`T3` Dirty-Rect Batch `5%` Damage + `eventfd`** | `417,792 B` | `19.20` | `31.14` | `43.35` | `20.93` | `374,566.34` | `106.4%` | `42,444` | **YES** (`0.5%` of budget) |
+| **`T3` Dirty-Rect Batch `15%` Damage + `eventfd`** | `1,245,184 B` | `67.53` | `90.50` | `108.60` | `71.65` | `109,833.91` | `102.1%` | `42,444` | **YES** (`1.5%` of budget) |
+| **`T3` Dirty-Rect Batch `25%` Damage + `eventfd`** | `2,076,672 B` | `109.88` | `141.49` | `151.72` | `115.32` | `68,281.23` | `101.4%` | `42,224` | **YES** (`2.3%` of budget) |
+| **`T4` Recycle Pool + Spin-Then-Futex (Full 1080p)** | `8.29 MB` (1x) | `568.01` | `689.79` | `756.09` | `564.54` | `13,949.32` | `102.9%` | `42,160` | **YES** (`p50` `14.5x` faster) |
+| **`T4b` Recycle Pool + Spin-Then-Futex (`15%` Dirty)** | `1,245,184 B` | `62.59` | `75.23` | `89.28` | `64.75` | `121,208.09` | `110.0%` | `42,224` | **YES** (`1.2%` of budget) |
+| **`T5` Shared-Pool Slot-Index Handoff** *(host SHM only)* | **`0 B` pixel copy** | `0.24` | `0.31` | `0.34` | `0.24` | `28,687,172.71`* | `196.3%` | `34,560` | **YES** (`0 B` copy) |
 
-*\*Note on `T5`: Effective throughput divides `8.29 MB` logical display frame size by slot-descriptor handoff latency (`0.06 us`); actual pixel `memcpy` bandwidth consumed is `0 B/s`.*
+*\*Note on `T5`: Effective throughput divides `8.29 MB` logical display frame size by slot-descriptor handoff latency (`0.24 us`); actual pixel `memcpy` bandwidth consumed is `0 B/s`.*
 
 ---
 
 ## 3. Bottlenecks Eliminated & Honest Zero-Copy Boundaries
 
 1. **Where the Ascension 6.0 `8.2 ms` Bottleneck Actually Came From:**
-   The Ascension 6.0 `proto_bench.py` baseline (`T0`) missed the 165 Hz `6.06 ms` deadline **not** because memory bandwidth on this host cannot transfer 1080p frames at 165 Hz, but because Python copied the `8.29 MB` frame **twice** (`producer->shm`, `shm->consumer`) and ran synchronous `zlib.crc32` twice per frame over blocking pipes (`863 MiB/s`).
+   The Ascension 6.0 `proto_bench.py` baseline (`T0`) missed the 165 Hz `6.06 ms` deadline **not** because memory bandwidth on this host cannot transfer 1080p frames at 165 Hz, but because Python copied the `8.29 MB` frame **twice** (`producer->shm`, `shm->consumer`) and ran synchronous `zlib.crc32` twice per frame over blocking pipes (`951.2 MiB/s`).
 2. **Real Native Single-Copy & Async Ring Performance (`T1`, `T2`, `T3`):**
-   Moving to native compiled single-copy shared memory (`T1` `p50=456 us`) and triple-buffered pipelining (`T2` `p50=406 us`, `p95=479 us`) brings full-screen `1080p` transfer down to **<8% of the `6,060.6 us` 165 Hz budget**, while dirty-rectangle batching (`T3`) drops typical UI updates (`5%–15%`) to **`19–67 us`**.
+   Moving to native compiled single-copy shared memory (`T1` `p50=508.05 us`) and triple-buffered pipelining (`T2` `p50=435.20 us`, `p95=576.84 us`) brings full-screen `1080p` transfer down to **<10% of the `6,060.61 us` 165 Hz budget**, while dirty-rectangle batching (`T3`) drops typical UI updates (`5%–15%`) to **`19.20–67.53 us`** (p95 `31.14–90.50 us`).
 3. **Important Architectural Honesty on `T5` vs. Cross-VM DMA-BUF:**
    - **Native DRY Ring-3 IPC (`dry-display` <-> `dry-gpu`):** Uses capability-mapped shared 2 MiB frames (`back_caps` `USER_RO`), eliminating duplicate userland staging inside native DRY services.
-   - **Host-Process POSIX SHM Zero-Copy (`T5`):** Demonstrates `64 B` lock-free slot descriptor handoff (`0.06 us` p50, `34.2 MiB` RSS) between two host processes mapping the same `MAP_SHARED` pool (`VERIFIED` in host prototype).
+   - **Host-Process POSIX SHM Zero-Copy (`T5`):** Demonstrates `64 B` lock-free slot descriptor handoff (`0.24 us` p50, `34.56 MiB` RSS) between two host processes mapping the same `MAP_SHARED` pool (`VERIFIED` in host prototype).
    - **Cross-VM Guest `DMA-BUF` / Physical GPU Page-Flip:** **Remains `PROTOTYPE` / `UNSUPPORTED`** until a guest MicroVM shares KVM `ivshmem`/`vhost-user-gpu` `memfd` backing directly into DRY OS's display compositor without an intermediate host `memcpy`.
