@@ -2,6 +2,7 @@
 //! Early Boot Limine Memory Map & Higher-Half Direct Map (HHDM) Hardware Verification.
 
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::limine::{
     EXEC_ADDR_REQ, HHDM_REQ, LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE,
@@ -11,6 +12,19 @@ use crate::limine::{
 /// Immutable canary placed in `.rodata` to cross-verify higher-half virtual vs HHDM alias.
 #[used]
 static RODATA_HHDM_CANARY: u64 = 0x4452_594f_535f_4848; // "DRYOS_HH"
+
+static MEM_TOTAL_ENTRIES: AtomicU32 = AtomicU32::new(0);
+static MEM_USABLE_REGIONS: AtomicU32 = AtomicU32::new(0);
+static MEM_USABLE_MIB: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+pub fn latched_mem_summary() -> (u32, u32, u32) {
+    (
+        MEM_TOTAL_ENTRIES.load(Ordering::Acquire),
+        MEM_USABLE_REGIONS.load(Ordering::Acquire),
+        MEM_USABLE_MIB.load(Ordering::Acquire),
+    )
+}
 
 pub struct MemorySummary {
     pub hhdm_offset: u64,
@@ -125,6 +139,10 @@ pub fn verify_memory_and_hhdm() -> MemorySummary {
         write_volatile(probe_ptr, orig);
         assert_eq!(readback, pattern, "HHDM RW probe failed at phys {:#x}", probe_phys);
     }
+
+    MEM_TOTAL_ENTRIES.store(entry_count as u32, Ordering::Release);
+    MEM_USABLE_REGIONS.store(usable_regions as u32, Ordering::Release);
+    MEM_USABLE_MIB.store((usable_bytes / (1024 * 1024)) as u32, Ordering::Release);
 
     MemorySummary {
         hhdm_offset,

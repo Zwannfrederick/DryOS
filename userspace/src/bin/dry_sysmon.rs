@@ -76,6 +76,32 @@ fn query_running_apps(sup_ep_cap: u64) -> u64 {
     running
 }
 
+fn query_diag_summary(sup_ep_cap: u64) -> dry_userspace::hwdiag::DiagSummaryWire {
+    let mut rx = [0u8; dry_userspace::MAX_IPC_EXTRA_BYTES];
+    let mut out = dry_userspace::hwdiag::DiagSummaryWire::empty();
+    if let Ok((tag, elen, _)) = dry_userspace::vfs_proto::sys_ipc_call_extra(
+        sup_ep_cap,
+        dry_userspace::hwdiag::IPC_OP_SUP_DIAG_QUERY,
+        [0; 4],
+        &[],
+        &mut rx,
+        0,
+    ) {
+        if msg_tag_label(tag) == IPC_OP_PONG
+            && elen >= core::mem::size_of::<dry_userspace::hwdiag::DiagSummaryWire>()
+        {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    rx.as_ptr(),
+                    (&raw mut out).cast::<u8>(),
+                    core::mem::size_of::<dry_userspace::hwdiag::DiagSummaryWire>(),
+                );
+            }
+        }
+    }
+    out
+}
+
 fn write_row_cols(surf: &SharedWindowSurface, cols: usize, row: usize, text: &[u8], style: u8) {
     let mut cells = [SurfaceCell::BLANK; LEGACY_COLS];
     for (i, &ch) in text.iter().take(cols).enumerate() {
@@ -317,6 +343,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
             last_ascii,
             spark_samples: &spark_ring[..spark_len],
             spark_max,
+            diag: query_diag_summary(sup_ep_cap),
         };
         render_sysmon_pixel(&mut win, &view);
         win.publish_initial();
@@ -497,6 +524,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
                     last_ascii,
                     spark_samples: &spark_ring[..spark_len],
                     spark_max,
+                    diag: query_diag_summary(sup_ep_cap),
                 };
                 render_sysmon_pixel(win, &view);
                 if disp_ep_cap != 0 && win_id != 0 {

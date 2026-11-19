@@ -7,6 +7,7 @@ use crate::abi_ext::{sys_dev_map_window, sys_dma_alloc, sys_dma_alloc_2m};
 use crate::{rdtsc_user, sys_cap_revoke, sys_yield, ENOSPC, ETIMEDOUT};
 
 pub mod hid;
+pub mod log_svc;
 pub mod msc;
 pub mod xhci;
 

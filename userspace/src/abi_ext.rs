@@ -707,6 +707,46 @@ pub const BOOT_FLAG_SAFE_GOP: u64 = 1 << 6;
 pub const BOOT_FLAG_USB_PERSIST_PREFER: u64 = 1 << 7;
 pub const BOOT_FLAG_DIAG_SELFTEST: u64 = 1 << 8;
 
+pub const HWCHECK_MODE_OFF: u32 = 0;
+pub const HWCHECK_MODE_SAFE: u32 = 1;
+pub const HWCHECK_MODE_DESKTOP_SAFE: u32 = 2;
+pub const HWCHECK_MODE_EXTENDED: u32 = 3;
+pub const HWCHECK_MODE_RECOVERY: u32 = 4;
+pub const HWCHECK_MODE_NVIDIA_EXP: u32 = 5;
+
+pub const HWVAL_FLAG_AUTO: u32 = 1 << 0;
+pub const HWVAL_FLAG_STORAGE_RO: u32 = 1 << 1;
+pub const HWVAL_FLAG_PCI_PASSIVE: u32 = 1 << 2;
+pub const HWVAL_FLAG_NVIDIA_EXP: u32 = 1 << 3;
+pub const HWVAL_FLAG_TEST_USB_WRITE_FAIL: u32 = 1 << 4;
+pub const HWVAL_FLAG_TEST_USB_DISCONNECT: u32 = 1 << 5;
+pub const HWVAL_FLAG_TEST_MALFORMED_ACPI: u32 = 1 << 6;
+pub const HWVAL_FLAG_TEST_BAD_PCI_BAR: u32 = 1 << 7;
+pub const HWVAL_FLAG_TEST_NO_IOMMU_MODE: u32 = 1 << 8;
+pub const HWVAL_FLAG_TEST_NV_NO_GPU: u32 = 1 << 9;
+pub const HWVAL_FLAG_TEST_NV_BAD_BAR: u32 = 1 << 10;
+pub const HWVAL_FLAG_TEST_NV_VM_CRASH: u32 = 1 << 11;
+pub const HWVAL_FLAG_TEST_NV_TIMEOUT: u32 = 1 << 12;
+pub const HWVAL_FLAG_TEST_NV_CORRUPT_IPC: u32 = 1 << 13;
+pub const HWVAL_FLAG_TEST_NV_UNAUTH_CAP: u32 = 1 << 14;
+
+pub const ACPI_AUDIT_RSDP_OK: u32 = 1 << 0;
+pub const ACPI_AUDIT_XSDT_OK: u32 = 1 << 1;
+pub const ACPI_AUDIT_RSDT_FALLBACK: u32 = 1 << 2;
+pub const ACPI_AUDIT_MADT_OK: u32 = 1 << 3;
+pub const ACPI_AUDIT_MCFG_OK: u32 = 1 << 4;
+pub const ACPI_AUDIT_DMAR_OK: u32 = 1 << 5;
+pub const ACPI_AUDIT_IVRS_FOUND: u32 = 1 << 6;
+pub const ACPI_AUDIT_FACP_OK: u32 = 1 << 7;
+pub const ACPI_AUDIT_CHECKSUM_FAIL: u32 = 1 << 8;
+pub const ACPI_AUDIT_MALFORMED_TABLE: u32 = 1 << 9;
+
+pub const IOMMU_AUDIT_DMAR_PRESENT: u32 = 1 << 0;
+pub const IOMMU_AUDIT_HW_ENFORCING: u32 = 1 << 1;
+pub const IOMMU_AUDIT_INT_REMAP: u32 = 1 << 2;
+pub const IOMMU_AUDIT_IVRS_PRESENT: u32 = 1 << 3;
+pub const IOMMU_AUDIT_FAIL_CLOSED: u32 = 1 << 4;
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RootInitBootExtInfo {
@@ -722,9 +762,42 @@ pub struct RootInitBootExtInfo {
     pub dgpu_packed: u64,
     pub vmd_packed: u64,
     pub lpss_i2c_count: u64,
+    pub hwcheck_mode: u32,
+    pub hwval_flags: u32,
+    pub acpi_audit_flags: u32,
+    pub iommu_audit_flags: u32,
+    pub mem_usable_mib: u32,
+    pub mem_regions: u32,
+    pub fb_pitch: u32,
+    pub fb_width: u16,
+    pub fb_height: u16,
+    pub fb_phys_base: u64,
+    pub cpuid_features: u64,
+    pub boot_disk_guid: [u8; 16],
+    pub tsc_khz: u32,
+    pub secure_boot_state: u32,
+    pub acpi_oem_id: [u8; 6],
+    pub pci_passive_mode: u8,
+    pub mem_total_entries: u8,
 }
 
-const _: () = assert!(size_of::<RootInitBootExtInfo>() == 96);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 176);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
+
+impl RootInitBootExtInfo {
+    pub const fn empty() -> Self {
+        Self {
+            magic: 0, usb_mod_cap: 0, pci_xhci_cap: 0, nvme_mod_cap: 0,
+            pci_nvme_cap: 0, lx_net_mod_cap: 0, pci_net_cap: 0, pci_igpu_cap: 0,
+            boot_flags: 0, dgpu_packed: 0, vmd_packed: 0, lpss_i2c_count: 0,
+            hwcheck_mode: 0, hwval_flags: 0, acpi_audit_flags: 0, iommu_audit_flags: 0,
+            mem_usable_mib: 0, mem_regions: 0, fb_pitch: 0, fb_width: 0, fb_height: 0,
+            fb_phys_base: 0, cpuid_features: 0, boot_disk_guid: [0; 16],
+            tsc_khz: 0, secure_boot_state: 0, acpi_oem_id: [0; 6],
+            pci_passive_mode: 0, mem_total_entries: 0,
+        }
+    }
+}
 
 /// Read kernel `UserSysInfo` and recent kernel `dmesg` ring bytes (`DIAG_RING`, up to 16 KiB).
 #[inline]

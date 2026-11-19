@@ -6,6 +6,7 @@
 //! `0x0070_0000`, runs preemptive SMP scheduling until graceful session teardown, and audits zero
 //! leaked frames.
 
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::mem::size_of;
 use core::ptr::copy_nonoverlapping;
 use core::sync::atomic::Ordering;
@@ -102,6 +103,100 @@ struct BootModManifestEntry {
     size_bytes: u64,
 }
 
+const HWCHECK_MODE_OFF: u32 = 0;
+const HWCHECK_MODE_SAFE: u32 = 1;
+const HWCHECK_MODE_DESKTOP_SAFE: u32 = 2;
+const HWCHECK_MODE_EXTENDED: u32 = 3;
+const HWCHECK_MODE_RECOVERY: u32 = 4;
+const HWCHECK_MODE_NVIDIA_EXP: u32 = 5;
+
+const HWVAL_FLAG_AUTO: u32 = 1 << 0;
+const HWVAL_FLAG_STORAGE_RO: u32 = 1 << 1;
+const HWVAL_FLAG_PCI_PASSIVE: u32 = 1 << 2;
+const HWVAL_FLAG_NVIDIA_EXP: u32 = 1 << 3;
+const HWVAL_FLAG_TEST_USB_WRITE_FAIL: u32 = 1 << 4;
+const HWVAL_FLAG_TEST_USB_DISCONNECT: u32 = 1 << 5;
+const HWVAL_FLAG_TEST_MALFORMED_ACPI: u32 = 1 << 6;
+const HWVAL_FLAG_TEST_BAD_PCI_BAR: u32 = 1 << 7;
+const HWVAL_FLAG_TEST_NO_IOMMU_MODE: u32 = 1 << 8;
+const HWVAL_FLAG_TEST_NV_NO_GPU: u32 = 1 << 9;
+const HWVAL_FLAG_TEST_NV_BAD_BAR: u32 = 1 << 10;
+const HWVAL_FLAG_TEST_NV_VM_CRASH: u32 = 1 << 11;
+const HWVAL_FLAG_TEST_NV_TIMEOUT: u32 = 1 << 12;
+const HWVAL_FLAG_TEST_NV_CORRUPT_IPC: u32 = 1 << 13;
+const HWVAL_FLAG_TEST_NV_UNAUTH_CAP: u32 = 1 << 14;
+
+const IOMMU_AUDIT_DMAR_PRESENT: u32 = 1 << 0;
+const IOMMU_AUDIT_HW_ENFORCING: u32 = 1 << 1;
+const IOMMU_AUDIT_INT_REMAP: u32 = 1 << 2;
+const IOMMU_AUDIT_IVRS_PRESENT: u32 = 1 << 3;
+const IOMMU_AUDIT_FAIL_CLOSED: u32 = 1 << 4;
+
+fn parse_usb_disk_guid(cmdline: &str) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let Some(pos) = cmdline.find("usb_disk_guid=") else {
+        return out;
+    };
+    let rest = &cmdline.as_bytes()[pos + 14..];
+    let hex_val = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    if rest.len() < 32 {
+        return out;
+    }
+    let mut i = 0usize;
+    while i < 16 {
+        let Some(hi) = hex_val(rest[i * 2]) else {
+            return [0u8; 16];
+        };
+        let Some(lo) = hex_val(rest[i * 2 + 1]) else {
+            return [0u8; 16];
+        };
+        out[i] = (hi << 4) | lo;
+        i += 1;
+    }
+    out
+}
+
+fn read_cpuid_features_u64() -> u64 {
+    let max_leaf = __cpuid(0).eax;
+    let mut feat = 0u64;
+    if max_leaf >= 1 {
+        let l1 = __cpuid(1);
+        if (l1.edx & (1 << 26)) != 0 { feat |= 1 << 0; } // SSE2
+        if (l1.ecx & (1 << 28)) != 0 { feat |= 1 << 1; } // AVX
+        if (l1.ecx & (1 << 26)) != 0 { feat |= 1 << 2; } // XSAVE
+        if (l1.ecx & (1 << 27)) != 0 { feat |= 1 << 3; } // OSXSAVE
+        if (l1.ecx & (1 << 30)) != 0 { feat |= 1 << 4; } // RDRAND
+        if (l1.ecx & (1 << 21)) != 0 { feat |= 1 << 5; } // X2APIC
+        if (l1.ecx & (1 << 5)) != 0 { feat |= 1 << 6; }  // VMX
+        if (l1.ecx & (1 << 17)) != 0 { feat |= 1 << 7; } // PCID
+        if (l1.ecx & (1 << 31)) != 0 { feat |= 1 << 8; } // HYPERVISOR
+    }
+    if max_leaf >= 7 {
+        let l7 = __cpuid_count(7, 0);
+        if (l7.ebx & (1 << 5)) != 0 { feat |= 1 << 9; }  // AVX2
+        if (l7.ebx & (1 << 0)) != 0 { feat |= 1 << 10; } // FSGSBASE
+        if (l7.ebx & (1 << 7)) != 0 { feat |= 1 << 11; } // SMEP
+        if (l7.ebx & (1 << 20)) != 0 { feat |= 1 << 12; } // SMAP
+    }
+    let ext_max = __cpuid(0x8000_0000).eax;
+    if ext_max >= 0x8000_0001 {
+        let ext1 = __cpuid(0x8000_0001);
+        if (ext1.edx & (1 << 20)) != 0 { feat |= 1 << 14; } // NX
+        if (ext1.edx & (1 << 26)) != 0 { feat |= 1 << 15; } // PDPE1GB
+    }
+    if ext_max >= 0x8000_0007 && (__cpuid(0x8000_0007).edx & (1 << 8)) != 0 {
+        feat |= 1 << 13; // TSC_INVARIANT
+    }
+    feat
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct RootInitBootExtInfo {
@@ -117,7 +212,27 @@ struct RootInitBootExtInfo {
     dgpu_packed: u64,
     vmd_packed: u64,
     lpss_i2c_count: u64,
+    hwcheck_mode: u32,
+    hwval_flags: u32,
+    acpi_audit_flags: u32,
+    iommu_audit_flags: u32,
+    mem_usable_mib: u32,
+    mem_regions: u32,
+    fb_pitch: u32,
+    fb_width: u16,
+    fb_height: u16,
+    fb_phys_base: u64,
+    cpuid_features: u64,
+    boot_disk_guid: [u8; 16],
+    tsc_khz: u32,
+    secure_boot_state: u32,
+    acpi_oem_id: [u8; 6],
+    pci_passive_mode: u8,
+    mem_total_entries: u8,
 }
+
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 176);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
 
 const _: () = assert!(
     BOOT_MANIFEST_OFFSET + MAX_LATCHED_MODULES * size_of::<BootModManifestEntry>()
@@ -135,7 +250,9 @@ const _: () = assert!(
 /// Launch the live Ring 3 session (`interactive=1`, `desktop=1`, `desktop3=1`, or `desktop4=1`).
 #[inline(never)]
 pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
-    let is_desktop4 = cmdline.contains("desktop4=1");
+    let is_desktop4 = cmdline.contains("desktop4=1")
+        || (cmdline.contains("desktop=1")
+            && (cmdline.contains("hwcheck=") || cmdline.contains("hwcheck_mode=")));
     let is_desktop3 = cmdline.contains("desktop3=1") || is_desktop4;
     let is_desktop = cmdline.contains("desktop=1") || is_desktop3;
     if !cmdline.contains("interactive=1") && !is_desktop {
@@ -358,6 +475,69 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 boot_flags |= BOOT_FLAG_DIAG_SELFTEST;
             }
             let (dgpu_packed, vmd_packed, lpss_i2c_count) = crate::pci::pci_topology_summary();
+            let hwcheck_mode = if cmdline.contains("hwcheck_mode=nvidia_exp") || cmdline.contains("nvidia_exp=1") {
+                HWCHECK_MODE_NVIDIA_EXP
+            } else if cmdline.contains("hwcheck_mode=recovery") {
+                HWCHECK_MODE_RECOVERY
+            } else if cmdline.contains("hwcheck_mode=extended") {
+                HWCHECK_MODE_EXTENDED
+            } else if cmdline.contains("hwcheck_mode=desktop_safe") {
+                HWCHECK_MODE_DESKTOP_SAFE
+            } else if cmdline.contains("hwcheck_mode=safe") || cmdline.contains("hwcheck=auto") {
+                HWCHECK_MODE_SAFE
+            } else {
+                HWCHECK_MODE_OFF
+            };
+            let pci_passive = cmdline.contains("hwcheck_mode=safe")
+                || cmdline.contains("hwcheck_mode=desktop_safe")
+                || cmdline.contains("hwcheck_mode=recovery")
+                || (cmdline.contains("hwcheck=auto")
+                    && !cmdline.contains("hwcheck_mode=extended")
+                    && !cmdline.contains("hwcheck_mode=nvidia_exp")
+                    && !cmdline.contains("nvidia_exp=1"));
+            let mut hwval_flags = 0u32;
+            if cmdline.contains("hwcheck=auto") { hwval_flags |= HWVAL_FLAG_AUTO; }
+            if cmdline.contains("storage=ro") { hwval_flags |= HWVAL_FLAG_STORAGE_RO; }
+            if pci_passive { hwval_flags |= HWVAL_FLAG_PCI_PASSIVE; }
+            if hwcheck_mode == HWCHECK_MODE_NVIDIA_EXP { hwval_flags |= HWVAL_FLAG_NVIDIA_EXP; }
+            if cmdline.contains("dry_test_usb_write_fail=1") { hwval_flags |= HWVAL_FLAG_TEST_USB_WRITE_FAIL; }
+            if cmdline.contains("dry_test_usb_disconnect=1") { hwval_flags |= HWVAL_FLAG_TEST_USB_DISCONNECT; }
+            if cmdline.contains("dry_test_malformed_acpi=1") { hwval_flags |= HWVAL_FLAG_TEST_MALFORMED_ACPI; }
+            if cmdline.contains("dry_test_bad_pci_bar=1") { hwval_flags |= HWVAL_FLAG_TEST_BAD_PCI_BAR; }
+            if cmdline.contains("dry_qemu_test_no_iommu=1") { hwval_flags |= HWVAL_FLAG_TEST_NO_IOMMU_MODE; }
+            if cmdline.contains("dry_test_nv_no_gpu=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_NO_GPU; }
+            if cmdline.contains("dry_test_nv_bad_bar=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_BAD_BAR; }
+            if cmdline.contains("dry_test_nv_vm_crash=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_VM_CRASH; }
+            if cmdline.contains("dry_test_nv_timeout=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_TIMEOUT; }
+            if cmdline.contains("dry_test_nv_corrupt_ipc=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_CORRUPT_IPC; }
+            if cmdline.contains("dry_test_nv_unauth_cap=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_UNAUTH_CAP; }
+
+            let acpi_sum = crate::acpi::acpi_madt_summary();
+            let iommu_caps = crate::iommu::caps();
+            let dmar_snap = crate::iommu::dmar_snapshot();
+            let mut iommu_audit_flags = 0u32;
+            if dmar_snap.is_some() { iommu_audit_flags |= IOMMU_AUDIT_DMAR_PRESENT; }
+            if crate::iommu::is_hw_enforcing() { iommu_audit_flags |= IOMMU_AUDIT_HW_ENFORCING; }
+            if iommu_caps.int_remap { iommu_audit_flags |= IOMMU_AUDIT_INT_REMAP; }
+            if acpi_sum.ivrs_found { iommu_audit_flags |= IOMMU_AUDIT_IVRS_PRESENT; }
+            if matches!(
+                crate::iommu::status(),
+                crate::iommu::IommuStatus::UnsupportedFailClosed | crate::iommu::IommuStatus::FailedClosed
+            ) {
+                iommu_audit_flags |= IOMMU_AUDIT_FAIL_CLOSED;
+            }
+            if let Some(dmar) = dmar_snap {
+                iommu_audit_flags |= ((dmar.drhd_count.min(255) as u32) << 8)
+                    | ((dmar.rmrr_count.min(255) as u32) << 16);
+            }
+            iommu_audit_flags |= (iommu_caps.max_aw_bits as u32) << 24;
+            let (mem_entries, mem_regions, mem_usable_mib) = crate::mem_verify::latched_mem_summary();
+            let (fb_width, fb_height, fb_pitch, fb_phys_base) =
+                if let Some(fb) = crate::display::framebuffer_summary() {
+                    (fb.info.width as u16, fb.info.height as u16, fb.info.pitch, fb.phys_base)
+                } else {
+                    (0, 0, 0, 0)
+                };
             let boot_ext = RootInitBootExtInfo {
                 magic: ROOT_BOOT_EXT_MAGIC,
                 usb_mod_cap: usb_mod_cap.0,
@@ -371,6 +551,23 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 dgpu_packed,
                 vmd_packed,
                 lpss_i2c_count: lpss_i2c_count as u64,
+                hwcheck_mode,
+                hwval_flags,
+                acpi_audit_flags: acpi_sum.audit_flags,
+                iommu_audit_flags,
+                mem_usable_mib,
+                mem_regions,
+                fb_pitch,
+                fb_width,
+                fb_height,
+                fb_phys_base,
+                cpuid_features: read_cpuid_features_u64(),
+                boot_disk_guid: parse_usb_disk_guid(cmdline),
+                tsc_khz: crate::apic::latched_tsc_khz(),
+                secure_boot_state: 0, // UEFI Runtime NVRAM not touched post-ExitBootServices
+                acpi_oem_id: acpi_sum.oem_id,
+                pci_passive_mode: pci_passive as u8,
+                mem_total_entries: mem_entries.min(255) as u8,
             };
             let vault_ctrl_cap = if session_mode >= 20 {
                 crate::vault_ctrl::mint_root_vault_cap(cs, lbl)?

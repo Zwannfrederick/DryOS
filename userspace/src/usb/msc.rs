@@ -14,17 +14,49 @@ use crate::ioring::{
 };
 use crate::persist_fs::DRYFS_MAGIC;
 use crate::usb::xhci::XhciController;
+use crate::vault_crypto::{crc32_ieee, crc32_update};
 use crate::{EINVAL, EPIPE, EROFS};
 
 const EIO: isize = -5;
+const ENODEV: isize = -19;
 
 const CBW_SIG: u32 = 0x4342_5355; // "USBC"
 const CSW_SIG: u32 = 0x5342_5355; // "USBS"
+
+pub const ANCESTRY_GATE_XHCI_MSC: u32 = 1 << 0;
+pub const ANCESTRY_GATE_GPT_CRC: u32 = 1 << 1;
+pub const ANCESTRY_GATE_DISK_GUID: u32 = 1 << 2;
+pub const ANCESTRY_GATE_ESP_SAME_DISK: u32 = 1 << 3;
+pub const ANCESTRY_GATE_LOGS_PART: u32 = 1 << 4;
+pub const ANCESTRY_ALL_GATES: u32 = 0x1F;
+
+pub const LOG_BLOCK_NONE: u32 = 0;
+pub const LOG_BLOCK_NO_USB_MSC: u32 = 1;
+pub const LOG_BLOCK_INVALID_GPT: u32 = 2;
+pub const LOG_BLOCK_UNVERIFIED_BOOT_GUID: u32 = 3;
+pub const LOG_BLOCK_MISSING_ESP: u32 = 4;
+pub const LOG_BLOCK_MISSING_LOGS_PART: u32 = 5;
+pub const LOG_BLOCK_DISCONNECTED: u32 = 6;
+pub const LOG_BLOCK_WRITE_FAILED: u32 = 7;
+
+// ESP GUID C12A7328-F81F-11D2-BA4B-00A0C93EC93B (bytes_le)
+const ESP_TYPE_GUID_LE: [u8; 16] = [
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+];
+// Basic Data GUID EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 (bytes_le)
+const BASIC_DATA_GUID_LE: [u8; 16] = [
+    0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
+];
 
 pub struct UsbMscBot {
     pub active: bool,
     pub ready: bool,
     pub dryfs_verified: bool,
+    pub gpt_valid: bool,
+    pub has_esp: bool,
+    pub disconnected: bool,
+    pub test_write_fail: bool,
+    pub test_disconnect: bool,
     pub slot_id: u8,
     pub iface_num: u8,
     pub ep_in_addr: u8,
@@ -38,11 +70,18 @@ pub struct UsbMscBot {
     pub part2_start: u64,
     pub part2_sectors: u64,
     pub part2_idx: u8,
+    pub logs_start: u64,
+    pub logs_sectors: u64,
+    pub logs_idx: u8,
+    pub disk_guid: [u8; 16],
+    pub expected_disk_guid: [u8; 16],
     pub reads: u64,
     pub writes: u64,
     pub flushes: u64,
     pub io_errs: u64,
     pub rofs_rejects: u64,
+    pub logs_write_ops: u32,
+    pub logs_write_errs: u32,
     pub vendor_product: [u8; 24],
     next_tag: u32,
 }
@@ -53,6 +92,11 @@ impl UsbMscBot {
             active: false,
             ready: false,
             dryfs_verified: false,
+            gpt_valid: false,
+            has_esp: false,
+            disconnected: false,
+            test_write_fail: false,
+            test_disconnect: false,
             slot_id: 0,
             iface_num: 0,
             ep_in_addr: 0,
@@ -66,11 +110,18 @@ impl UsbMscBot {
             part2_start: 0,
             part2_sectors: 0,
             part2_idx: 0,
+            logs_start: 0,
+            logs_sectors: 0,
+            logs_idx: 0,
+            disk_guid: [0; 16],
+            expected_disk_guid: [0; 16],
             reads: 0,
             writes: 0,
             flushes: 0,
             io_errs: 0,
             rofs_rejects: 0,
+            logs_write_ops: 0,
+            logs_write_errs: 0,
             vendor_product: [0; 24],
             next_tag: 1,
         }
@@ -256,39 +307,55 @@ impl UsbMscBot {
         self.read_sectors_raw(hc, 0, probe_n)?;
         let hdr = hc.bulk_bounce_slice();
 
+        let has_pmbr = hdr[510] == 0x55
+            && hdr[511] == 0xaa
+            && (0..4).any(|i| hdr[446 + i * 16 + 4] == 0xEE);
+
         let mut found: Option<(u64, u64, u8)> = None;
+        let mut logs_found: Option<(u64, u64, u8)> = None;
         if probe_n >= 3 && &hdr[512..520] == b"EFI PART" {
+            let hdr_sz = u32::from_le_bytes([hdr[512 + 12], hdr[512 + 13], hdr[512 + 14], hdr[512 + 15]]) as usize;
+            let stored_hcrc = u32::from_le_bytes([hdr[512 + 16], hdr[512 + 17], hdr[512 + 18], hdr[512 + 19]]);
+            let mut hcopy = [0u8; 512];
+            hcopy.copy_from_slice(&hdr[512..1024]);
+            hcopy[16..20].fill(0);
+            let hcrc_ok = (92..=512).contains(&hdr_sz) && crc32_ieee(&hcopy[..hdr_sz]) == stored_hcrc;
+
+            self.disk_guid.copy_from_slice(&hdr[512 + 56..512 + 72]);
+
             let entry_lba = u64::from_le_bytes([
-                hdr[512 + 72],
-                hdr[512 + 73],
-                hdr[512 + 74],
-                hdr[512 + 75],
-                hdr[512 + 76],
-                hdr[512 + 77],
-                hdr[512 + 78],
-                hdr[512 + 79],
+                hdr[512 + 72], hdr[512 + 73], hdr[512 + 74], hdr[512 + 75],
+                hdr[512 + 76], hdr[512 + 77], hdr[512 + 78], hdr[512 + 79],
             ]);
             let num_entries = u32::from_le_bytes([
-                hdr[512 + 80],
-                hdr[512 + 81],
-                hdr[512 + 82],
-                hdr[512 + 83],
+                hdr[512 + 80], hdr[512 + 81], hdr[512 + 82], hdr[512 + 83],
             ])
             .min(128);
             let entry_sz = u32::from_le_bytes([
-                hdr[512 + 84],
-                hdr[512 + 85],
-                hdr[512 + 86],
-                hdr[512 + 87],
+                hdr[512 + 84], hdr[512 + 85], hdr[512 + 86], hdr[512 + 87],
             ]);
-            if entry_sz == 128 && entry_lba >= 2 {
-                let total_entry_secs = ((num_entries * 128).div_ceil(512)).min(32);
-                let mut fallback_p2: Option<(u64, u64, u8)> = None;
+            let expected_ecrc = u32::from_le_bytes([
+                hdr[512 + 88], hdr[512 + 89], hdr[512 + 90], hdr[512 + 91],
+            ]);
+
+            if hcrc_ok && entry_sz == 128 && entry_lba >= 2 && num_entries > 0 {
+                let total_entry_bytes = (num_entries as usize) * 128;
+                let total_entry_secs = (total_entry_bytes.div_ceil(512)).min(32) as u32;
+                let mut ecrc_acc = 0xffff_ffffu32;
+                let mut hashed = 0usize;
                 let mut sec_off = 0u32;
+                let mut esp_seen = false;
+
                 while sec_off < total_entry_secs {
                     let batch = (total_entry_secs - sec_off).min(8) as u16;
                     self.read_sectors_raw(hc, entry_lba + sec_off as u64, batch)?;
                     let buf = hc.bulk_bounce_slice();
+                    let rem = total_entry_bytes.saturating_sub(hashed);
+                    let take = rem.min((batch as usize) * 512);
+                    if take > 0 {
+                        ecrc_acc = crc32_update(ecrc_acc, &buf[..take]);
+                        hashed += take;
+                    }
                     for idx_in_batch in 0..(batch as usize * 4) {
                         let global_idx = (sec_off as usize) * 4 + idx_in_batch;
                         if global_idx >= num_entries as usize {
@@ -299,54 +366,54 @@ impl UsbMscBot {
                             continue;
                         }
                         let first = u64::from_le_bytes([
-                            buf[off + 32],
-                            buf[off + 33],
-                            buf[off + 34],
-                            buf[off + 35],
-                            buf[off + 36],
-                            buf[off + 37],
-                            buf[off + 38],
-                            buf[off + 39],
+                            buf[off + 32], buf[off + 33], buf[off + 34], buf[off + 35],
+                            buf[off + 36], buf[off + 37], buf[off + 38], buf[off + 39],
                         ]);
                         let last = u64::from_le_bytes([
-                            buf[off + 40],
-                            buf[off + 41],
-                            buf[off + 42],
-                            buf[off + 43],
-                            buf[off + 44],
-                            buf[off + 45],
-                            buf[off + 46],
-                            buf[off + 47],
+                            buf[off + 40], buf[off + 41], buf[off + 42], buf[off + 43],
+                            buf[off + 44], buf[off + 45], buf[off + 46], buf[off + 47],
                         ]);
                         if last < first || first < 34 || last >= self.total_sectors {
                             continue;
                         }
                         let len = last - first + 1;
+                        let type_guid = &buf[off..off + 16];
+                        if type_guid == ESP_TYPE_GUID_LE {
+                            esp_seen = true;
+                        }
                         if utf16_starts_with_ascii(&buf[off + 56..off + 128], b"DRYOS_PERSIST") {
                             found = Some((first, len, (global_idx + 1) as u8));
-                            break;
                         }
-                        if global_idx == 1 && fallback_p2.is_none() {
-                            fallback_p2 = Some((first, len, 2));
+                        if type_guid == BASIC_DATA_GUID_LE
+                            && utf16_starts_with_ascii(&buf[off + 56..off + 128], b"DRYOS_LOGS")
+                        {
+                            logs_found = Some((first, len, (global_idx + 1) as u8));
                         }
-                    }
-                    if found.is_some() {
-                        break;
                     }
                     sec_off += batch as u32;
                 }
-                if found.is_none() {
-                    found = fallback_p2;
+                if !ecrc_acc == expected_ecrc {
+                    self.gpt_valid = has_pmbr;
+                    self.has_esp = esp_seen;
+                } else {
+                    found = None;
+                    logs_found = None;
                 }
             }
-        } else if hdr[510] == 0x55 && hdr[511] == 0xaa {
-            // DOS MBR Partition #2 (`offset 446 + 16`).
+        } else if hdr[510] == 0x55 && hdr[511] == 0xaa && !has_pmbr {
+            // Non-GPT DOS MBR Partition #2 (`offset 446 + 16`) strictly for legacy DRYFS_V1 read/write tests.
             let p_type = hdr[462 + 4];
             let p_start = u32::from_le_bytes([hdr[462 + 8], hdr[462 + 9], hdr[462 + 10], hdr[462 + 11]]) as u64;
             let p_secs = u32::from_le_bytes([hdr[462 + 12], hdr[462 + 13], hdr[462 + 14], hdr[462 + 15]]) as u64;
             if p_type != 0 && p_start >= 2 && p_secs >= 32 && p_start + p_secs <= self.total_sectors {
                 found = Some((p_start, p_secs, 2));
             }
+        }
+
+        if let Some((ls, lsecs, lidx)) = logs_found {
+            self.logs_start = ls;
+            self.logs_sectors = lsecs;
+            self.logs_idx = lidx;
         }
 
         let Some((p2_start, p2_secs, p2_idx)) = found else {
@@ -465,6 +532,135 @@ impl UsbMscBot {
             }
             _ => err(EINVAL),
         }
+    }
+
+    /// Evaluate the 5-gate physical USB boot-medium ancestry contract for `DRYOS_LOGS`.
+    pub fn verify_logs_ancestry(&self) -> (u32, u32) {
+        let mut mask = 0u32;
+        if self.active && self.ready && !self.disconnected {
+            mask |= ANCESTRY_GATE_XHCI_MSC;
+        }
+        if self.gpt_valid {
+            mask |= ANCESTRY_GATE_GPT_CRC;
+        }
+        if self.expected_disk_guid != [0u8; 16] && self.disk_guid == self.expected_disk_guid {
+            mask |= ANCESTRY_GATE_DISK_GUID;
+        }
+        if self.has_esp {
+            mask |= ANCESTRY_GATE_ESP_SAME_DISK;
+        }
+        if self.logs_start >= 34
+            && self.logs_sectors >= 2048
+            && self.logs_start.saturating_add(self.logs_sectors) <= self.total_sectors
+        {
+            mask |= ANCESTRY_GATE_LOGS_PART;
+        }
+        let reason = if self.disconnected {
+            LOG_BLOCK_DISCONNECTED
+        } else if (mask & ANCESTRY_GATE_XHCI_MSC) == 0 {
+            LOG_BLOCK_NO_USB_MSC
+        } else if (mask & ANCESTRY_GATE_GPT_CRC) == 0 {
+            LOG_BLOCK_INVALID_GPT
+        } else if (mask & ANCESTRY_GATE_DISK_GUID) == 0 {
+            LOG_BLOCK_UNVERIFIED_BOOT_GUID
+        } else if (mask & ANCESTRY_GATE_ESP_SAME_DISK) == 0 {
+            LOG_BLOCK_MISSING_ESP
+        } else if (mask & ANCESTRY_GATE_LOGS_PART) == 0 {
+            LOG_BLOCK_MISSING_LOGS_PART
+        } else {
+            LOG_BLOCK_NONE
+        };
+        (mask, reason)
+    }
+
+    pub fn read_logs_sector(
+        &mut self,
+        hc: &mut XhciController,
+        rel_lba: u64,
+        out: &mut [u8; 512],
+    ) -> Result<(), isize> {
+        let (mask, _) = self.verify_logs_ancestry();
+        if (mask & (ANCESTRY_GATE_XHCI_MSC | ANCESTRY_GATE_GPT_CRC | ANCESTRY_GATE_LOGS_PART))
+            != (ANCESTRY_GATE_XHCI_MSC | ANCESTRY_GATE_GPT_CRC | ANCESTRY_GATE_LOGS_PART)
+            || rel_lba >= self.logs_sectors
+        {
+            return Err(EIO);
+        }
+        let abs_lba = self.logs_start + rel_lba;
+        for attempt in 0..3u8 {
+            if self.read_sectors_raw(hc, abs_lba, 1).is_ok() {
+                out.copy_from_slice(&hc.bulk_bounce_slice()[..512]);
+                self.reads = self.reads.wrapping_add(1);
+                return Ok(());
+            }
+            if attempt < 2 {
+                self.bot_mass_storage_reset(hc);
+            }
+        }
+        self.io_errs = self.io_errs.wrapping_add(1);
+        Err(EIO)
+    }
+
+    pub fn write_logs_sector(
+        &mut self,
+        hc: &mut XhciController,
+        rel_lba: u64,
+        data: &[u8; 512],
+    ) -> Result<(), isize> {
+        let (mask, _) = self.verify_logs_ancestry();
+        if mask != ANCESTRY_ALL_GATES || rel_lba >= self.logs_sectors {
+            return Err(EROFS);
+        }
+        if self.test_disconnect && self.logs_write_ops >= 2 {
+            self.disconnected = true;
+            self.logs_write_errs = self.logs_write_errs.saturating_add(1);
+            return Err(ENODEV);
+        }
+        if self.test_write_fail {
+            self.logs_write_errs = self.logs_write_errs.saturating_add(1);
+            return Err(EIO);
+        }
+        let abs_lba = self.logs_start + rel_lba;
+        if abs_lba < self.logs_start || abs_lba >= self.logs_start + self.logs_sectors {
+            return Err(EINVAL);
+        }
+        for attempt in 0..3u8 {
+            hc.bulk_bounce_mut()[..512].copy_from_slice(data);
+            if self.write_sectors_raw(hc, abs_lba, 1).is_ok() {
+                self.writes = self.writes.wrapping_add(1);
+                self.logs_write_ops = self.logs_write_ops.wrapping_add(1);
+                return Ok(());
+            }
+            if attempt < 2 {
+                self.bot_mass_storage_reset(hc);
+            }
+        }
+        self.io_errs = self.io_errs.wrapping_add(1);
+        self.logs_write_errs = self.logs_write_errs.saturating_add(1);
+        Err(EIO)
+    }
+
+    pub fn sync_logs_cache(&mut self, hc: &mut XhciController) -> Result<(), isize> {
+        let (mask, _) = self.verify_logs_ancestry();
+        if mask != ANCESTRY_ALL_GATES {
+            return Err(EROFS);
+        }
+        if self.test_write_fail || self.disconnected {
+            return Err(EIO);
+        }
+        let mut sync_cdb = [0u8; 10];
+        sync_cdb[0] = 0x35; // SYNCHRONIZE CACHE(10)
+        for attempt in 0..3u8 {
+            if self.bot_cmd(hc, &sync_cdb, false, 0).is_ok() {
+                self.flushes = self.flushes.wrapping_add(1);
+                return Ok(());
+            }
+            if attempt < 2 {
+                self.bot_mass_storage_reset(hc);
+            }
+        }
+        self.logs_write_errs = self.logs_write_errs.saturating_add(1);
+        Err(EIO)
     }
 }
 

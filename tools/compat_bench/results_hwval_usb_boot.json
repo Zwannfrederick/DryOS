@@ -1,0 +1,27 @@
+{
+  "image_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/kernel/build/dryos-ascension8-hardware-validation.img",
+  "image_sha256": "49cd42afe57e5dfd650d85bb9a874219e22cb0b69ffeb093644d37f92d4949ac",
+  "image_size_mib": 256,
+  "module_count": 27,
+  "part1_range": [
+    2048,
+    198655
+  ],
+  "part2_start_lba": 198656,
+  "part2_range": [
+    198656,
+    329727
+  ],
+  "part3_range": [
+    329728,
+    524254
+  ],
+  "disk_guid_hex": "a2dbe7caae160355ae8d950166a7f289",
+  "auto_line": "[DRY-HWDIAG] AUTO_COMPLETE mode=safe pass=20 fail=0 skip=2 blocked=2 session=sess-0001",
+  "persist_line": "[DRY-HWDIAG] PERSIST status=VERIFIED files=13 sha256_verified=1 reason=ok",
+  "esp_and_persist_untouched": true,
+  "leaked_frames": 0,
+  "retrieved_session": "sess-0001",
+  "files_verified": 13,
+  "boot_to_shutdown_sec": 6.011
+}

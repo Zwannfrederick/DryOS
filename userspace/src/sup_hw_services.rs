@@ -7,8 +7,9 @@ use core::ptr::read_volatile;
 use crate::abi_ext::{
     sys_dmesg_read, sys_ipc_reply_with_grant_lease, RootInitBootExtInfo, UserPciBarInfo,
     BOOT_EXT_INFO_OFFSET, BOOT_FLAG_STORAGE_RO, BOOT_FLAG_USB_PERSIST_PREFER,
-    ROOT_BOOT_EXT_MAGIC, BLK_OP_QUERY_INFO, VFS_OP_MOUNT_BLK,
+    HWCHECK_MODE_RECOVERY, ROOT_BOOT_EXT_MAGIC, BLK_OP_QUERY_INFO, VFS_OP_MOUNT_BLK,
 };
+use crate::fat32_log::USB_OP_LOG_CONFIG;
 use crate::init_legacy::{domain_spec, log_line};
 use crate::lx_compat_meta::read_boot_pci_funcs;
 use crate::nvme_ro::{NvmeInfo, NVME_FLAG_READY, NVME_FLAG_VMD_GATED};
@@ -235,6 +236,7 @@ pub struct HwInitCaps {
     pub tsc_mhz: u64,
 }
 
+#[inline(never)]
 pub fn init_hw_services_and_persist(
     boot_info_addr: u64,
     boot: &RootInitBootInfo,
@@ -310,6 +312,15 @@ pub fn init_hw_services_and_persist(
             if let Ok((_, _, mrs)) = sink_res {
                 st.usb_part2_sectors = mrs[0];
             }
+            let guid_lo = u64::from_le_bytes(ext.boot_disk_guid[0..8].try_into().unwrap_or([0; 8]));
+            let guid_hi = u64::from_le_bytes(ext.boot_disk_guid[8..16].try_into().unwrap_or([0; 8]));
+            let logs_ro = u64::from(ext.hwcheck_mode == HWCHECK_MODE_RECOVERY);
+            let _ = sys_ipc_call_inline(
+                sup_cap,
+                pack_msg_tag(USB_OP_LOG_CONFIG, 0, 4, 0),
+                [guid_lo, guid_hi, ext.hwval_flags as u64, logs_ro],
+                0,
+            );
         }
     }
 
@@ -469,6 +480,7 @@ fn mount_persist_with_mode(
     true
 }
 
+#[inline(never)]
 fn persist_boot_log(vfs_ep: u64, vfs_sup_cap: u64) -> usize {
     let mut sys = UserSysInfo::default();
     let mut log_buf = [0u8; 4096];

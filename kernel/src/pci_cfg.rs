@@ -69,6 +69,7 @@ pub(crate) struct ValidatedVirtioPci {
     pub bar_idx: u8,
     pub is_virtio: bool,
     pub preserve_active_gop: bool,
+    pub passive_ro: bool,
     pub phys_base: u64,
     pub num_pages: u16,
     pub msi_cap_off: u8,
@@ -89,6 +90,7 @@ impl ValidatedVirtioPci {
         bar_idx: 0,
         is_virtio: false,
         preserve_active_gop: false,
+        passive_ro: false,
         phys_base: 0,
         num_pages: 0,
         msi_cap_off: 0,
@@ -419,10 +421,42 @@ fn is_active_gop_display(bus: u8, subclass: u8, ro_bars: &[PciBarDesc; 6]) -> bo
     bus == 0 && subclass == 0x00 && ro_bars.iter().all(|b| !b.is_mmio())
 }
 
+pub(crate) fn scan_caps_readonly(bus: u8, dev: u8, func: u8) -> u8 {
+    let status = pci_read_u16(bus, dev, func, 0x06);
+    if (status & 0x0010) == 0 {
+        return 0;
+    }
+    let mut flags = 0u8;
+    let mut cap_ptr = pci_read_u8(bus, dev, func, 0x34) & 0xfc;
+    let mut hops = 0usize;
+    while cap_ptr >= 0x40 && hops < 48 {
+        hops += 1;
+        let cap_id = pci_read_u8(bus, dev, func, cap_ptr);
+        let next_ptr = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(1)) & 0xfc;
+        match cap_id {
+            PCI_CAP_ID_MSI => flags |= crate::pci_bar::PCI_DEV_FLAG_MSI as u8,
+            PCI_CAP_ID_MSIX => flags |= crate::pci_bar::PCI_DEV_FLAG_MSIX as u8,
+            PCI_CAP_ID_PCIE => {
+                flags |= crate::pci_bar::PCI_DEV_FLAG_PCIE as u8;
+                if (cap_ptr as usize) + 8 <= 256 {
+                    let dev_cap = pci_read_u32(bus, dev, func, cap_ptr.wrapping_add(4));
+                    if (dev_cap & (1 << 28)) != 0 {
+                        flags |= crate::pci_bar::PCI_DEV_FLAG_FLR as u8;
+                    }
+                }
+            }
+            _ => {}
+        }
+        cap_ptr = next_ptr;
+    }
+    flags
+}
+
 pub(crate) fn probe_pci_function(
     bus: u8,
     dev: u8,
     func: u8,
+    passive_safe_mode: bool,
 ) -> Option<(Option<usize>, ValidatedVirtioPci)> {
     let id = pci_read_u32(bus, dev, func, 0x00);
     let vendor_id = (id & 0xffff) as u16;
@@ -462,7 +496,12 @@ pub(crate) fn probe_pci_function(
             }
         };
 
-    let bars = if preserve_active_gop {
+    // In passive safe validation mode, keep GPUs (`0x03`), internal storage (`0x01`), and all
+    // non-xHCI/non-VirtIO endpoints strictly read-only: zero BAR sizing writes, zero MSI/CMD writes.
+    let passive_ro = preserve_active_gop
+        || (passive_safe_mode && !is_virtio && pref_slot != Some(PCI_OBJ_XHCI));
+
+    let bars = if passive_ro {
         ro_bars_cache.unwrap_or_else(|| read_bars_readonly(bus, dev, func))
     } else {
         probe_function_bars(bus, dev, func)
@@ -490,7 +529,7 @@ pub(crate) fn probe_pci_function(
             let next_ptr = pci_read_u8(bus, dev, func, cap_ptr.wrapping_add(1)) & 0xfc;
             match cap_id {
                 PCI_CAP_ID_MSI if msi_cap_off == 0 => {
-                    if !preserve_active_gop {
+                    if !passive_ro {
                         let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
                         pci_write_u16(bus, dev, func, cap_ptr.wrapping_add(2), ctrl & !0x0001);
                     }
@@ -501,7 +540,7 @@ pub(crate) fn probe_pci_function(
                 }
                 PCI_CAP_ID_MSIX if msix_cap_off == 0 => {
                     let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
-                    if !preserve_active_gop {
+                    if !passive_ro {
                         pci_write_u16(
                             bus,
                             dev,
@@ -601,7 +640,7 @@ pub(crate) fn probe_pci_function(
 
     let ext_caps = crate::pci_ecam::probe_pcie_and_ext_caps(bus, dev, func, pcie_cap_off);
 
-    if !preserve_active_gop {
+    if !passive_ro {
         // Keep Bus Master disabled until an authorized Ring 3 driver calls `SYS_DEV_MAP`.
         let cmd = pci_read_u16(bus, dev, func, 0x04);
         pci_write_u16(bus, dev, func, 0x04, (cmd & !0x0004) | 0x0402);
@@ -617,6 +656,7 @@ pub(crate) fn probe_pci_function(
             bar_idx,
             is_virtio,
             preserve_active_gop,
+            passive_ro,
             phys_base,
             num_pages: pages,
             msi_cap_off,

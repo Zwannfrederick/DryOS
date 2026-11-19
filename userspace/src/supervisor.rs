@@ -5,7 +5,11 @@
 //! `dry-vault`), mounts `/persist` (`DRYFS_v1`), runs security/fault-recovery audits (`p3_sec` &
 //! `p4_sec`), and dispatches supervisor IPC requests over `SupervisorCtx`.
 
+use crate::abi_ext::{
+    HWCHECK_MODE_DESKTOP_SAFE, HWCHECK_MODE_RECOVERY, HWCHECK_MODE_SAFE,
+};
 use crate::action::{AppId, DesktopAction};
+use crate::hwdiag::mgr::{DiagManager, DIAG_SCRATCH_CAP};
 use crate::init_legacy::{domain_spec, log_line, spawn_and_init_desktop_input};
 use crate::island_audit::{run_island_poc_benchmarks, run_island_poc_lifecycle_audit};
 use crate::gpu_audit::{
@@ -41,6 +45,9 @@ use crate::{
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
+
+static mut DIAG_SCRATCH: [u8; DIAG_SCRATCH_CAP] = [0u8; DIAG_SCRATCH_CAP];
+static mut DIAG_MGR: DiagManager = DiagManager::empty();
 
 /// Upper bound (`~2 s` at `3 GHz`) for reaping a crashed `dry-input` before refusing a restart.
 const INPUT_REAP_TIMEOUT_TSC: u64 = 6_000_000_000;
@@ -122,6 +129,17 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         },
         &mut init_prefs,
     );
+    // SAFETY: Single-threaded supervisor loop in `dry-init` exclusively owns `DIAG_SCRATCH` and `DIAG_MGR`.
+    let diag_scratch = unsafe { &mut *core::ptr::addr_of_mut!(DIAG_SCRATCH) };
+    let diag_mgr = unsafe { &mut *core::ptr::addr_of_mut!(DIAG_MGR) };
+    diag_mgr.init_at_boot(
+        boot_info_addr,
+        boot.boot_pci_func_count,
+        &hw_state,
+        sys.tsc_mhz,
+        sys.online_cpus,
+        diag_scratch,
+    );
     let (vault_handle, vault_ep, vault_sup_cap) =
         match spawn_vault_service(boot, vfs_ep, disp_sup_cap) {
             Ok(v) => v,
@@ -156,6 +174,10 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         if boot.pci_gpu_cap != 0
             && boot.gpu_mod_cap != 0
             && !matches!(boot.session_mode, 25..=29 | 31)
+            && !matches!(
+                diag_mgr.boot_hwcheck_mode,
+                HWCHECK_MODE_SAFE | HWCHECK_MODE_DESKTOP_SAFE | HWCHECK_MODE_RECOVERY
+            )
         {
             spawn_live_gpu(boot, disp_sup_cap).ok()
         } else {
@@ -683,7 +705,8 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
             _ => {
                 let auth = is_action_badge_authorized(ext.sender_badge)
                     || ext.sender_badge == BADGE_SUPERVISOR;
-                if !handle_hw_query_ipc(sup_ep, reply_tok, op, mrs, auth, &hw_state)
+                if !diag_mgr.handle_ipc(sup_ep, reply_tok, op, mrs, auth, diag_scratch)
+                    && !handle_hw_query_ipc(sup_ep, reply_tok, op, mrs, auth, &hw_state)
                     && reply_tok != 0
                 {
                     let _ = sys_ipc_reply_inline(

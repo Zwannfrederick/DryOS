@@ -373,6 +373,12 @@ pub fn uptime_telemetry() -> (u64, u64, u64) {
     (khz / 1_000, elapsed / khz, elapsed)
 }
 
+/// Return calibrated TSC frequency in kHz latched during BSP APIC timer calibration.
+#[inline]
+pub fn latched_tsc_khz() -> u32 {
+    CALIBRATED_TSC_KHZ.load(Ordering::Acquire) as u32
+}
+
 /// Send an edge-triggered Fixed Inter-Processor Interrupt (`vector >= 32`) to `dest_lapic_id`
 /// using the active `x2APIC` MSR (`0x830`) or `xAPIC` MMIO (`0x310`/`0x300`) transport.
 pub fn send_fixed_ipi(dest_lapic_id: u32, vector: u8) {

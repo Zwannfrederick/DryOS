@@ -4,6 +4,7 @@
 use crate::action::{compartment_short_name, APP_COUNT};
 use crate::apps::PixelAppWindow;
 use crate::gfx::Rect;
+use crate::hwdiag::{mode_slug, persist_slug, DiagSummaryWire};
 use crate::shell::LineBuilder;
 use crate::ttf::{font_metrics, measure_text, FontId};
 use crate::ui::app_icons::{draw_app_icon, AppIconKind};
@@ -30,6 +31,7 @@ pub struct SysmonView<'a> {
     pub last_ascii: u8,
     pub spark_samples: &'a [u16],
     pub spark_max: u16,
+    pub diag: DiagSummaryWire,
 }
 
 pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
@@ -258,9 +260,17 @@ pub fn render_sysmon_pixel(win: &mut PixelAppWindow, view: &SysmonView<'_>) {
     let fy = foot_r.y as i32 + ((foot_r.h as i32 - (cap_m.ascent + cap_m.descent)) / 2);
 
     let mut flb = LineBuilder::new();
-    flb.push_bytes(b"Epoch ");
+    flb.push_bytes(b"HW:");
+    flb.push_bytes(mode_slug(view.diag.mode));
+    flb.push_bytes(b" P");
+    flb.push_u64(view.diag.pass_count as u64);
+    flb.push_bytes(b"/F");
+    flb.push_u64(view.diag.fail_count as u64);
+    flb.push_bytes(b" USB:");
+    flb.push_bytes(persist_slug(view.diag.persist_status));
+    flb.push_bytes(b" E");
     flb.push_u64(view.lease_epoch);
-    flb.push_bytes(b"  Keys ");
+    flb.push_bytes(b" K");
     flb.push_u64(view.keys_rcvd);
     if (0x21..=0x7E).contains(&view.last_ascii) {
         flb.push_bytes(b" '");

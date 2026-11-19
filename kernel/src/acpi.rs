@@ -57,6 +57,17 @@ impl IsaIrqRoute {
     }
 }
 
+pub const ACPI_AUDIT_RSDP_OK: u32 = 1 << 0;
+pub const ACPI_AUDIT_XSDT_OK: u32 = 1 << 1;
+pub const ACPI_AUDIT_RSDT_FALLBACK: u32 = 1 << 2;
+pub const ACPI_AUDIT_MADT_OK: u32 = 1 << 3;
+pub const ACPI_AUDIT_MCFG_OK: u32 = 1 << 4;
+pub const ACPI_AUDIT_DMAR_OK: u32 = 1 << 5;
+pub const ACPI_AUDIT_IVRS_FOUND: u32 = 1 << 6;
+pub const ACPI_AUDIT_FACP_OK: u32 = 1 << 7;
+pub const ACPI_AUDIT_CHECKSUM_FAIL: u32 = 1 << 8;
+pub const ACPI_AUDIT_MALFORMED_TABLE: u32 = 1 << 9;
+
 #[derive(Clone, Copy, Debug)]
 pub struct AcpiMadtSummary {
     pub rsdp_revision: u8,
@@ -70,6 +81,8 @@ pub struct AcpiMadtSummary {
     pub isa_routes: [IsaIrqRoute; ISA_IRQ_COUNT],
     pub ivrs_found: bool,
     pub mcfg_found: bool,
+    pub audit_flags: u32,
+    pub oem_id: [u8; 6],
 }
 
 impl AcpiMadtSummary {
@@ -92,6 +105,8 @@ impl AcpiMadtSummary {
             isa_routes: routes,
             ivrs_found: false,
             mcfg_found: false,
+            audit_flags: 0,
+            oem_id: [0; 6],
         }
     }
 }
@@ -580,9 +595,11 @@ pub fn discover_acpi_madt(
     hhdm_offset: u64,
     kernel_phys_base: u64,
     kernel_virt_base: u64,
+    cmdline: &str,
 ) -> AcpiMadtSummary {
     let mut summary = AcpiMadtSummary::empty();
     let Some(rsdp_raw) = get_rsdp_raw_addr() else {
+        summary.audit_flags |= ACPI_AUDIT_MALFORMED_TABLE;
         // SAFETY: Single-threaded BSP initialization.
         unsafe { *ACPI_SUMMARY.0.get() = summary };
         ACPI_READY.store(true, Ordering::Release);
@@ -594,16 +611,20 @@ pub fn discover_acpi_madt(
     unsafe {
         install_acpi_boot_window(hhdm_offset, kernel_phys_base, kernel_virt_base);
         let Some(rsdp_ptr) = map_acpi_window_ro(SLOT_RSDP_START, 2, rsdp_phys, 64) else {
+            summary.audit_flags |= ACPI_AUDIT_MALFORMED_TABLE;
             *ACPI_SUMMARY.0.get() = summary;
             ACPI_READY.store(true, Ordering::Release);
             return summary;
         };
         let v1: RsdpV1 = read_unaligned(rsdp_ptr.cast());
         if v1.signature != *b"RSD PTR " || !verify_checksum(rsdp_ptr, core::mem::size_of::<RsdpV1>()) {
+            summary.audit_flags |= ACPI_AUDIT_CHECKSUM_FAIL | ACPI_AUDIT_MALFORMED_TABLE;
             *ACPI_SUMMARY.0.get() = summary;
             ACPI_READY.store(true, Ordering::Release);
             return summary;
         }
+        summary.audit_flags |= ACPI_AUDIT_RSDP_OK;
+        summary.oem_id = v1.oem_id;
         summary.rsdp_revision = v1.revision;
 
         let mut tables = RootAcpiTables::empty();
@@ -615,8 +636,11 @@ pub fn discover_acpi_madt(
                     let t = find_tables_in_root_sdt(hhdm_offset, v2.xsdt_phys, true);
                     if t.any_found() {
                         summary.used_xsdt = true;
+                        summary.audit_flags |= ACPI_AUDIT_XSDT_OK;
                         tables = t;
                     }
+                } else if v2.xsdt_phys != 0 {
+                    summary.audit_flags |= ACPI_AUDIT_CHECKSUM_FAIL;
                 }
             }
         }
@@ -627,6 +651,9 @@ pub fn discover_acpi_madt(
             || tables.mcfg.is_none())
             && v1.rsdt_phys != 0
         {
+            if !summary.used_xsdt {
+                summary.audit_flags |= ACPI_AUDIT_RSDT_FALLBACK;
+            }
             let r = find_tables_in_root_sdt(hhdm_offset, v1.rsdt_phys as u64, false);
             if tables.madt.is_none() {
                 tables.madt = r.madt;
@@ -648,18 +675,31 @@ pub fn discover_acpi_madt(
         if let Some((mcfg_ptr, mcfg_len)) = tables.mcfg {
             let bytes = core::slice::from_raw_parts(mcfg_ptr, mcfg_len);
             summary.mcfg_found = crate::pci_ecam::parse_and_latch_mcfg(bytes).is_ok();
+            if summary.mcfg_found {
+                summary.audit_flags |= ACPI_AUDIT_MCFG_OK;
+            } else {
+                summary.audit_flags |= ACPI_AUDIT_MALFORMED_TABLE;
+            }
         }
         if let Some((dmar_ptr, dmar_len)) = tables.dmar {
             let bytes = core::slice::from_raw_parts(dmar_ptr, dmar_len);
-            let _ = crate::iommu::parse_and_latch_dmar(bytes);
+            if crate::iommu::parse_and_latch_dmar(bytes) {
+                summary.audit_flags |= ACPI_AUDIT_DMAR_OK;
+            } else {
+                summary.audit_flags |= ACPI_AUDIT_MALFORMED_TABLE;
+            }
         }
         if let Some((ivrs_ptr, ivrs_len)) = tables.ivrs {
             let bytes = core::slice::from_raw_parts(ivrs_ptr, ivrs_len);
             summary.ivrs_found = crate::iommu::parse_and_latch_ivrs(bytes).is_ok();
+            if summary.ivrs_found {
+                summary.audit_flags |= ACPI_AUDIT_IVRS_FOUND;
+            }
         }
 
         if let Some(fadt) = tables.fadt {
             *ACPI_POWER.0.get() = parse_fadt_and_dsdt(hhdm_offset, fadt);
+            summary.audit_flags |= ACPI_AUDIT_FACP_OK;
         }
 
         if let Some(madt) = tables.madt {
@@ -713,6 +753,13 @@ pub fn discover_acpi_madt(
                 }
                 off += entry_len;
             }
+        }
+
+        if tables.madt.is_some() && summary.ioapic_found {
+            summary.audit_flags |= ACPI_AUDIT_MADT_OK;
+        }
+        if cmdline.contains("dry_test_malformed_acpi=1") {
+            summary.audit_flags |= ACPI_AUDIT_CHECKSUM_FAIL | ACPI_AUDIT_MALFORMED_TABLE;
         }
 
         *ACPI_SUMMARY.0.get() = summary;

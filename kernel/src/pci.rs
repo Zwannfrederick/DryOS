@@ -45,9 +45,10 @@ mod pci_window;
 
 pub use crate::pci_slots::{
     active_gop_bdf, latched_boot_pci_funcs, pci_topology_summary, BootPciFuncRecord,
-    BOOT_PCI_ENUM_OFFSET, MAX_BOOT_PCI_FUNCS, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU, PCI_OBJ_IVSHMEM,
-    PCI_OBJ_NET, PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU,
-    PCI_OBJ_VIRTIO_RNG, PCI_OBJ_XHCI,
+    BOOT_PCI_ENUM_OFFSET, MAX_BOOT_PCI_FUNCS, PCI_BOOT_EXTRA_BAD_BAR, PCI_BOOT_EXTRA_BUS_MASTER,
+    PCI_BOOT_EXTRA_PASSIVE, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU, PCI_OBJ_IVSHMEM, PCI_OBJ_NET,
+    PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG,
+    PCI_OBJ_XHCI,
 };
 pub(crate) use crate::pci_slots::{
     encode_bar_desc_flags, publish_boot_pci_count, push_boot_pci_record, record_topology_hints,
@@ -56,7 +57,7 @@ pub(crate) use crate::pci_slots::{
 pub use pci_cfg::UserVirtioPciInfo;
 pub(crate) use pci_cfg::{
     pci_ecam_read_u32, pci_raw_cfg_rw, pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16,
-    pci_write_u32, probe_all_bars_raw, probe_pci_function, ValidatedVirtioPci,
+    pci_write_u32, probe_all_bars_raw, probe_pci_function, scan_caps_readonly, ValidatedVirtioPci,
 };
 
 #[inline]
@@ -133,9 +134,16 @@ pub fn pci_dma_telemetry() -> (u64, u64) {
 /// Enumerate PCI/PCIe buses (`0..=max_bus` via bridge-aware discovery + `MCFG`) on the BSP
 /// after `init_pmm` into the dynamic `64`-slot registry without hardcoding vendor drivers.
 #[inline(never)]
-pub fn init_pci_devices() -> bool {
+pub fn init_pci_devices(cmdline: &str) -> bool {
     crate::pci_bar::run_bar64_unit_tests();
     crate::pci_ecam::run_mcfg_unit_tests();
+    let passive_safe_mode = cmdline.contains("hwcheck_mode=safe")
+        || cmdline.contains("hwcheck_mode=desktop_safe")
+        || cmdline.contains("hwcheck_mode=recovery")
+        || (cmdline.contains("hwcheck=auto")
+            && !cmdline.contains("hwcheck_mode=extended")
+            && !cmdline.contains("hwcheck_mode=nvidia_exp"));
+    let bad_pci_bar_test = cmdline.contains("dry_test_bad_pci_bar=1");
     let max_bus = crate::pci_ecam::mcfg_max_bus();
     let mut bus_mask = [0u64; 4];
     for b in 0..=15u8 {
@@ -193,6 +201,20 @@ pub fn init_pci_devices() -> bool {
                     let bdf =
                         ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
 
+                    let cmd_ro = pci_read_u16(bus, dev, func, 0x04);
+                    let extra_base = if (cmd_ro & 0x0004) != 0 {
+                        PCI_BOOT_EXTRA_BUS_MASTER
+                    } else {
+                        0
+                    } | if passive_safe_mode {
+                        PCI_BOOT_EXTRA_PASSIVE
+                    } else {
+                        0
+                    } | if bad_pci_bar_test && rec_cnt == 0 {
+                        PCI_BOOT_EXTRA_BAD_BAR
+                    } else {
+                        0
+                    };
                     let mut rec = BootPciFuncRecord {
                         bus_dev_fn: bdf,
                         vendor_id: vid,
@@ -204,10 +226,10 @@ pub fn init_pci_devices() -> bool {
                         subclass,
                         class_code,
                         managed_slot: 0xff,
-                        dev_flags: 0,
+                        dev_flags: scan_caps_readonly(bus, dev, func),
                         bar_flags: [0; 6],
                         irq_pin,
-                        _pad: 0,
+                        extra_flags: extra_base,
                         bar0_size_bytes: 0,
                     };
                     if fn_hdr == 0 {
@@ -229,7 +251,12 @@ pub fn init_pci_devices() -> bool {
                     }
                     record_topology_hints(&rec);
 
-                    if let Some((pref_slot, vdev)) = probe_pci_function(bus, dev, func) {
+                    if let Some((pref_slot, vdev)) =
+                        probe_pci_function(bus, dev, func, passive_safe_mode)
+                    {
+                        if vdev.passive_ro {
+                            rec.extra_flags |= PCI_BOOT_EXTRA_PASSIVE;
+                        }
                         let chosen = match pref_slot {
                             Some(s)
                                 if s < MAX_MANAGED_PCI_DEVS

@@ -198,8 +198,20 @@ extern "C" fn bsp_kmain() -> ! {
         mem.hhdm_offset,
         mem.kernel_phys_base,
         mem.kernel_virt_base,
+        cmdline,
     );
-    let _pci_blk = pci::init_pci_devices();
+    let _pci_blk = pci::init_pci_devices(cmdline);
+    let passive_pci = cmdline.contains("hwcheck_mode=safe")
+        || cmdline.contains("hwcheck_mode=desktop_safe")
+        || cmdline.contains("hwcheck_mode=recovery")
+        || (cmdline.contains("hwcheck=auto")
+            && !cmdline.contains("hwcheck_mode=extended")
+            && !cmdline.contains("hwcheck_mode=nvidia_exp"));
+    serial_println!(
+        "[DRY-HWVAL] pci_passive={} acpi_flags={:#x}",
+        passive_pci as u8,
+        acpi_madt.audit_flags
+    );
     serial_println!(
         "[DRY-ACPI] PASS: rsdp_rev={} xsdt={} ioapic_found={} ioapic_id={} ioapic_phys={:#x} gsi_base={} iso_overrides={}",
         acpi_madt.rsdp_revision,

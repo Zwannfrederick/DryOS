@@ -450,6 +450,14 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 let mut trigger_crash_after_present = false;
                 let mut post_present_action: Option<DesktopAction> = None;
 
+                if dry_userspace::shell_diag_cmds::try_exec_dry_cmd(
+                    cmd_slice,
+                    sup_ep_cap,
+                    engine,
+                    debug_line,
+                ) {
+                    // Handled by shared `hwdiag` diagnostic command dispatcher.
+                } else {
                 match parse_command(cmd_slice) {
                     ShellCommand::Empty => {}
                     ShellCommand::Help => {
@@ -825,6 +833,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         lb.push_bytes(b"\"");
                         debug_line(&lb);
                     }
+                }
                 }
 
                 let _ = sys_sysinfo(&mut sys);

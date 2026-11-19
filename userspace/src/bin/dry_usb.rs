@@ -19,6 +19,7 @@ use dry_userspace::ioring::{IoRingSharedPage, IORING_MAGIC};
 use dry_userspace::keymap::KeymapLayout;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::usb::hid::{init_boot_hid_protocol, UsbHidKbd, UsbHidMouse};
+use dry_userspace::usb::log_svc::{UsbLogServerState, LOG_STAGE_CAP};
 use dry_userspace::usb::msc::UsbMscBot;
 use dry_userspace::usb::xhci::{XhciController, CC_SHORT_PKT, CC_STALL, CC_SUCCESS};
 use dry_userspace::usb::{
@@ -27,18 +28,20 @@ use dry_userspace::usb::{
     USB_FLAG_MSC_READY, USB_FLAG_RO_POLICY, USB_PROTO_BOT, USB_PROTO_KBD, USB_PROTO_MOUSE,
     USB_SUBCLASS_BOOT, USB_SUBCLASS_SCSI,
 };
-use dry_userspace::vfs_proto::sys_ipc_reply_extra;
+use dry_userspace::vfs_proto::{sys_ipc_recv_extra, sys_ipc_reply_extra};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_ipc_call_inline,
-    sys_ipc_recv_ext, sys_ipc_reply_inline, sys_notify_signal, sys_notify_wait, sys_vspace_map,
+    sys_ipc_reply_inline, sys_notify_signal, sys_notify_wait, sys_vspace_map,
     sys_write_debug, UserIpcRecvExt, BADGE_BLK_VFS, BADGE_SUPERVISOR, EAGAIN, EBADCAP, EINVAL,
-    EPERM, EPIPE, EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
-    IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, IPC_OP_WM_INPUT_EVENT, MSG_FLAG_NON_BLOCKING,
-    USB_OP_QUERY_SUMMARY, USB_OP_SET_WM_SINK, VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
+    EPERM, EPIPE, EREVOKED, ETIMEDOUT, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL,
+    IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, IPC_OP_WM_INPUT_EVENT,
+    MAX_IPC_EXTRA_BYTES, MSG_FLAG_NON_BLOCKING, USB_OP_QUERY_SUMMARY, USB_OP_SET_WM_SINK,
+    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const CLIENT_RING_VADDR: u64 = 0x1800_0000;
 const CLIENT_DATA_VADDR: u64 = 0x1800_1000;
+static mut LOG_STAGE_BUF: [u8; LOG_STAGE_CAP] = [0u8; LOG_STAGE_CAP];
 
 fn log_line(lb: &LineBuilder) {
     let mut out = [0u8; 192];
@@ -98,6 +101,7 @@ struct UsbState {
     wm_drops: u64,
     next_ev_seq: u32,
     input_queue: InputRingQueue<64>,
+    log_svc: UsbLogServerState,
 }
 
 impl UsbState {
@@ -394,6 +398,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
         wm_drops: 0,
         next_ev_seq: 1,
         input_queue: InputRingQueue::new(),
+        log_svc: UsbLogServerState::empty(),
     };
     st.enumerate_root_hub();
 
@@ -449,7 +454,8 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
             (0u64, poll_tsc)
         };
         let mut ext = UserIpcRecvExt::default();
-        let (tag, tok, mrs) = match sys_ipc_recv_ext(srv_ep_cap, recv_flags, recv_to, &mut ext) {
+        let mut extra_rx = [0u8; MAX_IPC_EXTRA_BYTES];
+        let (tag, extra_len, mrs) = match sys_ipc_recv_extra(srv_ep_cap, recv_flags, recv_to, &mut extra_rx, &mut ext) {
             Ok(v) => v,
             Err(_) => {
                 if cli.sq_notif != 0 {
@@ -462,6 +468,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
                 continue;
             }
         };
+        let tok = ext.reply_token;
 
         let label = msg_tag_label(tag);
         let from_sup = ext.sender_badge == BADGE_SUPERVISOR;
@@ -651,7 +658,24 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
             IPC_OP_CRASH_UD2 => unsafe {
                 asm!("ud2", options(nomem, nostack));
             },
-            _ => reply_err(srv_ep_cap, tok, IPC_OP_ERR_NOSYS, EINVAL),
+            _ => {
+                // SAFETY: Single-threaded event loop owns `LOG_STAGE_BUF`.
+                let stage_buf = unsafe { &mut *core::ptr::addr_of_mut!(LOG_STAGE_BUF) };
+                if !st.log_svc.handle_ipc(
+                    srv_ep_cap,
+                    tok,
+                    label,
+                    from_sup,
+                    mrs,
+                    &extra_rx[..extra_len],
+                    &mut st.hc,
+                    &mut st.msc,
+                    stage_buf,
+                    log_line,
+                ) {
+                    reply_err(srv_ep_cap, tok, IPC_OP_ERR_NOSYS, EINVAL);
+                }
+            }
         }
     }
 }

@@ -9,9 +9,11 @@ pub mod action;
 pub mod apps;
 pub mod compositor;
 pub mod display_banner;
+pub mod fat32_log;
 pub mod fw_store;
 pub mod gfx;
 pub mod glass;
+pub mod hwdiag;
 pub mod gpu_audit;
 pub mod gpu_proto;
 pub mod gpu_svc;
@@ -32,6 +34,7 @@ pub mod virtio_gpu_3d;
 pub mod ps2;
 pub mod nvme_ro;
 pub mod shell;
+pub mod shell_diag_cmds;
 pub mod shell_ext;
 pub mod shell_sys_cmds;
 pub mod sup_audit;
@@ -299,6 +302,10 @@ const _: () = assert!(size_of::<RootInitBootInfo>() == BOOT_MANIFEST_OFFSET as u
 pub const BOOT_PCI_ENUM_OFFSET: u64 = 0x0800;
 pub const MAX_BOOT_PCI_FUNCS: usize = 64;
 
+pub const PCI_BOOT_EXTRA_PASSIVE: u8 = 1 << 0;
+pub const PCI_BOOT_EXTRA_BAD_BAR: u8 = 1 << 1;
+pub const PCI_BOOT_EXTRA_BUS_MASTER: u8 = 1 << 2;
+
 /// Sanitized 32-byte PCI function descriptor published read-only at `boot_info_addr + 0x0800`.
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
@@ -316,11 +323,20 @@ pub struct BootPciFuncRecord {
     pub dev_flags: u8,
     pub bar_flags: [u8; 6],
     pub irq_pin: u8,
-    pub _pad: u8,
+    pub extra_flags: u8,
     pub bar0_size_bytes: u64,
 }
 
 const _: () = assert!(size_of::<BootPciFuncRecord>() == 32);
+
+impl BootPciFuncRecord {
+    pub const EMPTY: Self = Self {
+        bus_dev_fn: 0, vendor_id: 0, device_id: 0, subsys_vendor_id: 0,
+        subsys_id: 0, revision_id: 0, prog_if: 0, subclass: 0,
+        class_code: 0, managed_slot: 0, dev_flags: 0, bar_flags: [0; 6],
+        irq_pin: 0, extra_flags: 0, bar0_size_bytes: 0,
+    };
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

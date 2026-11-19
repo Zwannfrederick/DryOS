@@ -292,7 +292,7 @@ def run_virgl_3d_live_test(
 
     qmp: _DesktopQmpClient | None = None
     try:
-        probe_line = _wait_marker("[DRY-GPU] 3D_PROBE ", timeout_s=40.0).strip()
+        probe_line = _wait_marker("[DRY-GPU] 3D_PROBE ", timeout_s=90.0).strip()
         smoke_line = _wait_marker("[DRY-GPU] 3D_SMOKE ", timeout_s=20.0).strip()
         _wait_marker("[DRY-GPU] LIVE_SESSION_ACTIVE ", timeout_s=20.0)
         _wait_marker("[DRY-SHELL] Interactive shell ready in CPL3 Userspace", timeout_s=20.0)

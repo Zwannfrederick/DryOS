@@ -28,6 +28,10 @@ pub(crate) const MAX_MANAGED_PCI_DEVS: usize = 64;
 pub const BOOT_PCI_ENUM_OFFSET: usize = 0x0800;
 pub const MAX_BOOT_PCI_FUNCS: usize = 64;
 
+pub const PCI_BOOT_EXTRA_PASSIVE: u8 = 1 << 0;
+pub const PCI_BOOT_EXTRA_BAD_BAR: u8 = 1 << 1;
+pub const PCI_BOOT_EXTRA_BUS_MASTER: u8 = 1 << 2;
+
 /// Sanitized 32-byte PCI function descriptor published read-only in boot info (`0` phys addrs).
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
@@ -45,7 +49,7 @@ pub struct BootPciFuncRecord {
     pub dev_flags: u8,
     pub bar_flags: [u8; 6],
     pub irq_pin: u8,
-    pub _pad: u8,
+    pub extra_flags: u8,
     pub bar0_size_bytes: u64,
 }
 
@@ -74,7 +78,7 @@ static BOOT_PCI_ENUM: BootPciEnumTable = BootPciEnumTable {
         dev_flags: 0,
         bar_flags: [0; 6],
         irq_pin: 0,
-        _pad: 0,
+        extra_flags: 0,
         bar0_size_bytes: 0,
     }; MAX_BOOT_PCI_FUNCS]),
     count: AtomicU32::new(0),
