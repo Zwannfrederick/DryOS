@@ -58,7 +58,7 @@ def detect_host_rustc() -> dict[str, str]:
     return info
 
 
-def setup_rust_src(rustc_info: dict[str, str]) -> dict[str, str]:
+def setup_rust_src(rustc_info: dict[str, str], refresh: bool = False) -> dict[str, str]:
     release = rustc_info["release"]
     commit = rustc_info["commit-hash"]
     host_triple = rustc_info["host"]
@@ -76,9 +76,12 @@ def setup_rust_src(rustc_info: dict[str, str]) -> dict[str, str]:
 
     rustlib_dir = SYSROOT_DIR / "lib" / "rustlib"
     src_dst = rustlib_dir / "src" / "rust"
+    stamp_path = SYSROOT_DIR / ".rust-src-release"
     cargo_home = TC_DIR / "cargo-home"
+    cur_stamp = stamp_path.read_text(encoding="utf-8").strip() if stamp_path.exists() else ""
+    src_stale = refresh or cur_stamp != release or not (src_dst / "library" / "Cargo.toml").exists()
 
-    if not (src_dst / "library" / "Cargo.toml").exists():
+    if src_stale:
         if rustlib_dir.exists():
             shutil.rmtree(rustlib_dir)
         rustlib_dir.mkdir(parents=True, exist_ok=True)
@@ -97,8 +100,10 @@ def setup_rust_src(rustc_info: dict[str, str]) -> dict[str, str]:
         src_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(candidates[0]), str(src_dst))
         shutil.rmtree(extract_tmp)
+        SYSROOT_DIR.mkdir(parents=True, exist_ok=True)
+        stamp_path.write_text(release + "\n", encoding="utf-8")
 
-    if not (cargo_home / "registry").exists():
+    if src_stale or not (cargo_home / "registry").exists():
         cargo_home.mkdir(parents=True, exist_ok=True)
         subprocess.check_call(
             ["cargo", "fetch", "--manifest-path", str(src_dst / "library" / "Cargo.toml")],
@@ -215,17 +220,38 @@ def verify_lock() -> None:
     )
 
 
+def _existing_valid_limine_lock() -> dict[str, object] | None:
+    if not LOCK_PATH.exists():
+        return None
+    lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+    lim = lock.get("limine")
+    if not isinstance(lim, dict) or not isinstance(lim.get("files"), list):
+        return None
+    for entry in lim["files"]:
+        fp = LIMINE_DIR / entry["name"]
+        if not fp.exists() or sha256_file(fp) != entry["sha256"]:
+            return None
+    return lim
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify", action="store_true", help="Offline SHA-256 check")
+    parser.add_argument(
+        "--refresh-rust-src",
+        action="store_true",
+        help="Re-sync repo-local rust-src and cargo-home to current host rustc while keeping pinned Limine artifacts",
+    )
     args = parser.parse_args()
     if args.verify:
         verify_lock()
         return
 
     rustc_info = detect_host_rustc()
-    rs_meta = setup_rust_src(rustc_info)
-    lim_meta = setup_limine()
+    rs_meta = setup_rust_src(rustc_info, refresh=args.refresh_rust_src)
+    lim_meta = _existing_valid_limine_lock() if args.refresh_rust_src else None
+    if lim_meta is None:
+        lim_meta = setup_limine()
     lock = {"host_rustc": rustc_info["raw"], "rust_src": rs_meta, "limine": lim_meta}
     LOCK_PATH.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
     verify_lock()

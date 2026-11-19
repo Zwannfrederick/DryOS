@@ -1,11 +1,11 @@
 {
-  "host_rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)",
+  "host_rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09) (Arch Linux rust 1:1.100.0-1)",
   "rust_src": {
-    "release": "1.99.1",
-    "commit_hash": "58cf8f9c35b355199727627d07ae34a4e2846d67",
-    "url": "https://static.rust-lang.org/dist/rust-src-1.99.1.tar.xz",
-    "archive": ".toolchains/downloads/rust-src-1.99.1.tar.xz",
-    "sha256": "e485a88c45db546b73571df7bebfcb4454ba4fb552c492e25fc5b00eeb5bf22d",
+    "release": "1.100.0",
+    "commit_hash": "0ef1bc386059596dada8fb65b50425aab2ea637a",
+    "url": "https://static.rust-lang.org/dist/rust-src-1.100.0.tar.xz",
+    "archive": ".toolchains/downloads/rust-src-1.100.0.tar.xz",
+    "sha256": "107afa7819b500c573b21a160b08f1a20bc2dfd99550717e1ffbbdb09da7ec6e",
     "library_path": ".toolchains/sysroot/lib/rustlib/src/rust/library"
   },
   "limine": {
