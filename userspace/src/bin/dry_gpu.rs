@@ -21,6 +21,7 @@ use dry_userspace::gpu_proto::{
     BADGE_GPU_DISPLAY, BADGE_GPU_SUP, GPU_OP_ATTACH_BACKBUF, GPU_OP_BIND_PCI,
     GPU_OP_PRESENT_RECT, GPU_OP_QUERY_INFO,
 };
+use dry_userspace::gpu_svc::FenceTimeline;
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::virtio_gpu::{VirtioGpu2d, GPU_SCANOUT_VA0, MAX_GPU_SCANOUT_2M};
 use dry_userspace::{
@@ -130,6 +131,7 @@ fn emit_gpu_init_log(gpu: &VirtioGpu2d) {
     lb.push_u64(gpu.msix_vec as u64);
     lb.push_bytes(b" msi_irqs=");
     lb.push_u64(gpu.msi_irqs);
+    lb.push_bytes(b" fences=1");
     log_line(&lb);
 }
 
@@ -153,6 +155,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
 
     let mut attached_caps = [0u64; MAX_GPU_SCANOUT_2M];
     let mut presents = 0u64;
+    let mut fences = FenceTimeline::new();
 
     loop {
         let mut ext = UserIpcRecvExt::default();
@@ -280,6 +283,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 }
 
                 let t0 = rdtsc_user();
+                let fence_seq = fences.alloc_seq(t0);
                 let y0 = ((mrs[0] >> 32) as usize).min(h);
                 let req_h = (mrs[1] >> 32) as usize;
                 let h0 = req_h.min(h.saturating_sub(y0));
@@ -314,7 +318,9 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                     }
                 }
                 presents = presents.wrapping_add(1);
-                let dt = rdtsc_user().saturating_sub(t0);
+                let now = rdtsc_user();
+                let _ = fences.signal(fence_seq, now);
+                let dt = now.saturating_sub(t0);
                 let px = (w as u64) * (h0 as u64);
                 if tok != 0 {
                     let _ = sys_ipc_reply_inline(

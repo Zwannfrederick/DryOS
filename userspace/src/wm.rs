@@ -11,6 +11,7 @@
 use crate::action::{ActionQueue, AppId, DesktopAction, APP_COUNT};
 use crate::gfx::{DirtyRegion, Rect, CURSOR_H, CURSOR_W};
 use crate::glass::GlassState;
+use crate::gpu_svc::{DisplayHandoverMachine, FenceTimeline, VblankPacer};
 use crate::input::InputEvent;
 use crate::surface::{
     PIXEL_SURF_MAX_H, PIXEL_SURF_MAX_PIXELS, PIXEL_SURF_MAX_W, TERM_COLS, TERM_ROWS,
@@ -70,6 +71,10 @@ pub struct WindowManager {
     pub gpu_ep_cap: u64,
     pub gpu_presents: u64,
     pub gpu_fallbacks: u64,
+    pub handover: DisplayHandoverMachine,
+    pub gpu_fences: FenceTimeline,
+    pub vblank: VblankPacer,
+    pub broker_in_data_path: bool,
     pub back_caps: [u64; 8],
     pub glass: GlassState,
 }
@@ -125,6 +130,10 @@ impl WindowManager {
             gpu_ep_cap: 0,
             gpu_presents: 0,
             gpu_fallbacks: 0,
+            handover: DisplayHandoverMachine::new(),
+            gpu_fences: FenceTimeline::new(),
+            vblank: VblankPacer::new(3000, 60),
+            broker_in_data_path: false,
             back_caps: [0; 8],
             glass: GlassState::new(),
         }

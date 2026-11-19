@@ -272,12 +272,16 @@ impl IoRingClient {
 
         // SAFETY: `self.ring_vaddr` remains mapped `USER_RW` for the lifetime of `IoRingClient`.
         let ring = unsafe { &*(self.ring_vaddr as *const IoRingSharedPage) };
+        while ring.pop_cqe().is_some() {}
         if !ring.push_sqe(sqe) {
             return Err(EIO_RING);
         }
         let _ = sys_notify_signal(self.sq_notif, 1)?;
-        for _slice in 0..20u32 {
-            if let Some(cqe) = ring.pop_cqe() {
+        for _slice in 0..40u32 {
+            while let Some(cqe) = ring.pop_cqe() {
+                if cqe.user_tag < tag {
+                    continue;
+                }
                 if cqe.user_tag != tag {
                     return Err(EIO_RING);
                 }

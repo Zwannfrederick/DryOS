@@ -106,6 +106,7 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
         cur,
         flags,
     ];
+    let fence_seq = wm.gpu_fences.alloc_seq(rdtsc_user());
     let reason: &[u8] = match sys_ipc_call_inline(
         gpu_ep,
         pack_msg_tag(GPU_OP_PRESENT_RECT, 0, 4, 0),
@@ -113,6 +114,9 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
         0,
     ) {
         Ok((tag, _, out)) if msg_tag_label(tag) == IPC_OP_PONG => {
+            let now = rdtsc_user();
+            let _ = wm.gpu_fences.signal(fence_seq, now);
+            let _ = wm.vblank.tick_present(now);
             wm.gpu_presents = wm.gpu_presents.wrapping_add(1);
             return Some((out[0], out[1]));
         }
@@ -123,6 +127,7 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
     let _ = sys_cap_revoke(gpu_ep, 1);
     wm.gpu_ep_cap = 0;
     wm.gpu_fallbacks = wm.gpu_fallbacks.wrapping_add(1);
+    wm.handover.enter_fault_and_fallback();
     wm.glass.push_notif(b"GPU fault -> UEFI GOP fallback active", 2);
     let mut flb = LineBuilder::new();
     flb.push_bytes(b"[DRY-WM] GPU_FALLBACK_TO_GOP reason=");
@@ -224,13 +229,19 @@ pub fn handle_wm_admin_op(
                         }
                     }
                     if attach_ok {
+                        let _ = wm
+                            .handover
+                            .promote_to_kms(crate::gpu_svc::GpuBackendKind::VirtioGpu);
                         let mut glb = LineBuilder::new();
                         glb.push_bytes(b"[DRY-WM] GPU_SCANOUT_BOUND back_2m=");
                         glb.push_u64(need as u64);
+                        glb.push_bytes(b" state=");
+                        glb.push_bytes(wm.handover.state.as_str());
                         wm_log_line(&glb);
                         wm.glass.push_notif(b"VirtIO-GPU 2D scanout bound", 1);
                         comp.scene_dirty.mark(Rect::new(0, 0, comp.w, comp.h));
                     } else {
+                        wm.handover.enter_fault_and_fallback();
                         let _ = sys_cap_revoke(wm.gpu_ep_cap, 1);
                         wm.gpu_ep_cap = 0;
                     }
@@ -598,4 +609,18 @@ pub fn emit_wm_exit_telemetry(
         blb.push_u64(p2_99);
         wm_log_line(&blb);
     }
+    let mut glb = LineBuilder::new();
+    glb.push_bytes(b"[DRY-WM-GPU-SVC] state=");
+    glb.push_bytes(wm.handover.state.as_str());
+    glb.push_bytes(b" kms_act=");
+    glb.push_u64(wm.handover.kms_activations as u64);
+    glb.push_bytes(b" rollbacks=");
+    glb.push_u64(wm.handover.rollbacks_to_gop as u64);
+    glb.push_bytes(b" fences=");
+    glb.push_u64(wm.gpu_fences.signaled_seq);
+    glb.push_bytes(b" vblanks=");
+    glb.push_u64(wm.vblank.vblank_seq);
+    glb.push_bytes(b" broker_data_path=");
+    glb.push_u64(wm.broker_in_data_path as u64);
+    wm_log_line(&glb);
 }

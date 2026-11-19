@@ -13,6 +13,7 @@ pub mod gfx;
 pub mod glass;
 pub mod gpu_audit;
 pub mod gpu_proto;
+pub mod gpu_svc;
 pub mod init_legacy;
 pub mod input;
 pub mod ioring;
@@ -91,6 +92,7 @@ pub const SYS_DMA_CTL: u64 = 32;
 
 pub const EPERM: isize = -1;
 pub const ENOENT: isize = -2;
+pub const EIO: isize = -5;
 pub const EBADCAP: isize = -9;
 pub const ENOCHILD: isize = -10;
 pub const EAGAIN: isize = -11;

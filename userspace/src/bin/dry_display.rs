@@ -206,6 +206,22 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
     log_line(&alb);
     let _ = sys_write_debug(b"[DRY-DISPLAY] P1 Ring 3 desktop compositor active\n");
     let _ = dry_userspace::glass::overview::run_window_scalability_selftest();
+    if let Some(svc) = dry_userspace::gpu_svc::verify_gpu_svc_e2e_invariants(3000) {
+        let mut glb = LineBuilder::new();
+        glb.push_bytes(b"[DRY-GPU-SVC] PASS: backends=");
+        glb.push_u64(svc.backends_verified as u64);
+        glb.push_bytes(b" handover=0x");
+        glb.push_hex_u64(svc.handover_states_mask as u64);
+        glb.push_bytes(b" synth=");
+        glb.push_u64(svc.synth_presents);
+        glb.push_bytes(b" rollbacks=");
+        glb.push_u64(svc.rollbacks_to_gop as u64);
+        glb.push_bytes(b" broker_data_path=");
+        glb.push_u64(svc.broker_in_data_path as u64);
+        log_line(&glb);
+    } else {
+        let _ = sys_write_debug(b"[DRY-GPU-SVC] FAIL\n");
+    }
 
     let mut in2comp_lat = LatencyRing::new();
     let mut cursor_lat = LatencyRing::new();
