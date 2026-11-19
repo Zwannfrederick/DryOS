@@ -442,6 +442,39 @@ def _run_p18d_security_hardening(
     return {"elapsed_s": elapsed}
 
 
+def _run_p18e_driver_sdk_lifecycle(
+    build_dir: pathlib.Path,
+    ovmf_code: pathlib.Path,
+    ovmf_vars: pathlib.Path,
+) -> dict[str, Any]:
+    from build_live_usb_image import build_hwval_usb_image
+
+    t0 = time.monotonic()
+    img = build_dir / "p18e_sdk_demo.img"
+    build_hwval_usb_image(img, force_build=False, limine_extra="desktop4=1 sdk_demo=1")
+    sess = _HwvalSession(
+        "p18e_sdk_demo",
+        img,
+        ovmf_code,
+        ovmf_vars,
+        build_dir,
+        iommu=True,
+        usb_hid=True,
+    )
+    try:
+        sess.wait_for(
+            "[DRY-SDK-DEMO] PASS: abi_v1=1 mismatch_rej=1 op_ok=1 crash_rec_gen=2 quiesce_unload=1"
+        )
+        sess.wait_for("[DRY-SHELL] Interactive shell ready")
+        sess.shutdown_clean()
+    finally:
+        sess.close()
+        img.unlink(missing_ok=True)
+    elapsed = round(time.monotonic() - t0, 2)
+    print(f"[PASS] p18e_driver_sdk_lifecycle: ABI v1 + mismatch reject + crash_rec_gen=2 + quiesce_unload ({elapsed}s).")
+    return {"elapsed_s": elapsed}
+
+
 def run_p18_hwval_suite(
     _kernel_elf: pathlib.Path,
     build_dir: pathlib.Path,
@@ -457,9 +490,10 @@ def run_p18_hwval_suite(
     res_b = _run_p18b_recovery_and_multisession(build_dir, ovmf_code, ovmf_vars, persisted, res_a["meta"])
     n_neg = _run_p18c_negative_fault_matrix(build_dir, ovmf_code, ovmf_vars)
     res_d = _run_p18d_security_hardening(build_dir, ovmf_code, ovmf_vars)
+    res_e = _run_p18e_driver_sdk_lifecycle(build_dir, ovmf_code, ovmf_vars)
     persisted.unlink(missing_ok=True)
     out = root / "tools" / "compat_bench" / "results_p18_hwval.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     import json
-    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg, "p18d": res_d}, indent=2) + "\n", encoding="utf-8")
-    return 3 + n_neg
+    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg, "p18d": res_d, "p18e": res_e}, indent=2) + "\n", encoding="utf-8")
+    return 4 + n_neg

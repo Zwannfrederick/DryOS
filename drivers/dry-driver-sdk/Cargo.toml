@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Standalone DRY OS Driver Island SDK (`#![no_std]` on target, host-testable).
+
+[workspace]
+
+[package]
+name = "dry-driver-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "dry_driver_sdk"
+path = "src/lib.rs"

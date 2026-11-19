@@ -20,8 +20,9 @@ use dry_userspace::init_legacy::log_line;
 use dry_userspace::ioring::IoRingSharedPage;
 use dry_userspace::island_proto::{
     execute_mock_sqe, island_session_badge, mock_island_transform, BADGE_ISLAND_BROKER,
-    IPC_OP_ERR_STALE_GEN, MOCK_OP_BIND_NOTIF, MOCK_OP_INIT_ISLAND, MOCK_OP_SET_PARK_MODE,
-    MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE,
+    IPC_OP_ERR_STALE_GEN, ISLAND_ABI_VERSION_V1, ISLAND_FEAT_IORING, ISLAND_FEAT_QUIESCE,
+    ISLAND_OP_HELLO, ISLAND_OP_QUIESCE_UNLOAD, MOCK_OP_BIND_NOTIF, MOCK_OP_INIT_ISLAND,
+    MOCK_OP_SET_PARK_MODE, MOCK_OP_TRANSFORM, MOCK_OP_WAKE_PROBE,
 };
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
@@ -31,6 +32,7 @@ use dry_userspace::{
     UserIpcRecvExt, BADGE_SUPERVISOR, EINVAL, EPERM, EREVOKED, IPC_OP_BOUND_NOTIF,
     IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG,
     RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE, VSPACE_MAP_OP_4K_RW,
+    VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const ISLAND_RING_VADDR: u64 = 0x2400_0000;
@@ -103,6 +105,9 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
         let is_sup = ext.sender_badge == BADGE_SUPERVISOR;
         let is_broker = ext.sender_badge == BADGE_ISLAND_BROKER || is_sup;
         let is_session = generation != 0 && ext.sender_badge == island_session_badge(generation);
+        if op != MOCK_OP_BIND_NOTIF {
+            dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
+        }
 
         match op {
             MOCK_OP_BIND_NOTIF => {
@@ -238,6 +243,49 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                         [park_mode, generation, 0, 0],
                     );
                 }
+            }
+            ISLAND_OP_HELLO => {
+                if !is_broker {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                if mrs[0] != ISLAND_ABI_VERSION_V1 {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                }
+                if tok != 0 {
+                    let feats = ISLAND_FEAT_IORING | ISLAND_FEAT_QUIESCE;
+                    let _ = sys_ipc_reply_inline(
+                        drv_ep_cap,
+                        tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
+                        [ISLAND_ABI_VERSION_V1, generation, feats, 0],
+                    );
+                }
+            }
+            ISLAND_OP_QUIESCE_UNLOAD => {
+                if !is_broker {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                if sq_notif != 0 {
+                    let _ = sys_notify_unbind_tcb(sq_notif);
+                    let _ = sys_cap_revoke(sq_notif, 1);
+                }
+                if cq_notif != 0 {
+                    let _ = sys_cap_revoke(cq_notif, 1);
+                }
+                let _ = sys_vspace_map(ring_cap, ISLAND_RING_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+                let _ = sys_cap_revoke(ring_cap, 1);
+                if tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        drv_ep_cap,
+                        tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
+                        [processed_ops, ring_ops, wake_events, generation],
+                    );
+                }
+                sys_exit(0);
             }
             IPC_OP_CRASH_UD2 => {
                 if !is_sup {

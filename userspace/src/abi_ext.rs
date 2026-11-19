@@ -780,9 +780,10 @@ pub struct RootInitBootExtInfo {
     pub acpi_oem_id: [u8; 6],
     pub pci_passive_mode: u8,
     pub mem_total_entries: u8,
+    pub sdk_demo_mod_cap: u64,
 }
 
-const _: () = assert!(size_of::<RootInitBootExtInfo>() == 176);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 184);
 const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
 
 impl RootInitBootExtInfo {
@@ -795,7 +796,7 @@ impl RootInitBootExtInfo {
             mem_usable_mib: 0, mem_regions: 0, fb_pitch: 0, fb_width: 0, fb_height: 0,
             fb_phys_base: 0, cpuid_features: 0, boot_disk_guid: [0; 16],
             tsc_khz: 0, secure_boot_state: 0, acpi_oem_id: [0; 6],
-            pci_passive_mode: 0, mem_total_entries: 0,
+            pci_passive_mode: 0, mem_total_entries: 0, sdk_demo_mod_cap: 0,
         }
     }
 }

@@ -37,6 +37,12 @@ pub const MOCK_OP_INIT_ISLAND: u32 = 151;
 pub const MOCK_OP_TRANSFORM: u32 = 152;
 pub const MOCK_OP_WAKE_PROBE: u32 = 153;
 pub const MOCK_OP_SET_PARK_MODE: u32 = 154;
+pub const ISLAND_OP_HELLO: u32 = 157;
+pub const ISLAND_OP_QUIESCE_UNLOAD: u32 = 158;
+
+pub const ISLAND_ABI_VERSION_V1: u64 = 0x0001_0000;
+pub const ISLAND_FEAT_IORING: u64 = 1 << 0;
+pub const ISLAND_FEAT_QUIESCE: u64 = 1 << 1;
 
 // Error reply opcode when client supplies a stale/revoked generation token (`-EREVOKED`)
 pub const IPC_OP_ERR_STALE_GEN: u32 = 159;
@@ -51,6 +57,8 @@ pub const BROKER_OP_ACQUIRE_RING: u32 = 163;
 pub const BROKER_OP_SET_PARK_MODE: u32 = 164;
 pub const BROKER_OP_CRASH_AND_RECOVER: u32 = 165;
 pub const BROKER_OP_SHUTDOWN: u32 = 166;
+pub const BROKER_OP_ISLAND_HELLO: u32 = 169;
+pub const BROKER_OP_QUIESCE_UNLOAD: u32 = 180;
 
 // Broker-tracked driver island lifecycle states
 pub const ISLAND_STATE_STOPPED: u64 = 0;

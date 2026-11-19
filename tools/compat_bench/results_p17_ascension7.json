@@ -5,13 +5,13 @@
     "pci_quiesce": 4,
     "sec_audit_ok": true,
     "leaked_frames": 0,
-    "wall_time_sec": 5.268
+    "wall_time_sec": 5.19
   },
   "p17b": {
     "persist_mounted": false,
     "volatile_desktop_ok": true,
     "leaked_frames": 0,
-    "wall_time_sec": 3.988
+    "wall_time_sec": 3.965
   },
   "p17c": {
     "smp": 4,
@@ -19,7 +19,7 @@
     "vtd_faults": 2,
     "quiesces": 5,
     "leaked_frames": 0,
-    "wall_time_sec": 5.216
+    "wall_time_sec": 5.461
   },
   "p17d": {
     "status": "VERIFIED_QEMU",
@@ -41,6 +41,6 @@
     "neg_err_kind": "0x1205",
     "cleaned_up": true,
     "leaked_frames": 0,
-    "wall_time_sec": 27.952
+    "wall_time_sec": 21.383
   }
 }

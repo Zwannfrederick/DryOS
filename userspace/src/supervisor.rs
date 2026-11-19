@@ -11,7 +11,9 @@ use crate::abi_ext::{
 use crate::action::{AppId, DesktopAction};
 use crate::hwdiag::mgr::{DiagManager, DIAG_SCRATCH_CAP};
 use crate::init_legacy::{domain_spec, log_line, spawn_and_init_desktop_input};
-use crate::island_audit::{run_island_poc_benchmarks, run_island_poc_lifecycle_audit};
+use crate::island_audit::{
+    run_island_poc_benchmarks, run_island_poc_lifecycle_audit, run_sdk_demo_lifecycle_audit,
+};
 use crate::gpu_audit::{
     run_gpu_scanout_audit, spawn_live_gpu, teardown_live_gpu, trigger_live_gpu_fault_and_recover,
     LiveGpuSession,
@@ -172,11 +174,11 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     }
 
     let mut sec_audit_done =
-        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28 | 29 | 31);
+        !matches!(boot.session_mode, 11 | 21 | 25 | 26 | 27 | 28 | 29 | 31 | 32);
     let mut gpu_live: Option<LiveGpuSession> =
         if boot.pci_gpu_cap != 0
             && boot.gpu_mod_cap != 0
-            && !matches!(boot.session_mode, 25..=29 | 31)
+            && !matches!(boot.session_mode, 25..=29 | 31 | 32)
             && !matches!(
                 diag_mgr.boot_hwcheck_mode,
                 HWCHECK_MODE_SAFE | HWCHECK_MODE_DESKTOP_SAFE | HWCHECK_MODE_RECOVERY
@@ -305,6 +307,14 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     if let Err(code) =
                         run_lx_net_audit(boot_info_addr, boot, vfs_sup_cap, vault_sup_cap)
                     {
+                        sys_exit(code);
+                    }
+                } else if boot.session_mode == 32 {
+                    if let Err(code) = run_sdk_demo_lifecycle_audit(boot_info_addr, boot) {
+                        let mut elb = LineBuilder::new();
+                        elb.push_bytes(b"[DRY-SDK-DEMO-FAIL] code=");
+                        elb.push_u64(code as u64);
+                        log_line(&elb);
                         sys_exit(code);
                     }
                 }

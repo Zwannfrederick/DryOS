@@ -547,6 +547,79 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
                     (denied_ops & 0xffff_ffff) | ((stale_rejects & 0xffff_ffff) << 32);
                 reply_ok(broker_ep, tok, 4, [island.state, island.generation, restarts, packed_rej]);
             }
+            dry_userspace::island_proto::BROKER_OP_ISLAND_HELLO => {
+                if island.state != ISLAND_STATE_RUNNING || island.drv_broker_cap == 0 {
+                    reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, EPIPE, island.generation);
+                    continue;
+                }
+                island.wake_if_ring_parked();
+                match sys_ipc_call_inline(
+                    island.drv_broker_cap,
+                    pack_msg_tag(dry_userspace::island_proto::ISLAND_OP_HELLO, 0, 1, 0),
+                    [mrs[0], 0, 0, 0],
+                    ipc_timeout_tsc,
+                ) {
+                    Ok((rtag, _, rmrs)) if msg_tag_label(rtag) == IPC_OP_PONG => {
+                        reply_ok(broker_ep, tok, 4, rmrs);
+                    }
+                    Ok((rtag, _, _)) => {
+                        let op_err = msg_tag_label(rtag);
+                        reply_err(
+                            broker_ep,
+                            tok,
+                            if op_err == IPC_OP_ERR_PERM { IPC_OP_ERR_PERM } else { IPC_OP_ERR_INVAL },
+                            if op_err == IPC_OP_ERR_PERM { EPERM } else { EINVAL },
+                            island.generation,
+                        );
+                    }
+                    Err(e) => {
+                        reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, e, island.generation);
+                    }
+                }
+            }
+            dry_userspace::island_proto::BROKER_OP_QUIESCE_UNLOAD => {
+                if !is_admin {
+                    denied_ops = denied_ops.wrapping_add(1);
+                    reply_err(broker_ep, tok, IPC_OP_ERR_PERM, EPERM, denied_ops);
+                    continue;
+                }
+                if island.state != ISLAND_STATE_RUNNING
+                    || island.drv_broker_cap == 0
+                    || island.proc_handle == 0
+                {
+                    reply_err(broker_ep, tok, IPC_OP_ERR_INVAL, EINVAL, island.state);
+                    continue;
+                }
+                island.wake_if_ring_parked();
+                let unload_res = sys_ipc_call_inline(
+                    island.drv_broker_cap,
+                    pack_msg_tag(dry_userspace::island_proto::ISLAND_OP_QUIESCE_UNLOAD, 0, 1, 0),
+                    [0; 4],
+                    ipc_timeout_tsc,
+                );
+                if sys_proc_wait(island.proc_handle, 0, ipc_timeout_tsc).is_err() {
+                    let _ = sys_proc_kill(island.proc_handle);
+                    let _ = sys_proc_wait(island.proc_handle, 0, ipc_timeout_tsc);
+                }
+                island.proc_handle = 0;
+                island.revoke_generation_caps();
+                island.state = ISLAND_STATE_STOPPED;
+                lifecycle.mark_unloaded();
+                let acked = u64::from(
+                    matches!(unload_res, Ok((rt, _, _)) if msg_tag_label(rt) == IPC_OP_PONG),
+                );
+                reply_ok(
+                    broker_ep,
+                    tok,
+                    4,
+                    [
+                        island.generation,
+                        restarts,
+                        acked,
+                        u64::from(lifecycle.step.as_u8()),
+                    ],
+                );
+            }
             BROKER_OP_FORWARD_TRANSFORM => {
                 // Control-plane-only invariant (`ADR-016`): normal client data traffic MUST NOT
                 // traverse `Device Broker`. Only `BADGE_BROKER_ADMIN` diagnostic benchmark probes

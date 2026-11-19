@@ -692,3 +692,117 @@ pub fn run_island_poc_benchmarks(boot: &RootInitBootInfo) -> Result<(), i32> {
 
     Ok(())
 }
+
+/// `session_mode == 32` (`desktop4=1 sdk_demo=1`): Verifies standalone `dry-sdk-demo.elf`
+/// built on `dry-driver-sdk` (`ABI v1` hello, version mismatch reject, IPC op, `#UD` recovery
+/// to `gen=2`, and `BROKER_OP_QUIESCE_UNLOAD` clean teardown).
+#[inline(never)]
+pub fn run_sdk_demo_lifecycle_audit(
+    boot_info_addr: u64,
+    boot: &RootInitBootInfo,
+) -> Result<(), i32> {
+    let Some(ext) = crate::sup_hw_services::read_boot_ext_info(boot_info_addr) else {
+        return Err(260);
+    };
+    if boot.broker_mod_cap == 0 || ext.sdk_demo_mod_cap == 0 {
+        return Err(261);
+    }
+    let ipc_spec = domain_spec(0, DESKTOP_IPC_COMP_ID);
+    let cli_rights = RIGHT_READ | RIGHT_SEND | RIGHT_CALL;
+    let srv_rights = RIGHT_READ | RIGHT_RECV | RIGHT_REPLY;
+    let broker_ep = sys_ep_create(ipc_spec).map_err(|_| 262)?;
+    let admin_cap =
+        sys_cap_derive(broker_ep, cli_rights, 0, BADGE_BROKER_ADMIN).map_err(|_| 263)?;
+    let client_cap =
+        sys_cap_derive(broker_ep, cli_rights, 0, BADGE_BROKER_CLIENT).map_err(|_| 263)?;
+    let (proc_handle, _) = sys_proc_spawn(
+        boot.broker_mod_cap,
+        1,
+        COMP_ID_DEV_BROKER,
+        (broker_ep, srv_rights, 0x0808),
+        (ext.sdk_demo_mod_cap, RIGHT_READ | RIGHT_SPAWN),
+    )
+    .map_err(|_| 264)?;
+
+    let bh = BrokerHarness {
+        proc_handle,
+        broker_ep,
+        admin_cap,
+        client_cap,
+        rogue_cap: 0,
+        unbadged_cap: 0,
+    };
+
+    let (htag, _, hmrs) = sys_ipc_call_inline(
+        bh.admin_cap,
+        pack_msg_tag(crate::island_proto::BROKER_OP_ISLAND_HELLO, 0, 1, 0),
+        [crate::island_proto::ISLAND_ABI_VERSION_V1, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| 265)?;
+    let abi_v1 = msg_tag_label(htag) == IPC_OP_PONG
+        && hmrs[0] == crate::island_proto::ISLAND_ABI_VERSION_V1
+        && hmrs[1] == 1;
+
+    let (mtag, _, _) = sys_ipc_call_inline(
+        bh.admin_cap,
+        pack_msg_tag(crate::island_proto::BROKER_OP_ISLAND_HELLO, 0, 1, 0),
+        [0x0002_0000, 0, 0, 0],
+        0,
+    )
+    .map_err(|_| 266)?;
+    let mismatch_rej = msg_tag_label(mtag) == crate::IPC_OP_ERR_INVAL;
+
+    let (etag, ep1, _) = sys_ipc_call_with_grant(
+        bh.client_cap,
+        BROKER_OP_ACQUIRE_EP,
+        [0; 4],
+        0,
+        0,
+        0,
+        0,
+    )
+    .map_err(|_| 267)?;
+    let exp1 = mock_island_transform(POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1);
+    let (ttag, _, tmrs) = sys_ipc_call_inline(
+        ep1,
+        pack_msg_tag(MOCK_OP_TRANSFORM, 0, 4, 0),
+        [POC_TEST_SEED, POC_TEST_WORD0, POC_TEST_WORD1, 1],
+        0,
+    )
+    .map_err(|_| 267)?;
+    let _ = sys_cap_revoke(ep1, 1);
+    let op_ok = msg_tag_label(etag) == IPC_OP_PONG
+        && msg_tag_label(ttag) == IPC_OP_PONG
+        && tmrs[0] == exp1;
+
+    let (ctag, _, cmrs) = sys_ipc_call_inline(
+        bh.admin_cap,
+        pack_msg_tag(BROKER_OP_CRASH_AND_RECOVER, 0, 1, 0),
+        [0; 4],
+        0,
+    )
+    .map_err(|_| 268)?;
+    let crash_rec_gen = if msg_tag_label(ctag) == IPC_OP_PONG { cmrs[0] } else { 0 };
+
+    let (qtag, _, qmrs) = sys_ipc_call_inline(
+        bh.admin_cap,
+        pack_msg_tag(crate::island_proto::BROKER_OP_QUIESCE_UNLOAD, 0, 1, 0),
+        [0; 4],
+        0,
+    )
+    .map_err(|_| 269)?;
+    let quiesce_unload = msg_tag_label(qtag) == IPC_OP_PONG && qmrs[0] == 2 && qmrs[2] == 1;
+
+    bh.shutdown_and_reclaim()?;
+    if !abi_v1 || !mismatch_rej || !op_ok || crash_rec_gen != 2 || !quiesce_unload {
+        return Err(270);
+    }
+
+    let mut lb = LineBuilder::new();
+    lb.push_bytes(b"[DRY-SDK-DEMO] PASS: abi_v1=1 mismatch_rej=1 op_ok=1 crash_rec_gen=");
+    lb.push_u64(crash_rec_gen);
+    lb.push_bytes(b" quiesce_unload=1");
+    log_line(&lb);
+    Ok(())
+}

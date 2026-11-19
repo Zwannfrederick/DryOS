@@ -90,6 +90,7 @@ USERSPACE_MODS = (
     ("dry-usb", "dry-usb.elf"),
     ("dry-nvme", "dry-nvme.elf"),
     ("dry-lx-net", "dry-lx-net.elf"),
+    ("dry-sdk-demo", "dry-sdk-demo.elf"),
 )
 
 
@@ -315,6 +316,41 @@ def build_lx_compat_island(island_dir: pathlib.Path, driver_key: str, bin_name: 
     return dst_bin
 
 
+def build_sdk_demo_island() -> pathlib.Path:
+    """Compile standalone MIT/Apache-2.0 `dry-sdk-demo` Driver Island (`dry-driver-sdk`)."""
+    sdk_dir = ROOT / "drivers" / "sdk-example-pci"
+    base_env = userspace_cargo_env()
+    sdk_env = {
+        **base_env,
+        "RUSTFLAGS": base_env["RUSTFLAGS"].replace(
+            str(USERSPACE_DIR / "linker_user.ld"), str(sdk_dir / "linker.ld")
+        ),
+    }
+    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-sdk-demo...")
+    subprocess.check_call(
+        [
+            "cargo", "clippy", "--offline", "--manifest-path", str(sdk_dir / "Cargo.toml"),
+            "-Z", "build-std=core,compiler_builtins", "--target", "x86_64-unknown-none",
+            "--", "-D", "warnings",
+        ],
+        env=sdk_env,
+    )
+    print("[QEMU-TEST] Building release ELF64 dry-sdk-demo (dry-driver-sdk ABI v1)...")
+    subprocess.check_call(
+        [
+            "cargo", "build", "--offline", "--manifest-path", str(sdk_dir / "Cargo.toml"),
+            "-Z", "build-std=core,compiler_builtins", "--target", "x86_64-unknown-none",
+            "--release",
+        ],
+        env=sdk_env,
+    )
+    src_bin = sdk_dir / "target" / "x86_64-unknown-none" / "release" / "dry-sdk-demo"
+    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-sdk-demo"
+    dst_bin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_bin, dst_bin)
+    return dst_bin
+
+
 def build_userspace() -> list[pathlib.Path]:
     env = userspace_cargo_env()
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
@@ -358,6 +394,7 @@ def build_userspace() -> list[pathlib.Path]:
     build_lx_rng_island()
     build_lx_compat_island(LX_DRM_ISLAND_DIR, "drm_bochs", "dry-lx-drm-bochs")
     build_lx_compat_island(LX_NET_ISLAND_DIR, "net_8139cp", "dry-lx-net")
+    build_sdk_demo_island()
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():

@@ -230,9 +230,10 @@ struct RootInitBootExtInfo {
     acpi_oem_id: [u8; 6],
     pci_passive_mode: u8,
     mem_total_entries: u8,
+    sdk_demo_mod_cap: u64,
 }
 
-const _: () = assert!(size_of::<RootInitBootExtInfo>() == 176);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 184);
 const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
 
 const _: () = assert!(
@@ -288,6 +289,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             30u64
         } else if cmdline.contains("lx_net_test=1") {
             31u64
+        } else if cmdline.contains("sdk_demo=1") {
+            32u64
         } else {
             20u64
         }
@@ -371,6 +374,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-nvme.elf").unwrap_or(CapPtr::NULL);
             let lx_net_mod_cap =
                 mint_boot_module_cap(cs, lbl, "dry-lx-net.elf").unwrap_or(CapPtr::NULL);
+            let sdk_demo_mod_cap =
+                mint_boot_module_cap(cs, lbl, "dry-sdk-demo.elf").unwrap_or(CapPtr::NULL);
             let safe_gop = cmdline.contains("safe_gop=1");
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
@@ -570,6 +575,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 acpi_oem_id: acpi_sum.oem_id,
                 pci_passive_mode: pci_passive as u8,
                 mem_total_entries: mem_entries.min(255) as u8,
+                sdk_demo_mod_cap: sdk_demo_mod_cap.0,
             };
             let vault_ctrl_cap = if session_mode >= 20 {
                 crate::vault_ctrl::mint_root_vault_cap(cs, lbl)?
