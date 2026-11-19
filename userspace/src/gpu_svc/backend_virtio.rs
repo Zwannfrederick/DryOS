@@ -16,6 +16,8 @@ pub struct VirtioGpuBackend {
     gpu_ep_cap: u64,
     mode: GpuMode,
     probed: bool,
+    virgl_supported: bool,
+    capset_count: u8,
     pool: SurfaceBufferSet,
     fences: FenceTimeline,
     vblank: VblankPacer,
@@ -29,6 +31,8 @@ impl VirtioGpuBackend {
             gpu_ep_cap,
             mode,
             probed: false,
+            virgl_supported: false,
+            capset_count: 0,
             pool: SurfaceBufferSet::new(mode.width, mode.height, SurfacePixelFormat::Bgrx8888, false),
             fences: FenceTimeline::new(),
             vblank: VblankPacer::new(tsc_mhz, 60),
@@ -47,23 +51,25 @@ impl GpuBackend for VirtioGpuBackend {
     }
 
     fn contract(&self) -> GpuBackendContract {
+        let mut caps = GpuBackendCaps::SCANOUT_2D.0
+            | GpuBackendCaps::ATOMIC_KMS.0
+            | GpuBackendCaps::DMA_BUF_IMPORT.0
+            | GpuBackendCaps::ASYNC_FENCE.0
+            | GpuBackendCaps::VBLANK_PACING.0
+            | GpuBackendCaps::IOMMU_ISOLATED.0
+            | GpuBackendCaps::GOP_HANDOVER.0;
+        if self.virgl_supported && self.capset_count > 0 {
+            caps |= GpuBackendCaps::VIRGL_3D.0;
+        }
         GpuBackendContract {
             kind: GpuBackendKind::VirtioGpu,
             tier: GpuExecutionTier::NativeIsland,
-            flags: GpuBackendCaps(
-                GpuBackendCaps::SCANOUT_2D.0
-                    | GpuBackendCaps::ATOMIC_KMS.0
-                    | GpuBackendCaps::DMA_BUF_IMPORT.0
-                    | GpuBackendCaps::ASYNC_FENCE.0
-                    | GpuBackendCaps::VBLANK_PACING.0
-                    | GpuBackendCaps::IOMMU_ISOLATED.0
-                    | GpuBackendCaps::GOP_HANDOVER.0,
-            ),
+            flags: GpuBackendCaps(caps),
             vendor_id: 0x1af4,
             device_id: 0x1050,
             max_width: 3840,
             max_height: 2160,
-            capset_count: 1,
+            capset_count: self.capset_count,
             broker_in_data_path: false,
         }
     }
@@ -85,6 +91,8 @@ impl GpuBackend for VirtioGpuBackend {
                 self.mode.width = w;
                 self.mode.height = h;
             }
+            self.virgl_supported = (mrs[3] & (1 << 1)) != 0;
+            self.capset_count = ((mrs[3] >> 8) & 0xff) as u8;
         }
         self.probed = true;
         Ok(self.contract())

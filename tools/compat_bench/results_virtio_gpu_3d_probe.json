@@ -1,0 +1,14 @@
+{
+  "status": "HOST_VIRGL_UNAVAILABLE",
+  "qemu_binary": "/usr/bin/qemu-system-x86_64",
+  "virtio_gpu_pci_available": false,
+  "virtio_gpu_gl_pci_available": false,
+  "virtio_gpu_pci_virgl_prop": false,
+  "virtio_gpu_gl_props": [],
+  "egl_headless_available": false,
+  "virglrenderer_lib_present": false,
+  "virglrenderer_lib_path": null,
+  "qmp_gl_instantiation_ok": false,
+  "qmp_gl_detail": "skipped_missing_gl_or_egl",
+  "notes": "Read-only QEMU probe; no host /dev/* mutation or GPU unbind performed."
+}

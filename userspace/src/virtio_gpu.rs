@@ -42,9 +42,15 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
+const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
+
+const VIRTIO_GPU_F_VIRGL: u32 = 1 << 0;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
+const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
 // Little-endian [B, G, R, X] matches UEFI GOP red_shift=16, green_shift=8, blue_shift=0.
 const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 const GPU_RES_ID_PRIMARY: u32 = 1;
@@ -166,10 +172,48 @@ struct VirtioGpuResourceFlush {
     padding: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuGetCapsetInfo {
+    hdr: VirtioGpuCtrlHdr,
+    capset_index: u32,
+    padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuRespCapsetInfo {
+    hdr: VirtioGpuCtrlHdr,
+    capset_id: u32,
+    capset_max_version: u32,
+    capset_max_size: u32,
+    padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuGetCapset {
+    hdr: VirtioGpuCtrlHdr,
+    capset_id: u32,
+    capset_version: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Virtio3dProbeInfo {
+    pub virgl_supported: bool,
+    pub num_capsets: u32,
+    pub first_capset_id: u32,
+    pub max_version: u32,
+    pub max_size: u32,
+    pub capset_resp_bytes: u32,
+}
+
 pub struct VirtioGpu2d {
     common_base: u64,
     notify_q0_addr: u64,
     isr_addr: u64,
+    device_base: u64,
     pci_cap: u64,
     irq_notif: u64,
     cmd_pa: u64,
@@ -189,6 +233,7 @@ pub struct VirtioGpu2d {
     pub virtq_cmds: u64,
     pub msi_irqs: u64,
     pub transfer_bytes: u64,
+    pub probe_3d: Virtio3dProbeInfo,
 }
 
 #[inline]
@@ -250,6 +295,10 @@ impl VirtioGpu2d {
             status |= VIRTIO_STATUS_DRIVER;
             mmio_w8(common + 0x14, status);
 
+            mmio_w32(common, 0);
+            let dev_feat_lo = mmio_r32(common + 0x04);
+            let virgl_supported = (dev_feat_lo & VIRTIO_GPU_F_VIRGL) != 0;
+
             mmio_w32(common, 1);
             let dev_feat_hi = mmio_r32(common + 0x04);
             if (dev_feat_hi & VIRTIO_F_VERSION_1_HI) == 0 {
@@ -257,7 +306,7 @@ impl VirtioGpu2d {
                 return Err(194);
             }
             mmio_w32(common + 0x08, 0);
-            mmio_w32(common + 0x0c, 0);
+            mmio_w32(common + 0x0c, if virgl_supported { VIRTIO_GPU_F_VIRGL } else { 0 });
             mmio_w32(common + 0x08, 1);
             mmio_w32(common + 0x0c, dev_feat_hi & 0x3);
 
@@ -323,6 +372,11 @@ impl VirtioGpu2d {
                     + info.notify_off as u64
                     + q_notify_off * info.notify_mult as u64,
                 isr_addr: GPU_BAR_VADDR + info.isr_off as u64,
+                device_base: if info.device_off != 0 {
+                    GPU_BAR_VADDR + info.device_off as u64
+                } else {
+                    0
+                },
                 pci_cap,
                 irq_notif,
                 cmd_pa,
@@ -342,12 +396,17 @@ impl VirtioGpu2d {
                 virtq_cmds: 0,
                 msi_irqs: 0,
                 transfer_bytes: 0,
+                probe_3d: Virtio3dProbeInfo {
+                    virgl_supported,
+                    ..Virtio3dProbeInfo::default()
+                },
             };
 
             if let Err(err) = dev.setup_scanout_2d() {
                 dev.shutdown_clean();
                 return Err(err);
             }
+            dev.probe_3d_capsets();
             Ok(dev)
         }
     }
@@ -583,6 +642,58 @@ impl VirtioGpu2d {
             .transfer_bytes
             .saturating_add((clamped_h as u64) * (self.width as u64) * 4);
         Ok(())
+    }
+
+    /// Probe VirtIO-GPU 3D capset metadata read-only; never fails 2D operation when absent.
+    pub fn probe_3d_capsets(&mut self) {
+        if !self.probe_3d.virgl_supported || self.device_base == 0 {
+            return;
+        }
+        // SAFETY: `device_base` points into BAR4 VirtIO-GPU device config (`num_capsets` at `+0x0c`).
+        unsafe {
+            let num_capsets = mmio_r32(self.device_base + 0x0c);
+            self.probe_3d.num_capsets = num_capsets;
+            if num_capsets == 0 {
+                return;
+            }
+            let req = VirtioGpuGetCapsetInfo {
+                hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_CAPSET_INFO),
+                capset_index: 0,
+                padding: 0,
+            };
+            copy_nonoverlapping(
+                (&raw const req).cast::<u8>(),
+                GPU_CMD_VADDR as *mut u8,
+                size_of::<VirtioGpuGetCapsetInfo>(),
+            );
+            if let Ok(VIRTIO_GPU_RESP_OK_CAPSET_INFO) = self.submit_sync(
+                size_of::<VirtioGpuGetCapsetInfo>() as u32,
+                size_of::<VirtioGpuRespCapsetInfo>() as u32,
+            ) {
+                let info =
+                    read_volatile((GPU_CMD_VADDR + CMD_RESP_OFF) as *const VirtioGpuRespCapsetInfo);
+                self.probe_3d.first_capset_id = info.capset_id;
+                self.probe_3d.max_version = info.capset_max_version;
+                self.probe_3d.max_size = info.capset_max_size;
+                let cap_bytes = info.capset_max_size.min(1024);
+                let creq = VirtioGpuGetCapset {
+                    hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_CAPSET),
+                    capset_id: info.capset_id,
+                    capset_version: info.capset_max_version,
+                };
+                copy_nonoverlapping(
+                    (&raw const creq).cast::<u8>(),
+                    GPU_CMD_VADDR as *mut u8,
+                    size_of::<VirtioGpuGetCapset>(),
+                );
+                if let Ok(VIRTIO_GPU_RESP_OK_CAPSET) = self.submit_sync(
+                    size_of::<VirtioGpuGetCapset>() as u32,
+                    (size_of::<VirtioGpuCtrlHdr>() as u32).saturating_add(cap_bytes),
+                ) {
+                    self.probe_3d.capset_resp_bytes = cap_bytes;
+                }
+            }
+        }
     }
 
     pub fn shutdown_clean(&mut self) {

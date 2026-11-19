@@ -133,6 +133,19 @@ fn emit_gpu_init_log(gpu: &VirtioGpu2d) {
     lb.push_u64(gpu.msi_irqs);
     lb.push_bytes(b" fences=1");
     log_line(&lb);
+
+    let mut pb = LineBuilder::new();
+    pb.push_bytes(b"[DRY-GPU] 3D_PROBE virgl=");
+    pb.push_u64(u64::from(gpu.probe_3d.virgl_supported));
+    pb.push_bytes(b" capsets=");
+    pb.push_u64(u64::from(gpu.probe_3d.num_capsets));
+    pb.push_bytes(b" id=");
+    pb.push_u64(u64::from(gpu.probe_3d.first_capset_id));
+    pb.push_bytes(b" max_ver=");
+    pb.push_u64(u64::from(gpu.probe_3d.max_version));
+    pb.push_bytes(b" max_sz=");
+    pb.push_u64(u64::from(gpu.probe_3d.max_size));
+    log_line(&pb);
 }
 
 #[no_mangle]
@@ -212,7 +225,10 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 };
                 if tok != 0 {
                     let dims = (g.width as u64) | ((g.height as u64) << 32);
-                    let meta = 1u64 | (g.virtq_cmds << 32);
+                    let meta = 1u64
+                        | (u64::from(g.probe_3d.virgl_supported) << 1)
+                        | (u64::from(g.probe_3d.num_capsets.min(255)) << 8)
+                        | (g.virtq_cmds << 32);
                     let _ = sys_ipc_reply_inline(
                         gpu_ep_cap,
                         tok,

@@ -1,0 +1,59 @@
+{
+  "prototype": "dryos-linux-microvm-gpu-ipc-proto",
+  "transport_mode": "SHARED_MEMORY_IPC_COPIED",
+  "zero_copy_dmabuf": false,
+  "physical_igpu_passthrough_assumed": false,
+  "passed": true,
+  "host_prereqs": {
+    "host_arch": "x86_64",
+    "dev_kvm_exists": true,
+    "dev_kvm_rw": true,
+    "qemu_system_x86_64": "/usr/bin/qemu-system-x86_64",
+    "host_kernels_listed": 3,
+    "host_kernels_readable": 3,
+    "host_mem_total_mib": 31868,
+    "host_mem_available_mib": 16017,
+    "estimated_microvm_ram_mib": 128,
+    "estimated_cold_boot_ms_range": "250-900 (with minimal initramfs; host full kernel often requires dedicated microvm image)",
+    "physical_igpu_passthrough_assumed": false,
+    "transport_mode": "SHARED_MEMORY_IPC_COPIED"
+  },
+  "benchmarks": {
+    "dirty_tile_256x256_xrgb": {
+      "payload_bytes": 262144,
+      "iterations": 120,
+      "crc_and_ack_ok": true,
+      "ack_failures": 0,
+      "min_us": 207.6,
+      "p50_us": 216.03,
+      "p95_us": 268.94,
+      "p99_us": 281.69,
+      "mean_us": 226.78,
+      "throughput_mib_s": 1102.41
+    },
+    "frame_720p_xrgb": {
+      "payload_bytes": 3686400,
+      "iterations": 120,
+      "crc_and_ack_ok": true,
+      "ack_failures": 0,
+      "min_us": 3404.77,
+      "p50_us": 3632.53,
+      "p95_us": 4147.94,
+      "p99_us": 4269.66,
+      "mean_us": 3677.82,
+      "throughput_mib_s": 955.9
+    },
+    "frame_1080p_xrgb": {
+      "payload_bytes": 8294400,
+      "iterations": 120,
+      "crc_and_ack_ok": true,
+      "ack_failures": 0,
+      "min_us": 7809.44,
+      "p50_us": 8071.27,
+      "p95_us": 11046.15,
+      "p99_us": 14859.5,
+      "mean_us": 8570.45,
+      "throughput_mib_s": 922.96
+    }
+  }
+}
