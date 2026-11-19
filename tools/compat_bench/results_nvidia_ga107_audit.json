@@ -1,0 +1,1144 @@
+{
+  "target_gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU (10de:25a0, GA107M, muxless Optimus)",
+  "milestone_d_status": "PARTIAL / UNSUPPORTED (Read-only hardware/firmware/ABI audit only; zero NVIDIA GPU or CUDA execution)",
+  "os_interface_header": "/usr/src/nvidia-620.70.06/kernel-open/common/inc/os-interface.h",
+  "total_os_interface_apis": 171,
+  "status_counts": {
+    "IMPLEMENTED": 4,
+    "PARTIAL": 4,
+    "ENOSYS": 9,
+    "COMPILE_ONLY": 5,
+    "UNSUPPORTED": 149
+  },
+  "by_subsystem": {
+    "memory_vm": {
+      "total": 37,
+      "IMPLEMENTED": 3,
+      "PARTIAL": 1,
+      "ENOSYS": 2,
+      "COMPILE_ONLY": 1,
+      "UNSUPPORTED": 30
+    },
+    "time_clocks": {
+      "total": 6,
+      "IMPLEMENTED": 0,
+      "PARTIAL": 0,
+      "ENOSYS": 2,
+      "COMPILE_ONLY": 1,
+      "UNSUPPORTED": 3
+    },
+    "misc_runtime": {
+      "total": 31,
+      "IMPLEMENTED": 1,
+      "PARTIAL": 0,
+      "ENOSYS": 0,
+      "COMPILE_ONLY": 0,
+      "UNSUPPORTED": 30
+    },
+    "threads_strings_irq": {
+      "total": 15,
+      "IMPLEMENTED": 0,
+      "PARTIAL": 0,
+      "ENOSYS": 0,
+      "COMPILE_ONLY": 0,
+      "UNSUPPORTED": 15
+    },
+    "pci_mmio_io": {
+      "total": 20,
+      "IMPLEMENTED": 0,
+      "PARTIAL": 3,
+      "ENOSYS": 0,
+      "COMPILE_ONLY": 0,
+      "UNSUPPORTED": 17
+    },
+    "linux_vfs_cgroup_sys": {
+      "total": 36,
+      "IMPLEMENTED": 0,
+      "PARTIAL": 0,
+      "ENOSYS": 0,
+      "COMPILE_ONLY": 0,
+      "UNSUPPORTED": 36
+    },
+    "sync_locking": {
+      "total": 26,
+      "IMPLEMENTED": 0,
+      "PARTIAL": 0,
+      "ENOSYS": 5,
+      "COMPILE_ONLY": 3,
+      "UNSUPPORTED": 18
+    }
+  },
+  "pci_sysfs": {
+    "present": true,
+    "bdf": "0000:01:00.0",
+    "class": "0x030200",
+    "bars": [
+      {
+        "bar": 0,
+        "start": "0x54000000",
+        "size_bytes": 16777216,
+        "flags": "0x0000000000040200"
+      },
+      {
+        "bar": 1,
+        "start": "0x6000000000",
+        "size_bytes": 4294967296,
+        "flags": "0x000000000014220c"
+      },
+      {
+        "bar": 3,
+        "start": "0x6100000000",
+        "size_bytes": 33554432,
+        "flags": "0x000000000014220c"
+      },
+      {
+        "bar": 5,
+        "start": "0x4000",
+        "size_bytes": 128,
+        "flags": "0x0000000000040101"
+      }
+    ]
+  },
+  "firmware_streaming_sha256": [
+    {
+      "path": "/lib/firmware/nvidia/620.70.06/ucodes_ga10x.bin",
+      "bytes": 56128512,
+      "mib": 53.53,
+      "exceeds_legacy_16mib_cap": true,
+      "fw_stream_verifier_required": true,
+      "sha256": "b8f3d94d33cc284da4e0b758f069271818694b2ce8b50769d6a14b46df5d3cbf",
+      "is_elf": false,
+      "elf_class": 0,
+      "elf_machine": null,
+      "magic_hex": "4e5655434f444553"
+    }
+  ],
+  "apis": [
+    {
+      "symbol": "os_alloc_mem",
+      "status": "PARTIAL",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_free_mem",
+      "status": "ENOSYS",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_system_time",
+      "status": "UNSUPPORTED",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_get_monotonic_time_ns",
+      "status": "COMPILE_ONLY",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_get_monotonic_time_ns_hr",
+      "status": "UNSUPPORTED",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_get_monotonic_tick_resolution_ns",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_delay",
+      "status": "ENOSYS",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_delay_us",
+      "status": "ENOSYS",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_get_cpu_frequency",
+      "status": "UNSUPPORTED",
+      "subsystem": "time_clocks",
+      "dryos_feasibility": "Provide via rdtsc + calibrated SYS_SYSINFO tsc_mhz + SYS_NOTIFY_WAIT"
+    },
+    {
+      "symbol": "os_get_current_process",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_current_process_name",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_current_thread",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_string_copy",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_string_length",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_strtoul",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_string_compare",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_snprintf",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_vsnprintf",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_log_error",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_mem_copy",
+      "status": "IMPLEMENTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_memcpy_from_user",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_memcpy_to_user",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_mem_set",
+      "status": "IMPLEMENTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_mem_cmp",
+      "status": "IMPLEMENTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_pci_init_handle",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_read_byte",
+      "status": "PARTIAL",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_read_word",
+      "status": "PARTIAL",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_read_dword",
+      "status": "PARTIAL",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_write_byte",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_write_word",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_write_dword",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_remove_supported",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_remove",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_map_kernel_space",
+      "status": "COMPILE_ONLY",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_map_device_paddr_range_protected",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_is_tdisp_tdi_run_state",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_unmap_kernel_space",
+      "status": "ENOSYS",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_map_user_space",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_unmap_user_space",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_flush_cpu_cache_all",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_flush_user_cache",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_flush_cpu_write_combine_buffer",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_io_read_byte",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_io_read_word",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_io_read_dword",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_io_write_byte",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_io_write_word",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_io_write_dword",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_is_administrator",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_check_access",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_dbg_init",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_dbg_breakpoint",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_dbg_set_level",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_cpu_count",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_get_cpu_number",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_disable_console_access",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_enable_console_access",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_registry_init",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_get_max_user_va",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_schedule",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_alloc_spinlock",
+      "status": "ENOSYS",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_free_spinlock",
+      "status": "ENOSYS",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_acquire_spinlock",
+      "status": "COMPILE_ONLY",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_release_spinlock",
+      "status": "COMPILE_ONLY",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_queue_work_item",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_flush_work_queue",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_is_queue_flush_ongoing",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_alloc_mutex",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_free_mutex",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_acquire_mutex",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_cond_acquire_mutex",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_release_mutex",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_alloc_semaphore",
+      "status": "COMPILE_ONLY",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_free_semaphore",
+      "status": "ENOSYS",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_acquire_semaphore",
+      "status": "ENOSYS",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_cond_acquire_semaphore",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_release_semaphore",
+      "status": "ENOSYS",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_alloc_rwlock",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_free_rwlock",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_acquire_rwlock_read",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_acquire_rwlock_write",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_cond_acquire_rwlock_read",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_cond_acquire_rwlock_write",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_release_rwlock_read",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_release_rwlock_write",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_semaphore_may_sleep",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_get_version_info",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_is_openrm",
+      "status": "IMPLEMENTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_is_bif_reset_supported",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_is_isr",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_dump_stack",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_is_efi_enabled",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_is_xen_dom0",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_is_vgx_hyper",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_inject_vgx_msi",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_is_grid_supported",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_get_grid_csp_support",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_bug_check",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_lock_user_pages",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_lookup_user_io_memory",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_unlock_user_pages",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_match_mmap_offset",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_euid",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_smbios_header",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_get_acpi_rsdp_from_uefi",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_add_record_for_crashLog",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_delete_record_for_crashLog",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_call_vgpu_vfio",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_device_vm_present",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_numa_memblock_size",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_alloc_pages_node",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_page",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_put_page",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_page_refcount",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_count_tail_pages",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_free_pages_phys",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_allocate_temporary_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_close_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_write_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_read_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_open_readonly_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_open_and_read_file",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_is_nvswitch_present",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_random_bytes",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_get_current_process_flags",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_alloc_wait_queue",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_free_wait_queue",
+      "status": "UNSUPPORTED",
+      "subsystem": "sync_locking",
+      "dryos_feasibility": "Provide in Ring-3 via Notification + futex/atomic primitives"
+    },
+    {
+      "symbol": "os_wait_uninterruptible",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_wait_interruptible",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_wake_up",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_nv_cap_init",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_nv_cap_create_dir_entry",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_nv_cap_create_file_entry",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_nv_cap_destroy_entry",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_nv_cap_validate_and_dup_fd",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_nv_cap_close_fd",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_imex_channel_get",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_imex_channel_count",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_tegra_igpu_perf_boost",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_get_tegra_platform",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_enable_pci_req_atomics",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_pci_trigger_flr",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_get_reclaimable_memory_usage",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_numa_node_memory_usage",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_numa_add_gpu_memory",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_numa_remove_gpu_memory",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_offline_page_at_address",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_get_pid_info",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_put_pid_info",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_find_ns_pid",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_is_init_ns",
+      "status": "UNSUPPORTED",
+      "subsystem": "misc_runtime",
+      "dryos_feasibility": "Audit case-by-case; return honest -ENOSYS natively"
+    },
+    {
+      "symbol": "os_iommu_sva_bind",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_iommu_sva_unbind",
+      "status": "UNSUPPORTED",
+      "subsystem": "pci_mmio_io",
+      "dryos_feasibility": "Provide via SYS_DEV_MAP(CFG_RW) + SYS_IOPORT_RW (SVA/PASID unimplemented)"
+    },
+    {
+      "symbol": "os_supports_kernel_suspend_notifiers",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_read_device_certificate",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_read_device_cert_digests",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "out_string",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "nv_printf",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "nv_vprintf",
+      "status": "UNSUPPORTED",
+      "subsystem": "threads_strings_irq",
+      "dryos_feasibility": "String/IRQ-thread wrappers trivial in C runtime; VFIO/xen-dom0/suspend unsupported"
+    },
+    {
+      "symbol": "os_cgroup_for_pid",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_cgroup_implementation",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_dmem_cgroup_register_region",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_dmem_cgroup_unregister_region",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_dmem_cgroup_try_charge",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_dmem_cgroup_uncharge",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_dmem_cgroup_pool_state_put",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_dmem_cgroup_state_evict_valuable",
+      "status": "UNSUPPORTED",
+      "subsystem": "memory_vm",
+      "dryos_feasibility": "Provide via SYS_DMA_CTL / SYS_VSPACE_MAP (ring-3 SLPT); no kernel PFN exposure"
+    },
+    {
+      "symbol": "os_cgroup_get_from_fd",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_cgroup_put",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_cgroup_get",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    },
+    {
+      "symbol": "os_cgroup_parent",
+      "status": "UNSUPPORTED",
+      "subsystem": "linux_vfs_cgroup_sys",
+      "dryos_feasibility": "Linux kernel VFS/cgroup/SMBIOS/ACPI-eval specific; omit in MicroVM or UNSUPPORTED natively"
+    }
+  ]
+}
