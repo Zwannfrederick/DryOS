@@ -17,6 +17,7 @@ pub mod gpu_proto;
 pub mod gpu_svc;
 pub mod init_legacy;
 pub mod input;
+pub mod intel_tgl_prep;
 pub mod ioring;
 pub mod island_audit;
 pub mod island_proto;

@@ -223,6 +223,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
         let _ = sys_write_debug(b"[DRY-GPU-SVC] FAIL\n");
     }
     dry_userspace::fw_store::log_fw_and_lifecycle_selftest();
+    dry_userspace::intel_tgl_prep::log_intel_tgl_prep_selftest();
 
     let mut in2comp_lat = LatencyRing::new();
     let mut cursor_lat = LatencyRing::new();
