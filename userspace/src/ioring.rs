@@ -277,7 +277,7 @@ impl IoRingClient {
             return Err(EIO_RING);
         }
         let _ = sys_notify_signal(self.sq_notif, 1)?;
-        for _slice in 0..40u32 {
+        for _slice in 0..80u32 {
             while let Some(cqe) = ring.pop_cqe() {
                 if cqe.user_tag < tag {
                     continue;

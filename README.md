@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="assets/brand/dryos-lockup-boot.svg" alt="DRY OS — Project Ascension 5.0" width="540">
+  <img src="assets/brand/dryos-lockup-boot.svg" alt="DRY OS — Project Ascension 6.0" width="540">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Architecture-x86--64%20Capability%20Microkernel-1d4ed8?style=flat-square" alt="Architecture">
   <img src="https://img.shields.io/badge/Language-no__std%20Rust-0f766e?style=flat-square" alt="Language">
   <img src="https://img.shields.io/badge/Desktop-DRY%20Glass%202.1-334155?style=flat-square" alt="Desktop">
-  <img src="https://img.shields.io/badge/Release-Project%20Ascension%205.0%20(v0.5.0)-1e293b?style=flat-square" alt="Release">
+  <img src="https://img.shields.io/badge/Release-Project%20Ascension%206.0%20(ascension--6.0)-1e293b?style=flat-square" alt="Release">
   <a href="LICENSING.md"><img src="https://img.shields.io/badge/License-Apache--2.0%20OR%20MIT%20%7C%20GPL--2.0%20Islands-475569?style=flat-square" alt="License"></a>
 </p>
 
-# DRY OS — Project Ascension 5.0 (`v0.5.0`)
+# DRY OS — Project Ascension 6.0 (`v0.6.0-dev` on `ascension-6.0`)
 
-**A clean-slate x86-64 capability microkernel OS in Rust with an anti-aliased vector desktop (`DRY Glass 2.1`), VT-d DMA isolation, Ring-3 xHCI USB HID/BOT + Read-Only NVMe storage, a 160 MiB 2-partition GPT UEFI Live USB, and process-isolated Linux Driver Islands (`VirtIO-RNG`, `DRM Bochs`, `8139cp`).**
+**A clean-slate x86-64 capability microkernel OS in Rust with fail-closed vendor-neutral IOMMU (`DMAR`/`IVRS`), 64-slot ACPI ECAM PCI discovery, scatter-gather IOVA DMA, a vendor-neutral Ring-3 `dry-gpu-svc` + GOP-to-KMS handover FSM, decoupled `libdry-lx-compat`, SHA-256 firmware validation, an anti-aliased vector desktop (`DRY Glass 2.1`), Ring-3 xHCI USB HID/BOT + RO NVMe storage, and a `VT-d`-verified `160 MiB` GPT UEFI Live USB.**
 
-> **Verification Scope (`v0.5.0`):** Gates 1–2 (builds, Clippy `-D warnings`, `118`-SVG vector asset compiler, QEMU/OVMF emulation [`135/135` deterministic checks PASS], `160 MiB` GPT Live USB `--verify-boot` [`5.491s`], and read-only Lenovo `82K1` inventory/firmware validators) are verified in CI/QEMU/read-only host audits (`27/32` Ring-3 modules, `leaked_frames=0`). Physical bare-metal Gates 3–7 on target Lenovo IdeaPad Gaming 3 15IHU6 (`82K1`) hardware remain strictly **`READY FOR USER PHYSICAL EXECUTION`** — see [docs/ASCENSION_5_0_VALIDATION_MATRIX.md](docs/ASCENSION_5_0_VALIDATION_MATRIX.md).
+> **Verification Scope (`Ascension 6.0`):** Automated CI/QEMU/OVMF suites pass end-to-end (**`139/139`** unified checks including `--p16-only` `4/4`, `--p3-matrix` `5/5` up to `20 vCPU`, `--p13-only` `25/25`, `--smp-only 2 --mem 4G`, and `160 MiB` GPT Live USB `--verify-boot` under QEMU `intel-iommu` `VTD_ACTIVE` [`6.603s`, `leaked_frames=0`]). Bare-metal physical Lenovo `82K1` USB boot and native i915/xe/NVIDIA modesetting remain explicitly gated — see [docs/ASCENSION_6_0_VALIDATION_MATRIX.md](docs/ASCENSION_6_0_VALIDATION_MATRIX.md) and [docs/ASCENSION_5_0_VALIDATION_MATRIX.md](docs/ASCENSION_5_0_VALIDATION_MATRIX.md).
 
 ---
 
@@ -99,13 +99,12 @@ flowchart TB
 | Target / Subsystem | PCI / Hardware Scope | Current Verification Status | Honest Scope & Remaining Gap |
 | :--- | :--- | :--- | :--- |
 | **QEMU x86-64 Core, SMP & Storage** | OVMF UEFI, Limine, `i8042`, `VirtIO-Blk`, `DRYFS_v1`, `DRY Vault` | **DONE (QEMU/OVMF)** | `1..20 vCPU`, `256M..4G` RAM, `SIGKILL` CoW recovery |
-| **QEMU `VT-d`, `MSI/MSI-X`, `>4G` / Sub-Page BAR** | `intel-iommu` (`DMAR`), `edu` MSI, `ivshmem` `>4 GiB`, `< 4 KiB` BAR | **DONE (QEMU/OVMF)** (`--p8-only`) | Physical silicon `VT-d`/IOMMU awaits user Gate 5–7 |
+| **QEMU `VT-d`, `IVRS`, `ECAM`, SG DMA & Sub-Page BAR** | `intel-iommu` (`DMAR`), `amd-iommu` (`IVRS` `FailClosed`), `64` PCI, `SYS_DMA_CTL` | **DONE (QEMU/OVMF)** (`--p8-only`, `--p16-only`) | Fail-closed when IOMMU absent (`no_iommu_rc=35`); bare-metal `VT-d` awaits Gate 5–7 |
 | **QEMU USB xHCI HID/BOT & RO NVMe** | `qemu-xhci`, `usb-kbd/mouse/storage` Part 2, `nvme` (`INV-DISK-SAFE`) | **DONE (QEMU/OVMF)** (`--p13-only`, `25` checks) | Physical `82K1` xHCI/HID/VMD awaits user Gate 3–5 |
-| **QEMU `DRY Glass 2.1` + 118-SVG Identity** | `VirtIO-GPU`, `UEFI GOP`, `100%..200%` DPI, 21 App + 91 Sys Icons | **DONE (QEMU/OVMF)** (`--p11/p15-only`, `15` PNGs) | `2D` scanout + GOP fallback; `Virgl`/`Venus` 3D planned |
-| **Linux Islands: `virtio-rng.c`, `bochs.c`** | `1AF4:1044`, `1234:1111` (`libdry-lx-compat`, `GPL-2.0-*`) | **DONE (QEMU/OVMF)** (`--lx-island-only`, `--p12-only`) | Unmodified `v6.18` C sources; `#UD` -> `gen=2` recovery |
-| **Linux Island: `8139cp.c` + `mii.c`** | `10EC:8139` (`dry-lx-net.elf`, sub-page BAR1, SLIRP UDP echo) | **DONE (QEMU/OVMF)** (`--p14-only`, `1/1` PASS) | `56` SHA-256 files + `5/5` unit tests; `udp_echo=1`, `#UD gen=2`, `leaked_frames=0` |
-| **UEFI Live USB (`160 MiB` GPT)** | `96 MiB` `DRYOS_ESP` + `DRYOS_PERSIST` `DRYFS_V1` (`27` modules) | **DONE (QEMU xHCI)** (`--verify-boot`, `5.491s`) | Physical USB flash & boot **`READY FOR USER PHYSICAL EXECUTION`** |
-| **Lenovo 15IHU6: Iris Xe & RTX 3050 Ti** | `8086:9a49` (`dmc`/`guc`/VBT/EDID), `10de:25a0` (`gsp_ga10x` WPR2/PRIME) | **Read-Only Audit + Offline FW Validators PASS** | Native modeset **`BLOCKED`**; physical GOP/dGPU Gate 5–7 user-run |
+| **QEMU `dry-gpu-svc` & `DRY Glass 2.1`** | 4-backend `gpu_svc`, GOP-to-KMS FSM (`0x7f`), `100%..200%` DPI, `118` SVGs | **DONE (QEMU/OVMF)** (`--p11/p15/p16-only`) | `2D` + GOP fallback active; 3D `Virgl` probe reports `HOST_VIRGL_UNAVAILABLE` |
+| **Linux Islands: `virtio-rng`, `bochs`, `8139cp`** | Decoupled `libdry-lx-compat` (`2,207` C LOC, `0` `bochs` hits), weak CFG/DMA | **DONE (QEMU/OVMF)** (`--p12/p14/p16-only`) | Unmodified `v6.18` C sources; `#UD` -> `gen=2` recovery |
+| **UEFI Live USB (`160 MiB` GPT)** | `96 MiB` `DRYOS_ESP` + `DRYOS_PERSIST` `DRYFS_V1` (`27` modules, `VT-d`) | **DONE (QEMU xHCI + `VTD_ACTIVE`)** (`6.603s`) | `dryos-ascension6-live-usb.img`; physical USB boot stays user-gated |
+| **Target Multi-Vendor GPUs & MicroVM IPC** | Intel `8086:9a49`, AMD `1002:73df` profile, NVIDIA `10de:25a0` (`22/162` shim) | **Audit / Profile / Copy-IPC Proto PASS** | MicroVM `SHARED_MEMORY_IPC_COPIED` (`zero_copy_dmabuf=False`); native KMS **`BLOCKED`** |
 
 ---
 
@@ -132,17 +131,18 @@ python3 tools/build_vector_assets.py --verify
 # Offline release build + Clippy (-D warnings) for kernel, 27 userspace modules, and GPL islands
 python3 tools/qemu_boot_test.py --build-only
 
-# Individual subsystem & Project Ascension 5.0 QEMU/OVMF gates
-python3 tools/qemu_boot_test.py --p8-only            # VT-d DMAR/SLPT, MSI/MSI-X, >4 GiB & sub-page BAR
+# Individual subsystem & Project Ascension 5.0 / 6.0 QEMU/OVMF gates
+python3 tools/qemu_boot_test.py --p8-only            # VT-d DMAR/SLPT, MSI/MSI-X, SG DMA (IOVA!=HPA), >4 GiB / <4K BAR
 python3 tools/qemu_boot_test.py --p11-only           # DRY Glass 2.1 adaptive strip, Alt+W, HiDPI
 python3 tools/qemu_boot_test.py --p12-only           # Linux v6.18 bochs.c DRM island + RO PRIME + GOP coexist
-python3 tools/qemu_boot_test.py --p13-only           # M2 USB xHCI HID/BOT Part 2, RO NVMe, /persist/boot.log, 12 cmds (25 checks)
-python3 tools/qemu_boot_test.py --p14-only           # M3 libdry-lx-compat v2, 15-step lifecycle, 8139cp.c+mii.c SLIRP UDP + #UD gen=2
-python3 tools/qemu_boot_test.py --p15-only           # 118 SVGs & 100%/125%/150%/200% HiDPI DRY Glass integration (4 checks, 15 PNGs)
+python3 tools/qemu_boot_test.py --p13-only           # M2 USB xHCI HID/BOT Part 2, RO NVMe, /persist/boot.log (25 checks)
+python3 tools/qemu_boot_test.py --p14-only           # M3 libdry-lx-compat v2, 15-step lifecycle, 8139cp.c+mii.c SLIRP UDP
+python3 tools/qemu_boot_test.py --p15-only           # 118 SVGs & 100%/125%/150%/200% HiDPI DRY Glass integration (15 PNGs)
+python3 tools/qemu_boot_test.py --p16-only           # Ascension 6.0: fail-closed IOMMU/IVRS, gpu_svc, onboarding, MicroVM/3D probes
 python3 tools/qemu_boot_test.py --smp-only 2 --mem 4G # 4 GiB RAM PFN/PMM boot validation
-python3 tools/qemu_boot_test.py --p3-matrix          # 1..20 vCPU / 256M..2G RAM SMP matrix
+python3 tools/qemu_boot_test.py --p3-matrix          # 1..20 vCPU / 256M..2G RAM SMP matrix (5/5 PASS)
 
-# Full deterministic QEMU/OVMF suite (135/135 PASS, leaked_frames=0)
+# Full deterministic QEMU/OVMF suite (139/139 PASS, leaked_frames=0)
 python3 tools/qemu_boot_test.py
 ```
 
@@ -150,18 +150,17 @@ python3 tools/qemu_boot_test.py
 
 ```bash
 # Build 160 MiB 2-partition GPT Live USB (96 MiB FAT32 DRYOS_ESP + DRYOS_PERSIST DRYFS_V1, 27 ELFs)
-# Output: kernel/build/dryos-ascension5-live-usb.img (verified under QEMU xHCI)
-python3 tools/build_live_usb_image.py --verify-boot
+# Output: kernel/build/dryos-ascension6-live-usb.img (verified under QEMU intel-iommu VT-d + xHCI)
+python3 tools/build_live_usb_image.py --output kernel/build/dryos-ascension6-live-usb.img --build --verify-boot
 
-# Read-only Lenovo 15IHU6 (82K1) hardware inventory & Iris Xe / RTX 3050 Ti firmware/WPR2/PRIME validators
+# Read-only Lenovo 15IHU6 (82K1) hardware inventory, firmware validators & MicroVM IPC benchmark
 python3 tools/hw_inventory_lenovo_15ihu6.py
 python3 tools/gpu_fw_validators.py --self-test
-
-# Optional opt-in local firmware staging (NEVER committed to git):
-# python3 tools/provision_local_firmware.py --stage --staging-dir /tmp/dryos-fw-stage
+python3 tools/microvm_gpu_proto/proto_bench.py
+python3 tools/probe_virtio_gpu_3d.py
 ```
 
-**Bare-Metal Physical USB Note:** QEMU/OVMF `--verify-boot` does not test real silicon IOMMU or laptop ACPI/xHCI quirks. To execute **Physical Gates 3–7** safely on real hardware, follow [docs/LIVE_USB_OPERATOR_GUIDE.md](docs/LIVE_USB_OPERATOR_GUIDE.md): verify target disks via `lsblk` and `/dev/disk/by-id/usb-*` first, write `kernel/build/dryos-ascension5-live-usb.img` only to a removable USB drive, and inspect Secure Boot non-destructively (`mokutil --sb-state`).
+**Bare-Metal Physical USB Note:** QEMU/OVMF `--verify-boot` tests emulated `intel-iommu` (`VTD_ACTIVE`), not real silicon IOMMU or laptop ACPI/xHCI quirks. To execute **Physical Gates 3–7** safely on real hardware, follow [docs/LIVE_USB_OPERATOR_GUIDE.md](docs/LIVE_USB_OPERATOR_GUIDE.md): verify target disks via `lsblk` and `/dev/disk/by-id/usb-*` first, write `kernel/build/dryos-ascension6-live-usb.img` (or preserved `v0.5.0` `dryos-ascension5-live-usb.img`) only to a removable USB drive, and inspect Secure Boot non-destructively (`mokutil --sb-state`).
 
 ---
 
@@ -170,18 +169,18 @@ python3 tools/gpu_fw_validators.py --self-test
 ```text
 DryOS/
 |-- kernel/                  # Ring-0 no_std x86-64 capability microkernel (Apache-2.0 OR MIT, 0 GPL lines)
-|-- userspace/               # 24 native ELFs: DRY Glass 2.1, usb/nvme RO, 6 native apps (Apache-2.0 OR MIT)
+|-- userspace/               # Native ELFs: dry-gpu-svc, DRY Glass 2.1, fw_store, usb/nvme RO, 6 apps (Apache-2.0 OR MIT)
 |-- drivers/
-|   |-- libdry-lx-compat/    # 6-file modular Ring-3 C compat runtime, 2,164 LOC (MIT OR GPL-2.0-only)
+|   |-- libdry-lx-compat/    # 6-file modular Ring-3 C compat runtime, 2,207 LOC, 0 bochs hits (MIT OR GPL-2.0-only)
 |   |-- lx-virtio-rng-island/# Linux v6.18 virtio-rng.c Ring-3 island (GPL-2.0-only)
-|   |-- lx-drm-bochs-island/ # Linux v6.18 bochs.c Ring-3 DRM island (GPL-2.0-or-later)
+|   |-- lx-drm-bochs-island/ # Linux v6.18 bochs.c + bochs_island_glue.c Ring-3 DRM island (GPL-2.0-or-later)
 |   |-- lx-net-8139cp-island/# Linux v6.18 8139cp.c + mii.c Ring-3 NIC island (GPL-2.0-only)
-|   `-- lx-nv-open-shim/     # Compile-only NVIDIA os-interface.h validator (MIT)
+|   `-- lx-nv-open-shim/     # Honest 22-sym NVIDIA os-interface.h shim validator (MIT)
 |-- vendor/linux-drivers/    # Tracked SHA-256 MANIFEST.json; v*/ upstream C trees fetched on demand
 |-- assets/                  # 6 brand SVGs, 21 app SVGs, 91 system SVGs (Apache-2.0 OR MIT) + OFL-1.1 fonts
-|-- tools/                   # Offline bootstrap, vector compiler, QEMU/QMP validators, 160 MiB GPT Live USB builder
+|-- tools/                   # Offline bootstrap, vector compiler, QEMU/QMP/p16 validators, MicroVM proto, 160 MiB GPT Live USB
 |-- formal/ & experiments/   # TLA+ H1 scheduler specs, Loom stress tests, H2/H3 research probes
-`-- docs/                    # Design system, hardware/GPU audits, validation matrix, operator guide
+`-- docs/                    # Design system, hardware/GPU/MicroVM audits, Ascension 5/6 matrices, operator guide
 ```
 
 DRY OS maintains a strict **galvanic license boundary** ([LICENSING.md](LICENSING.md)): original DRY OS code (`kernel/`, `userspace/`, `assets/brand/`, `assets/icons/`, `tools/`, `docs/`) is **`Apache-2.0 OR MIT`**, bundled font subsets are **`OFL-1.1`**, `libdry-lx-compat/` is **`MIT OR GPL-2.0-only`**, and isolated Ring-3 driver islands are **`GPL-2.0-only`** / **`GPL-2.0-or-later`**.
@@ -190,12 +189,13 @@ DRY OS maintains a strict **galvanic license boundary** ([LICENSING.md](LICENSIN
 
 ## Documentation Index
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Privilege boundaries, syscall ABI, `27` Ring-3 compartments, VT-d RMRR/GOP deferral, `INV-DISK-SAFE-01/02`
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Privilege boundaries, syscall ABI (`248 B`), `27` Ring-3 compartments, fail-closed `IommuOps`, `dry-gpu-svc`, `INV-DISK-SAFE-01/02`
 - [HANDOVER.md](HANDOVER.md) & [ROADMAP.md](ROADMAP.md) — Engineering handover guide, milestone ledger, and next phase queue
-- [DECISIONS.md](DECISIONS.md) — Architecture Decision Records (`ADR-001` through `ADR-023`)
+- [DECISIONS.md](DECISIONS.md) — Architecture Decision Records (`ADR-001` through `ADR-024`)
 - [RISK_REGISTER.md](RISK_REGISTER.md) & [LICENSING.md](LICENSING.md) — Risk mitigations and dual-license isolation architecture
-- [docs/ASCENSION_5_0_VALIDATION_MATRIX.md](docs/ASCENSION_5_0_VALIDATION_MATRIX.md) — Complete Gate 1–7 matrix (Verified QEMU/Host vs User Physical Execution)
+- [docs/ASCENSION_6_0_VALIDATION_MATRIX.md](docs/ASCENSION_6_0_VALIDATION_MATRIX.md) & [docs/ASCENSION_5_0_VALIDATION_MATRIX.md](docs/ASCENSION_5_0_VALIDATION_MATRIX.md) — Complete Ascension `5.0`/`6.0` verification matrices & digests
+- [docs/LINUX_MICROVM_GPU_FEASIBILITY.md](docs/LINUX_MICROVM_GPU_FEASIBILITY.md) — MicroVM GPU copied shared-memory IPC prototype & vendor routing matrix
 - [docs/LIVE_USB_OPERATOR_GUIDE.md](docs/LIVE_USB_OPERATOR_GUIDE.md) — Safe USB flashing, Secure Boot check, 5 Limine profiles, `DRYFS_V1` diagnostics
 - [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md) & [docs/ASSET_LICENSING_AND_INVENTORY.md](docs/ASSET_LICENSING_AND_INVENTORY.md) — `Iso-Kernel Prism`, UI tokens, and `118`-SVG inventory
-- [docs/HARDWARE_INVENTORY_LENOVO_15IHU6.md](docs/HARDWARE_INVENTORY_LENOVO_15IHU6.md) & [docs/GPU_COMPATIBILITY_REPORT.md](docs/GPU_COMPATIBILITY_REPORT.md) — Read-only `82K1` audit & Iris Xe / RTX 3050 Ti validation
-- [docs/DRY_GLASS_2_1_REPORT.md](docs/DRY_GLASS_2_1_REPORT.md) & [docs/LINUX_COMPAT_RUNTIME_REPORT.md](docs/LINUX_COMPAT_RUNTIME_REPORT.md) — `DRY Glass 2.1` + `200%` DPI and `libdry-lx-compat` v2 reports
+- [docs/HARDWARE_INVENTORY_LENOVO_15IHU6.md](docs/HARDWARE_INVENTORY_LENOVO_15IHU6.md) & [docs/GPU_COMPATIBILITY_REPORT.md](docs/GPU_COMPATIBILITY_REPORT.md) — Read-only `82K1` audit & Intel/AMD/NVIDIA GPU compatibility reports
+- [docs/DRY_GLASS_2_1_REPORT.md](docs/DRY_GLASS_2_1_REPORT.md) & [docs/LINUX_COMPAT_RUNTIME_REPORT.md](docs/LINUX_COMPAT_RUNTIME_REPORT.md) — `DRY Glass 2.1` + `200%` DPI and decoupled `libdry-lx-compat` reports

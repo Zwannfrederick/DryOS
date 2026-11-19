@@ -17,9 +17,9 @@ use crate::usb::{
     USB_FLAG_READY,
 };
 use crate::{
-    rdtsc_user, sys_cap_revoke, sys_irq_ack, sys_irq_bind, sys_notify_create, sys_sysinfo,
-    sys_yield, ENOSPC, EPIPE, ETIMEDOUT, IRQF_ONESHOT, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK,
-    UserSysInfo,
+    rdtsc_user, sys_cap_revoke, sys_irq_ack, sys_irq_bind, sys_notify_create, sys_notify_wait,
+    sys_sysinfo, sys_yield, ENOSPC, EPIPE, ETIMEDOUT, IRQF_ONESHOT, IRQ_ACK_UNBIND,
+    IRQ_ACK_UNMASK, UserSysInfo,
 };
 
 const EIO: isize = -5;
@@ -37,6 +37,7 @@ const TRB_ADDRESS_DEV: u32 = 11;
 const TRB_CONFIG_EP: u32 = 12;
 const TRB_EVAL_CTX: u32 = 13;
 const TRB_RESET_EP: u32 = 14;
+const TRB_STOP_EP: u32 = 15;
 const TRB_SET_TR_DEQ: u32 = 16;
 
 const EVT_TRANSFER: u8 = 32;
@@ -372,6 +373,27 @@ impl XhciController {
         self.poll_raw_event()
     }
 
+    fn take_matching_event(
+        &mut self,
+        want_type: u8,
+        want_slot: u8,
+        want_dci: u8,
+    ) -> Option<XhciEvent> {
+        while let Some(ev) = self.poll_raw_event() {
+            if ev.trb_type == want_type
+                && (want_type == EVT_CMD_COMP
+                    || (ev.slot_id == want_slot && ev.ep_id == want_dci))
+            {
+                return Some(ev);
+            }
+            if ev.trb_type != EVT_PORT_CHG && self.queued_cnt < self.queued_evts.len() {
+                self.queued_evts[self.queued_cnt] = ev;
+                self.queued_cnt += 1;
+            }
+        }
+        None
+    }
+
     fn wait_event(
         &mut self,
         want_type: u8,
@@ -379,24 +401,28 @@ impl XhciController {
         want_dci: u8,
         timeout_ms: u64,
     ) -> Result<XhciEvent, isize> {
-        let deadline = rdtsc_user().saturating_add(timeout_ms * 1000 * self.tsc_mhz.max(1000));
+        let tsc_mhz = self.tsc_mhz.max(1000);
+        let deadline = rdtsc_user().saturating_add(timeout_ms * 1000 * tsc_mhz);
+        let wait_slice = tsc_mhz.saturating_mul(250);
         loop {
-            while let Some(ev) = self.poll_raw_event() {
-                if ev.trb_type == want_type
-                    && (want_type == EVT_CMD_COMP
-                        || (ev.slot_id == want_slot && ev.ep_id == want_dci))
-                {
+            for _ in 0..64 {
+                if let Some(ev) = self.take_matching_event(want_type, want_slot, want_dci) {
                     return Ok(ev);
                 }
-                if ev.trb_type != EVT_PORT_CHG && self.queued_cnt < self.queued_evts.len() {
-                    self.queued_evts[self.queued_cnt] = ev;
-                    self.queued_cnt += 1;
-                }
+                core::hint::spin_loop();
             }
             if rdtsc_user() >= deadline {
                 return Err(ETIMEDOUT);
             }
-            let _ = sys_yield();
+            if self.msi_bound && self.notif_cap != 0 {
+                self.ack_msi_if_bound();
+                if let Some(ev) = self.take_matching_event(want_type, want_slot, want_dci) {
+                    return Ok(ev);
+                }
+                let _ = sys_notify_wait(self.notif_cap, 0, wait_slice);
+            } else {
+                let _ = sys_yield();
+            }
         }
     }
 
@@ -638,6 +664,12 @@ impl XhciController {
     }
 
     pub fn recover_endpoint(&mut self, slot_id: u8, dci: u8, ep_addr: u8, ring_idx: usize) {
+        let _ = self.submit_cmd(
+            0,
+            0,
+            ((slot_id as u32) << 24) | ((dci as u32) << 16) | (TRB_STOP_EP << 10),
+            500,
+        );
         let _ = self.submit_cmd(
             0,
             0,

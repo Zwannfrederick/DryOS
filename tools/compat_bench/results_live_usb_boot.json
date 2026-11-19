@@ -1,6 +1,6 @@
 {
-  "image_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/kernel/build/dryos-ascension5-live-usb.img",
-  "image_sha256": "46c96b3c46e1af5f9ede408260be24bf86b805d92d11b6462a5dee8eed93fbfc",
+  "image_path": "kernel/build/dryos-ascension6-live-usb.img",
+  "image_sha256": "2c85fee6f4d79bee58cfe1d5cfdfbd32644268f4ee148d5e54214a67d1c1d1e0",
   "image_size_mib": 160,
   "esp_mib": 96,
   "module_count": 27,
@@ -11,11 +11,12 @@
   "part2_sectors": 128991,
   "gpt_verified": true,
   "dryfs_superblocks_verified": true,
-  "boot_transport": "qemu-xhci + usb-storage (RW) + usb-kbd + usb-mouse",
-  "esp_pre_sha256": "ef48e849ae35baa406b321c669072a7ff6561006216611586d975822cab3675d",
-  "esp_post_sha256": "ef48e849ae35baa406b321c669072a7ff6561006216611586d975822cab3675d",
+  "boot_transport": "intel-iommu (VT-d) + qemu-xhci + usb-storage (RW) + usb-kbd + usb-mouse",
+  "iommu_mode": "VTD_ACTIVE",
+  "esp_pre_sha256": "1199259f68217bff6fa7a2ffed57e78870a17550c2e53f81ca166b959b342cb8",
+  "esp_post_sha256": "1199259f68217bff6fa7a2ffed57e78870a17550c2e53f81ca166b959b342cb8",
   "esp_untouched": true,
   "leaked_frames": 0,
   "exit_code": 33,
-  "boot_to_shutdown_sec": 5.491
+  "boot_to_shutdown_sec": 6.603
 }

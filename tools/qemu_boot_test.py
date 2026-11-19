@@ -39,6 +39,7 @@ from qemu_p12_lx_compat_validators import run_p12_lx_compat_suite
 from qemu_p13_usb_persist_validators import run_p13_usb_persist_suite
 from qemu_p14_lx_net_validators import run_p14_lx_net_suite
 from qemu_p15_brand_icons_validators import run_p15_brand_icons_suite
+from qemu_p16_ascension6_validators import run_p16_ascension6_suite
 from qemu_user_validators import verify_userspace_lines
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -701,6 +702,7 @@ def main() -> None:
     parser.add_argument("--p13-only", action="store_true", help="Run only M2 xHCI USB HID/BOT Persist & Read-Only NVMe suite")
     parser.add_argument("--p14-only", action="store_true", help="Run only M3 Universal Linux Network (8139cp.c+mii.c) SLIRP suite")
     parser.add_argument("--p15-only", action="store_true", help="Run only DRY OS Brand Lockup, 21 App Icons & 200%% DPI suite")
+    parser.add_argument("--p16-only", action="store_true", help="Run only Ascension 6.0 Universal GPU & Hardening suite")
     parser.add_argument("--mem", default="512M", help="QEMU guest RAM size passed to positive SMP/boot runs (e.g. 512M, 4G)")
     args = parser.parse_args()
 
@@ -780,6 +782,11 @@ def main() -> None:
     if args.p15_only:
         n_p15 = run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
         print(f"\n[QEMU-TEST] ALL {n_p15} BRAND + ICONS VISUAL IDENTITY CHECKS PASSED.")
+        return
+
+    if args.p16_only:
+        n_p16 = run_p16_ascension6_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu)
+        print(f"\n[QEMU-TEST] ALL {n_p16} ASCENSION 6.0 UNIVERSAL GPU & HARDENING CHECKS PASSED.")
         return
 
     if args.p3_matrix:
@@ -872,14 +879,15 @@ def main() -> None:
     n_p13 = run_p13_usb_persist_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p14 = run_p14_lx_net_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
     n_p15 = run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+    n_p16 = run_p16_ascension6_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu)
 
     print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12 + n_p13 + n_p14 + n_p15} DETERMINISTIC QEMU CHECKS "
+        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12 + n_p13 + n_p14 + n_p15 + n_p16} DETERMINISTIC QEMU CHECKS "
         f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
         f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
         f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW + "
         f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1 + {n_p12} LX DRM + "
-        f"{n_p13} M2 USB/NVME + {n_p14} M3 LX NET + {n_p15} BRAND/ICONS) PASSED."
+        f"{n_p13} M2 USB/NVME + {n_p14} M3 LX NET + {n_p15} BRAND/ICONS + {n_p16} ASCENSION 6.0) PASSED."
     )
 
 

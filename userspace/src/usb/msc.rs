@@ -152,12 +152,15 @@ impl UsbMscBot {
             unsafe { write_volatile((cbw_va + i as u64) as *mut u8, byte) };
         }
 
-        let r_cbw = hc.sync_normal_trb(self.slot_id, self.out_dci, self.out_ring, cbw_pa, 31, 2000);
-        if r_cbw == Err(EPIPE) {
-            hc.recover_endpoint(self.slot_id, self.out_dci, self.ep_out_addr, self.out_ring);
+        let r_cbw = hc.sync_normal_trb(self.slot_id, self.out_dci, self.out_ring, cbw_pa, 31, 1000);
+        if let Err(e) = r_cbw {
+            if e == EPIPE {
+                hc.recover_endpoint(self.slot_id, self.out_dci, self.ep_out_addr, self.out_ring);
+            } else {
+                self.bot_mass_storage_reset(hc);
+            }
             return Err(EIO);
         }
-        r_cbw?;
 
         let mut data_err: Option<isize> = None;
         if data_len > 0 {
@@ -172,21 +175,24 @@ impl UsbMscBot {
                 ring,
                 hc.bulk_bounce_pa,
                 data_len,
-                4000,
+                1500,
             ) {
                 if e == EPIPE {
                     hc.recover_endpoint(self.slot_id, dci, addr, ring);
+                    data_err = Some(e);
+                } else {
+                    self.bot_mass_storage_reset(hc);
+                    return Err(EIO);
                 }
-                data_err = Some(e);
             }
         }
 
         let mut csw_res =
-            hc.sync_normal_trb(self.slot_id, self.in_dci, self.in_ring, csw_pa, 13, 2000);
+            hc.sync_normal_trb(self.slot_id, self.in_dci, self.in_ring, csw_pa, 13, 1000);
         if csw_res == Err(EPIPE) {
             hc.recover_endpoint(self.slot_id, self.in_dci, self.ep_in_addr, self.in_ring);
             csw_res =
-                hc.sync_normal_trb(self.slot_id, self.in_dci, self.in_ring, csw_pa, 13, 2000);
+                hc.sync_normal_trb(self.slot_id, self.in_dci, self.in_ring, csw_pa, 13, 1000);
         }
         if csw_res.is_err() {
             self.bot_mass_storage_reset(hc);

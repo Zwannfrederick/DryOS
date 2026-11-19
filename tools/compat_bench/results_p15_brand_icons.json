@@ -45,7 +45,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 9.925
+    "wall_time_sec": 9.574
   },
   "p15b": {
     "resolution": "1024x768",
@@ -60,7 +60,7 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 4.408
+    "wall_time_sec": 4.41
   },
   "p15c": {
     "resolution": "1920x1080",
@@ -75,6 +75,6 @@
         "colors": 32
       }
     },
-    "wall_time_sec": 5.291
+    "wall_time_sec": 5.562
   }
 }

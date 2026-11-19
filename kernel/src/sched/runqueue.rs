@@ -83,7 +83,21 @@ impl StaticRunQueue {
                     Err(actual) => pos = actual,
                 }
             } else if diff < 0 {
-                return false;
+                // Distinguish a genuinely full ring (`pos - dequeue_pos >= RQ_RING_CAP`) from a
+                // transient Vyukov lap collision where an earlier consumer won `dequeue_pos` CAS
+                // (`pos - RQ_RING_CAP`) and was host-preempted before storing `cell.seq = pos`.
+                let cur_enq = self.enqueue_pos.load(Ordering::Acquire);
+                if cur_enq != pos {
+                    pos = cur_enq;
+                    core::hint::spin_loop();
+                    continue;
+                }
+                let deq = self.dequeue_pos.load(Ordering::Acquire);
+                if (pos as isize).wrapping_sub(deq as isize) >= RQ_RING_CAP as isize {
+                    return false;
+                }
+                pos = self.enqueue_pos.load(Ordering::Relaxed);
+                core::hint::spin_loop();
             } else {
                 pos = self.enqueue_pos.load(Ordering::Relaxed);
                 core::hint::spin_loop();

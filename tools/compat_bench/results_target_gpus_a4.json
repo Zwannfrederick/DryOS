@@ -62,6 +62,7 @@
             "driver": "intel_i915_tgl",
             "pci_id": "8086:9a49",
             "status": "profile_audit_only",
+            "backend": "linux-microvm",
             "runtime_island": "planned-i915-tgl",
             "compartment_id": "",
             "capabilities": [
@@ -73,6 +74,28 @@
             ]
           }
         ]
+      }
+    },
+    "onboarding": {
+      "driver": "intel_i915_tgl",
+      "backend": "linux-microvm",
+      "catalog_status": "profile_audit_only",
+      "hardware_present_assumed": false,
+      "stages_total": 11,
+      "stages_passed": 4,
+      "fully_onboarded": false,
+      "stage_states": {
+        "01_DETECT": "PASS",
+        "02_MATCH": "PASS",
+        "03_COMPAT_ASSESS": "PASS",
+        "04_LICENSE_ISOLATION": "PASS",
+        "05_SOURCE_PIN_SHA256": "BLOCKED_PROFILE_ONLY",
+        "06_FIRMWARE_VERIFY": "BLOCKED_FW_RUNTIME",
+        "07_BUILD_CACHE": "BLOCKED_PROFILE_ONLY",
+        "08_CAP_MINT": "BLOCKED_PROFILE_ONLY",
+        "09_DMA_IOMMU_GATE": "BLOCKED_HW_REQUIRED",
+        "10_PROBE_MODESET": "BLOCKED_HW_REQUIRED",
+        "11_FAULT_ROLLBACK": "BLOCKED_PROFILE_ONLY"
       }
     },
     "tgl_firmware_count": 15,
@@ -117,6 +140,54 @@
       "GuC (`tgl_guc_70.1.1`) & DMC (`tgl_dmc_ver2_12`) Blob Loader + Zstd Streamer",
       "Hardware Iris Xe Display Engine MMIO bring-up on bare metal"
     ]
+  },
+  "amdgpu_portability_profile": {
+    "pci_match": {
+      "query": "1002:73df",
+      "matched": true,
+      "matches": [
+        {
+          "driver": "amdgpu_generic",
+          "pci_id": "1002:73df",
+          "status": "portability_profile_only",
+          "backend": "linux-microvm",
+          "runtime_island": "planned-amdgpu",
+          "compartment_id": "",
+          "capabilities": [
+            "pci_mmio_64bit_gt4g",
+            "iommu_vendor_neutral_fail_closed",
+            "msi_irq",
+            "amd_ucode_firmware",
+            "gem_ttm_shmem"
+          ]
+        }
+      ]
+    },
+    "onboarding": {
+      "driver": "amdgpu_generic",
+      "backend": "linux-microvm",
+      "catalog_status": "portability_profile_only",
+      "hardware_present_assumed": false,
+      "stages_total": 11,
+      "stages_passed": 4,
+      "fully_onboarded": false,
+      "stage_states": {
+        "01_DETECT": "PASS",
+        "02_MATCH": "PASS",
+        "03_COMPAT_ASSESS": "PASS",
+        "04_LICENSE_ISOLATION": "PASS",
+        "05_SOURCE_PIN_SHA256": "BLOCKED_PROFILE_ONLY",
+        "06_FIRMWARE_VERIFY": "BLOCKED_FW_RUNTIME",
+        "07_BUILD_CACHE": "BLOCKED_PROFILE_ONLY",
+        "08_CAP_MINT": "BLOCKED_PROFILE_ONLY",
+        "09_DMA_IOMMU_GATE": "BLOCKED_HW_REQUIRED",
+        "10_PROBE_MODESET": "BLOCKED_HW_REQUIRED",
+        "11_FAULT_ROLLBACK": "BLOCKED_PROFILE_ONLY"
+      }
+    },
+    "hardware_present_assumed": false,
+    "execution_status": "architecture_portability_profile_only",
+    "live_modeset_verified_on_dryos": false
   },
   "nvidia_rtx_3050_ti_10de_25a0": {
     "pci": {
@@ -193,6 +264,7 @@
             "driver": "nvidia_open_ga107",
             "pci_id": "10de:25a0",
             "status": "shim_compile_only",
+            "backend": "linux-microvm",
             "runtime_island": "planned-nv-open-ga107",
             "compartment_id": "",
             "capabilities": [
@@ -206,24 +278,29 @@
         ]
       }
     },
-    "firmware_615": [
-      {
-        "path": "/lib/firmware/nvidia/615.78.08/gsp_ga10x.bin",
-        "bytes": 27043992
-      },
-      {
-        "path": "/lib/firmware/nvidia/615.78.08/gsp_tu10x.bin",
-        "bytes": 22901632
-      },
-      {
-        "path": "/lib/firmware/nvidia/615.78.08/ucodes_ga10x.bin",
-        "bytes": 58215936
-      },
-      {
-        "path": "/lib/firmware/nvidia/615.78.08/ucodes_tu10x.bin",
-        "bytes": 8837632
+    "onboarding": {
+      "driver": "nvidia_open_ga107",
+      "backend": "linux-microvm",
+      "catalog_status": "shim_compile_only",
+      "hardware_present_assumed": false,
+      "stages_total": 11,
+      "stages_passed": 4,
+      "fully_onboarded": false,
+      "stage_states": {
+        "01_DETECT": "PASS",
+        "02_MATCH": "PASS",
+        "03_COMPAT_ASSESS": "PASS",
+        "04_LICENSE_ISOLATION": "PASS",
+        "05_SOURCE_PIN_SHA256": "BLOCKED_PROFILE_ONLY",
+        "06_FIRMWARE_VERIFY": "BLOCKED_FW_RUNTIME",
+        "07_BUILD_CACHE": "BLOCKED_PROFILE_ONLY",
+        "08_CAP_MINT": "BLOCKED_PROFILE_ONLY",
+        "09_DMA_IOMMU_GATE": "BLOCKED_HW_REQUIRED",
+        "10_PROBE_MODESET": "BLOCKED_HW_REQUIRED",
+        "11_FAULT_ROLLBACK": "BLOCKED_PROFILE_ONLY"
       }
-    ],
+    },
+    "firmware_615": [],
     "firmware_ga107_gsp": [
       {
         "path": "/lib/firmware/nvidia/ga107/gsp/booter_load-535.113.01.bin.zst",
@@ -261,8 +338,41 @@
     "os_interface_shim": {
       "shim_source": "drivers/lx-nv-open-shim/nv_os_shim_check.c",
       "fallback_build_ok": true,
-      "nvidia_header_dir": "/usr/src/nvidia-615.78.08/kernel-open/common/inc",
-      "nvidia_header_build_ok": true
+      "nvidia_header_dir": "/usr/src/nvidia-620.70.06/kernel-open/common/inc",
+      "nvidia_header_build_ok": true,
+      "classifications": {
+        "total_classified": 22,
+        "counts": {
+          "NV_SHIM_PARTIAL": 4,
+          "NV_SHIM_STUB_ENOSYS": 9,
+          "NV_SHIM_COMPILE_ONLY": 5,
+          "NV_SHIM_IMPLEMENTED": 4
+        },
+        "symbols": {
+          "os_alloc_mem": "NV_SHIM_PARTIAL",
+          "os_free_mem": "NV_SHIM_STUB_ENOSYS",
+          "os_get_monotonic_time_ns": "NV_SHIM_COMPILE_ONLY",
+          "os_delay": "NV_SHIM_STUB_ENOSYS",
+          "os_delay_us": "NV_SHIM_STUB_ENOSYS",
+          "os_mem_copy": "NV_SHIM_IMPLEMENTED",
+          "os_mem_set": "NV_SHIM_IMPLEMENTED",
+          "os_mem_cmp": "NV_SHIM_IMPLEMENTED",
+          "os_pci_read_byte": "NV_SHIM_PARTIAL",
+          "os_pci_read_word": "NV_SHIM_PARTIAL",
+          "os_pci_read_dword": "NV_SHIM_PARTIAL",
+          "os_map_kernel_space": "NV_SHIM_COMPILE_ONLY",
+          "os_unmap_kernel_space": "NV_SHIM_STUB_ENOSYS",
+          "os_alloc_spinlock": "NV_SHIM_STUB_ENOSYS",
+          "os_free_spinlock": "NV_SHIM_STUB_ENOSYS",
+          "os_acquire_spinlock": "NV_SHIM_COMPILE_ONLY",
+          "os_release_spinlock": "NV_SHIM_COMPILE_ONLY",
+          "os_alloc_semaphore": "NV_SHIM_COMPILE_ONLY",
+          "os_free_semaphore": "NV_SHIM_STUB_ENOSYS",
+          "os_acquire_semaphore": "NV_SHIM_STUB_ENOSYS",
+          "os_release_semaphore": "NV_SHIM_STUB_ENOSYS",
+          "os_get_is_openrm": "NV_SHIM_IMPLEMENTED"
+        }
+      }
     },
     "execution_status": "read_only_host_inventory_and_os_interface_compile_verified",
     "live_modeset_verified_on_dryos": false,

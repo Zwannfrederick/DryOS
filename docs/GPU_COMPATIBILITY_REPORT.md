@@ -77,3 +77,12 @@ Measurements captured read-only from the Lenovo `82K1` host via [`audit_gpu_stac
 - **Gate 5 (Physical Live USB Boot on Lenovo `82K1` via xHCI `00:14.0`, `8250.nr_uarts=0`, GOP Desktop):** **`READY FOR USER PHYSICAL EXECUTION`** (not executed by agent).
 - **Gate 6 (Physical `VT-d` `DMAR` + `00:02.0` `8086:9a49` `preserve_active_gop` Verification):** **`READY FOR USER PHYSICAL EXECUTION`** (not executed by agent).
 - **Gate 7 (Physical Hybrid Optimus `01:00.0` `10de:25a0` `RTD3 D3cold` / GSP WPR2 / PRIME Check):** **`READY FOR USER PHYSICAL EXECUTION`** (native `i915`/`xe`/OpenRM modeset remains `BLOCKED` pending GEM/TTM + firmware loader + GSP RPC).
+
+---
+
+## 6. Ascension 6.0 Upgrades (`--p16-only` PASS)
+
+- **Fail-Closed `IommuOps` & ACPI `IVRS`:** `kernel/src/iommu/{ops,ivrs,vtd}.rs` enforces fail-closed DMA denial (`--p16-only` `p16a`: `no_iommu_rc=35`, `code=106`) unless real `VT-d` is active (`live_usb=1` always forbids test bypass). `amd-iommu` (`IVRS`) is detected and classified honestly as `FailClosed` (`amdgpu_generic` tracked at `4/11 portability_profile_only` stages in `COMPAT_CATALOG.json`).
+- **Scatter-Gather DMA (`IOVA != HPA` `0xC000_0000`) & 2 MiB `WC`/`UC` MMIO (`kernel/src/dma.rs`, `SYS_DMA_CTL`):** Verified in expanded `--p8-only` along with `DEV_MAP_OP_CFG_RW`, `DEV_MAP_OP_ENUM_MINT`, and `SurfaceBufferSet`.
+- **Vendor-Neutral Ring-3 `dry-gpu-svc` (`userspace/src/gpu_svc/*`):** `4` backend traits (`UefiGop`, `VirtioGpuNative`, `LxCompatDrm`, `LinuxMicroVm`), `DisplayHandoverMachine` (`0x7f`), ordered fences, `SyntheticGpuDriver` (`synth=2`, `rollbacks=3`, `broker_data_path=0`), `dry-fw-store` SHA-256 verification, and WM `KMS_ACTIVE`/`GOP_ACTIVE` decoupling (`p16b`: `leaked_frames=0`).
+- **NVIDIA OpenRM Shim Audit & VirtIO-GPU 3D / MicroVM Prototype (`p16c`, `p16d`):** `drivers/lx-nv-open-shim/nv_os_shim_check.c` audits all `22` defined `os_*` symbols (`4` IMPLEMENTED, `4` PARTIAL, `9` STUB_ENOSYS, `5` COMPILE_ONLY out of `162` APIs; zero fake `NV_OK` stubs). `userspace/src/virtio_gpu.rs` wires `VIRTIO_GPU_F_VIRGL` + `GET_CAPSET_INFO`/`GET_CAPSET` discovery (`HOST_VIRGL_UNAVAILABLE` on current host QEMU), and `tools/microvm_gpu_proto/proto_bench.py` benchmarks `SHARED_MEMORY_IPC_COPIED` (`zero_copy_dmabuf=False`, `256x256` tile `p50=218.08 us`, `1,045.51 MiB/s`; see [`LINUX_MICROVM_GPU_FEASIBILITY.md`](LINUX_MICROVM_GPU_FEASIBILITY.md) & [`ASCENSION_6_0_VALIDATION_MATRIX.md`](ASCENSION_6_0_VALIDATION_MATRIX.md)).

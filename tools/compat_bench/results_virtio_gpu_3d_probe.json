@@ -1,7 +1,7 @@
 {
   "status": "HOST_VIRGL_UNAVAILABLE",
   "qemu_binary": "/usr/bin/qemu-system-x86_64",
-  "virtio_gpu_pci_available": false,
+  "virtio_gpu_pci_available": true,
   "virtio_gpu_gl_pci_available": false,
   "virtio_gpu_pci_virgl_prop": false,
   "virtio_gpu_gl_props": [],

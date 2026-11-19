@@ -38,7 +38,7 @@ from qemu_log_validators import _parse_kv_ints  # noqa: E402
 from qemu_p2_validators import _DesktopQmpClient  # noqa: E402
 from qemu_p13_usb_persist_validators import _format_dryfs_v1_bytes, _write_gpt_image  # noqa: E402
 
-DEFAULT_IMG = BUILD_DIR / "dryos-ascension5-live-usb.img"
+DEFAULT_IMG = BUILD_DIR / "dryos-ascension6-live-usb.img"
 OUT_JSON = ROOT / "tools" / "compat_bench" / "results_live_usb_boot.json"
 SECTOR_BYTES = 512
 SECTORS_PER_MIB = (1024 * 1024) // SECTOR_BYTES
@@ -69,11 +69,11 @@ def _sha256_prefix(path: pathlib.Path, byte_len: int) -> str:
 def _limine_conf_text() -> str:
     mod_lines = "\n".join(f"    module_path: boot():/boot/{dst}" for _, dst in USERSPACE_MODS)
     entries = (
-        ("DRY OS v0.5.0 - Live Desktop (1280x800, USB Persist RW, Default)", "1280x800x32", "live_usb=1 desktop4=1 storage=rw"),
-        ("DRY OS v0.5.0 - Live FHD Desktop (1920x1080, USB Persist RW)", "1920x1080x32", "live_usb=1 desktop4=1 storage=rw"),
-        ("DRY OS v0.5.0 - Safe UEFI GOP Desktop (Read-Only, No GPU Island)", "1280x800x32", "live_usb=1 desktop=1 storage=ro"),
-        ("DRY OS v0.5.0 - Diagnostic & Hardware Self-Test (Read-Only)", "1280x800x32", "console=com1 diag_selftest=1 desktop4=1 storage=ro"),
-        ("DRY OS v0.5.0 - Linux v6.18 Driver Island Audit (Read-Only)", "1280x800x32", "console=com1 desktop4=1 lx_drm=1 storage=ro"),
+        ("DRY OS v0.6.0 - Live Desktop (1280x800, USB Persist RW, Default)", "1280x800x32", "live_usb=1 desktop4=1 storage=rw"),
+        ("DRY OS v0.6.0 - Live FHD Desktop (1920x1080, USB Persist RW)", "1920x1080x32", "live_usb=1 desktop4=1 storage=rw"),
+        ("DRY OS v0.6.0 - Safe UEFI GOP Desktop (Read-Only, No GPU Island)", "1280x800x32", "live_usb=1 desktop=1 storage=ro"),
+        ("DRY OS v0.6.0 - Diagnostic & Hardware Self-Test (Read-Only)", "1280x800x32", "console=com1 diag_selftest=1 desktop4=1 storage=ro"),
+        ("DRY OS v0.6.0 - Linux v6.18 Driver Island Audit (Read-Only)", "1280x800x32", "console=com1 desktop4=1 lx_drm=1 storage=ro"),
     )
     # Intentionally omit `serial: yes` so Limine never polls COM1 (0x3F8) on UART-less laptops.
     blocks = ["timeout: 2", ""]
@@ -316,6 +316,7 @@ def verify_usb_xhci_boot(img_path: pathlib.Path, meta: dict[str, Any]) -> dict[s
         "-drive", f"if=pflash,format=raw,file={vars_copy}",
         "-vga", "std",
         "-global", "VGA.vgamem_mb=32",
+        "-device", "intel-iommu,intremap=off,caching-mode=on",
         "-device", "qemu-xhci,id=xhci0",
         "-drive", f"if=none,id=usbdisk,format=raw,file={run_img}",
         "-device", "usb-storage,id=usbmsc0,bus=xhci0.0,drive=usbdisk,bootindex=1",
@@ -364,6 +365,7 @@ def verify_usb_xhci_boot(img_path: pathlib.Path, meta: dict[str, Any]) -> dict[s
     qmp: _DesktopQmpClient | None = None
     try:
         wait_for("[DRY-LIVEBOOT]", timeout_s=35.0)
+        wait_for("[DRY-IOMMU] VTD_ACTIVE", timeout_s=20.0)
         wait_for("[DRY-INIT] Mounted /persist (DRYFS_v1)", timeout_s=30.0)
         wait_for("[DRY-WM-SCALABILITY] pass=1", timeout_s=30.0)
         wait_for("[DRY-SHELL] Interactive shell ready", timeout_s=20.0)
@@ -394,7 +396,8 @@ def verify_usb_xhci_boot(img_path: pathlib.Path, meta: dict[str, Any]) -> dict[s
 
         res = {
             **meta,
-            "boot_transport": "qemu-xhci + usb-storage (RW) + usb-kbd + usb-mouse",
+            "boot_transport": "intel-iommu (VT-d) + qemu-xhci + usb-storage (RW) + usb-kbd + usb-mouse",
+            "iommu_mode": "VTD_ACTIVE",
             "esp_pre_sha256": pre_sha,
             "esp_post_sha256": post_sha,
             "esp_untouched": True,

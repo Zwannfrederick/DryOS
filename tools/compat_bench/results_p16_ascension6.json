@@ -1,0 +1,36 @@
+{
+  "milestone": "Ascension-6.0",
+  "p16a": {
+    "no_iommu_rc": 35,
+    "no_iommu_wall_s": 3.359,
+    "ivrs_rc": 33,
+    "ivrs_wall_s": 5.336,
+    "wall_time_sec": 8.815
+  },
+  "p16b": {
+    "backends_verified": 4,
+    "handover_mask": "0x7f",
+    "broker_in_data_path": false,
+    "leaked_frames": 0,
+    "wall_time_sec": 4.224
+  },
+  "p16c": {
+    "bochs_hits_in_libdry": 0,
+    "onboarding": {
+      "drm_bochs": "11/11",
+      "virtio_gpu_native": "11/11",
+      "synthetic_gpu": "11/11",
+      "intel_i915_tgl": "4/11 (profile_audit_only)",
+      "amdgpu_generic": "4/11 (portability_profile_only)",
+      "nvidia_open_ga107": "4/11 (shim_compile_only)"
+    },
+    "wall_time_sec": 1.754
+  },
+  "p16d": {
+    "microvm_transport_mode": "SHARED_MEMORY_IPC_COPIED",
+    "microvm_zero_copy_dmabuf": false,
+    "microvm_tile_p50_us": 218.08,
+    "virtio_3d_host_status": "HOST_VIRGL_UNAVAILABLE",
+    "wall_time_sec": 1.672
+  }
+}
