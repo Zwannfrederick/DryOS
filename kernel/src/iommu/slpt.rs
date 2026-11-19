@@ -5,6 +5,7 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::iommu::dmar::{DrhdUnit, ParsedDmar};
+use crate::iommu::ops::IommuPerms;
 use crate::pci::MAX_MANAGED_PCI_DEVS;
 use crate::pmm::{
     alloc_pages, free_pages, phys_to_hhdm, AllocFlags, FrameHandle, PageOrder, PAGE_SIZE,
@@ -157,21 +158,37 @@ fn alloc_domain_pt_frame(dom: &mut DomainState, coherent: bool) -> Result<FrameH
     Ok(fh)
 }
 
-pub(super) fn map_slpt_4k(
+pub(super) fn map_slpt_4k_iova(
     dom: &mut DomainState,
     coherent: bool,
+    iova: u64,
     dma_phys: u64,
+    perms: IommuPerms,
     levels_4: bool,
 ) -> Result<(), ()> {
     let root_h = dom.sl_root.ok_or(())?;
-    let mut table_phys = root_h.phys_addr();
-    let max_addr = if levels_4 { 1u64 << 48 } else { 1u64 << 39 };
-    if dma_phys >= max_addr || (dma_phys & ((PAGE_SIZE as u64) - 1)) != 0 {
+    let mut leaf_perm = 0u64;
+    if perms.contains(IommuPerms::READ) {
+        leaf_perm |= SLPT_R;
+    }
+    if perms.contains(IommuPerms::WRITE) {
+        leaf_perm |= SLPT_W;
+    }
+    if leaf_perm == 0 {
         return Err(());
     }
+    let max_addr = if levels_4 { 1u64 << 48 } else { 1u64 << 39 };
+    if iova >= max_addr
+        || dma_phys >= max_addr
+        || (iova & ((PAGE_SIZE as u64) - 1)) != 0
+        || (dma_phys & ((PAGE_SIZE as u64) - 1)) != 0
+    {
+        return Err(());
+    }
+    let mut table_phys = root_h.phys_addr();
     let start_level = if levels_4 { 3 } else { 2 };
     for lvl in (1..=start_level).rev() {
-        let idx = ((dma_phys >> (12 + lvl * 9)) & 0x1ff) as usize;
+        let idx = ((iova >> (12 + lvl * 9)) & 0x1ff) as usize;
         // SAFETY: `table_phys` belongs to an allocated `4 KiB` HHDM SLPT node in `dom`.
         let entry_ptr = unsafe { (phys_to_hhdm(table_phys) as *mut u64).add(idx) };
         let cur = unsafe { read_volatile(entry_ptr) };
@@ -185,19 +202,28 @@ pub(super) fn map_slpt_4k(
             next_pa
         };
     }
-    let leaf_idx = ((dma_phys >> 12) & 0x1ff) as usize;
+    let leaf_idx = ((iova >> 12) & 0x1ff) as usize;
     // SAFETY: Leaf index inside valid allocated PT page.
     let leaf_ptr = unsafe { (phys_to_hhdm(table_phys) as *mut u64).add(leaf_idx) };
-    unsafe { write_volatile(leaf_ptr, (dma_phys & SLPT_PHYS_MASK) | SLPT_R | SLPT_W) };
+    unsafe { write_volatile(leaf_ptr, (dma_phys & SLPT_PHYS_MASK) | leaf_perm) };
     flush_descriptor_cacheline(coherent, leaf_ptr as *const u8);
     Ok(())
 }
 
-pub(super) fn clear_slpt_4k(coherent: bool, root_phys: u64, dma_phys: u64, levels_4: bool) {
+pub(super) fn map_slpt_4k(
+    dom: &mut DomainState,
+    coherent: bool,
+    dma_phys: u64,
+    levels_4: bool,
+) -> Result<(), ()> {
+    map_slpt_4k_iova(dom, coherent, dma_phys, dma_phys, IommuPerms::RW, levels_4)
+}
+
+pub(super) fn clear_slpt_4k(coherent: bool, root_phys: u64, iova: u64, levels_4: bool) {
     let mut table_phys = root_phys;
     let start_level = if levels_4 { 3 } else { 2 };
     for lvl in (1..=start_level).rev() {
-        let idx = ((dma_phys >> (12 + lvl * 9)) & 0x1ff) as usize;
+        let idx = ((iova >> (12 + lvl * 9)) & 0x1ff) as usize;
         // SAFETY: `table_phys` is a valid mapped SLPT frame.
         let cur = unsafe { read_volatile((phys_to_hhdm(table_phys) as *const u64).add(idx)) };
         if (cur & (SLPT_R | SLPT_W)) == 0 {
@@ -205,7 +231,7 @@ pub(super) fn clear_slpt_4k(coherent: bool, root_phys: u64, dma_phys: u64, level
         }
         table_phys = cur & SLPT_PHYS_MASK;
     }
-    let leaf_idx = ((dma_phys >> 12) & 0x1ff) as usize;
+    let leaf_idx = ((iova >> 12) & 0x1ff) as usize;
     // SAFETY: Clearing leaf translation entry on mapped PT page.
     let leaf_ptr = unsafe { (phys_to_hhdm(table_phys) as *mut u64).add(leaf_idx) };
     unsafe { write_volatile(leaf_ptr, 0) };

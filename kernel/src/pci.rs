@@ -16,15 +16,10 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::{irq_restore, irq_save_cli};
 use crate::cspace::cap::{CSpaceId, CapError, CapObjectKind, CapPtr};
-use crate::cspace::objects::{
-    cspace_alloc_frame, cspace_vspace_map_2m, cspace_vspace_map_4k, cspace_vspace_unmap_2m,
-    cspace_vspace_unmap_4k,
-};
-use crate::cspace::revoke::{attach_cap_mapping_range_record, cspace_destroy_object};
+use crate::cspace::revoke::attach_cap_mapping_range_record;
 use crate::cspace::{insert_root_cap, split_global_slot, with_pinned_cap};
-use crate::iommu::{attach_device_domain, detach_and_scrub_domain, is_dma_permitted, is_hw_enforcing, map_dma_range, unmap_dma_range};
+use crate::iommu::{attach_device_domain, detach_and_scrub_domain, is_dma_permitted, is_hw_enforcing};
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci_bar::{
     DEV_MAP_OP_CFG_RW, DEV_MAP_OP_ENUM_MINT, DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW,
@@ -33,10 +28,7 @@ use crate::pci_bar::{
     PCI_DEV_FLAG_FLR, PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_PCIE, PCI_DEV_FLAG_REBAR,
     PCI_DEV_FLAG_VIRTIO,
 };
-use crate::pmm::{
-    adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
-};
-use crate::proc::process_vspace_cap;
+use crate::pmm::PAGE_SIZE;
 use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLabel};
 use crate::serial_println;
 use crate::uaccess::{copy_to_user, SysError};
@@ -72,18 +64,13 @@ pub fn pci_cfg_probe_all_bars_raw(bus: u8, dev: u8, func: u8) -> ([u32; 6], [u32
     probe_all_bars_raw(bus, dev, func)
 }
 
-const MAX_DMA_PINS_PER_DEV: usize = 32;
-const DMA_ALLOC_FLAG_2M: u64 = 1;
-
 struct PciVirtioSlot {
     present: AtomicBool,
     generation: AtomicU32,
-    dma_lock: AtomicBool,
     owner_cspace: AtomicU16,
     dma_denied_ops: AtomicU64,
     quiesce_count: AtomicU64,
     dev_inner: UnsafeCell<ValidatedVirtioPci>,
-    pinned_frames: UnsafeCell<[Option<FrameHandle>; MAX_DMA_PINS_PER_DEV]>,
 }
 
 impl PciVirtioSlot {
@@ -91,41 +78,27 @@ impl PciVirtioSlot {
         Self {
             present: AtomicBool::new(false),
             generation: AtomicU32::new(1),
-            dma_lock: AtomicBool::new(false),
             owner_cspace: AtomicU16::new(0),
             dma_denied_ops: AtomicU64::new(0),
             quiesce_count: AtomicU64::new(0),
             dev_inner: UnsafeCell::new(ValidatedVirtioPci::EMPTY),
-            pinned_frames: UnsafeCell::new([None; MAX_DMA_PINS_PER_DEV]),
         }
     }
 }
 
-// SAFETY: `dev_inner` is written once on BSP before `present = true`; `pinned_frames` is mutated under `dma_lock` + `CLI`.
+// SAFETY: `dev_inner` is written once on BSP before `present = true`; atomics synchronize state.
 unsafe impl Sync for PciVirtioSlot {}
 
 static PCI_DEVS: [PciVirtioSlot; MAX_MANAGED_PCI_DEVS] =
     [const { PciVirtioSlot::new() }; MAX_MANAGED_PCI_DEVS];
 
 #[inline]
-fn with_dma_lock<R>(
-    dev_idx: usize,
-    f: impl FnOnce(&PciVirtioSlot, &mut [Option<FrameHandle>; MAX_DMA_PINS_PER_DEV]) -> R,
-) -> R {
+pub(crate) fn reset_pci_slot_owner(dev_idx: usize, expected_cspace: CSpaceId) {
     let slot = &PCI_DEVS[dev_idx];
-    let saved_if = irq_save_cli();
-    while slot
-        .dma_lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+    if slot.owner_cspace.load(Ordering::Acquire) == expected_cspace {
+        slot.owner_cspace.store(0, Ordering::Release);
+        slot.quiesce_count.fetch_add(1, Ordering::Relaxed);
     }
-    // SAFETY: Exclusive `dma_lock` + `CLI` held.
-    let out = f(slot, unsafe { &mut *slot.pinned_frames.get() });
-    slot.dma_lock.store(false, Ordering::Release);
-    irq_restore(saved_if);
-    out
 }
 
 #[inline]
@@ -435,7 +408,7 @@ pub(crate) fn for_each_kernel_shadow_mmio_page(mut f: impl FnMut(u64, u64)) {
     }
 }
 
-pub(super) fn claim_pci_slot(
+pub(crate) fn claim_pci_slot(
     dev_idx: usize,
     cspace_id: CSpaceId,
     vdev: &ValidatedVirtioPci,
@@ -469,7 +442,7 @@ pub(crate) fn claim_pci_slot_for_irq(
     claim_pci_slot(dev_idx, cspace_id, vdev).map(|_| ())
 }
 
-pub(super) fn release_claimed_pci_slot(dev_idx: usize, claimed_new: bool) {
+pub(crate) fn release_claimed_pci_slot(dev_idx: usize, claimed_new: bool) {
     if claimed_new {
         detach_and_scrub_domain(dev_idx);
         PCI_DEVS[dev_idx].owner_cspace.store(0, Ordering::Release);
@@ -513,18 +486,7 @@ fn quiesce_slot_for_cspace(dev_idx: usize, cspace_id: CSpaceId) {
             let _ = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
         }
     }
-    with_dma_lock(dev_idx, |slot, pins| {
-        if slot.owner_cspace.load(Ordering::Acquire) == cspace_id {
-            detach_and_scrub_domain(dev_idx);
-            for pin in pins.iter_mut() {
-                if let Some(fh) = pin.take() {
-                    let _ = adjust_frame_iommu_pin(fh, -1);
-                }
-            }
-            slot.owner_cspace.store(0, Ordering::Release);
-            slot.quiesce_count.fetch_add(1, Ordering::Relaxed);
-        }
-    });
+    crate::dma::quiesce_dma_for_slot(dev_idx, cspace_id);
 }
 
 /// Hardware-safe PCI DMA teardown (`R-03` & `INV-CAP-08`): clears `PCI Command.BME = 0` + masks legacy
@@ -546,25 +508,9 @@ pub fn on_pci_cap_revoked(obj_id: u32, expected_gen: u32, global_slot: u32) {
     }
 }
 
-fn record_pci_denied_first_or(dev_idx: Option<usize>) {
+pub(crate) fn record_pci_denied_first_or(dev_idx: Option<usize>) {
     let idx = dev_idx.filter(|&i| i < MAX_MANAGED_PCI_DEVS).unwrap_or(0);
     PCI_DEVS[idx].dma_denied_ops.fetch_add(1, Ordering::Relaxed);
-}
-
-fn unmap_and_destroy_dma_frame(
-    cspace_id: CSpaceId,
-    subj_label: SecLabel,
-    vs_cap: CapPtr,
-    frame_cap: CapPtr,
-    user_vaddr: u64,
-    is_2m: bool,
-) {
-    if is_2m {
-        let _ = cspace_vspace_unmap_2m(cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0);
-    } else {
-        let _ = cspace_vspace_unmap_4k(cspace_id, subj_label, vs_cap, frame_cap, user_vaddr, 0);
-    }
-    let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
 }
 
 /// `SYS_DEV_MAP` (`29`): Map the authorized VirtIO MMIO BAR (`op=0`), query sanitized BAR metadata
@@ -604,9 +550,6 @@ pub fn sys_dev_map(
     if op == DEV_MAP_OP_ENUM_MINT {
         return pci_window::sys_dev_enum_mint(cspace_id, subj_label, pci_cap_raw, user_vaddr_or_op);
     }
-    if op == DEV_MAP_OP_MAP_WINDOW_2M {
-        return Err(SysError::NoSys);
-    }
     let Some((vs_gen, _, _)) = inspect_vspace_live(vspace_id) else {
         return Err(SysError::Inval);
     };
@@ -614,6 +557,19 @@ pub fn sys_dev_map(
         id: vspace_id,
         generation: vs_gen,
     };
+    if op == DEV_MAP_OP_MAP_WINDOW_2M {
+        return Ok((
+            pci_window::sys_dev_map_window_2m(
+                cspace_id,
+                subj_label,
+                vs_h,
+                pci_cap_raw,
+                user_vaddr_or_op & !DEV_MAP_OP_MASK,
+                arg2,
+            )?,
+            0,
+        ));
+    }
     if op == DEV_MAP_OP_MAP_WINDOW {
         return Ok((
             pci_window::sys_dev_map_window(
@@ -736,133 +692,4 @@ pub fn sys_dev_map(
         return Err(fault);
     }
     Ok((vdev.num_pages as isize, 0))
-}
-
-/// `SYS_DMA_ALLOC` (`30`): Allocate a pinned `4 KiB` or `2 MiB` (`user_vaddr & DMA_ALLOC_FLAG_2M`)
-/// `DEVICE_DMA | NO_DELEGATE` frame for an authorized `RootSystem` driver holding `pci_cap`,
-/// map it (`USER_RW`), write physical DMA address to `paddr_out_ptr`, and return `(0, frame_cap.0)`.
-pub fn sys_dma_alloc(
-    pid: u32,
-    cspace_id: CSpaceId,
-    subj_label: SecLabel,
-    pci_cap_raw: u64,
-    user_vaddr: u64,
-    paddr_out_ptr: u64,
-) -> Result<(isize, u64), SysError> {
-    if subj_label.domain != SecDomain::RootSystem
-        || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
-    {
-        record_pci_denied_first_or(None);
-        return Err(SysError::Perm);
-    }
-    let is_2m = (user_vaddr & DMA_ALLOC_FLAG_2M) != 0;
-    let map_vaddr = user_vaddr & !DMA_ALLOC_FLAG_2M;
-    let align_mask = if is_2m {
-        (HUGE_2M_FRAMES as u64 * PAGE_SIZE as u64) - 1
-    } else {
-        (PAGE_SIZE as u64) - 1
-    };
-    if (map_vaddr & align_mask) != 0
-        || map_vaddr < (PAGE_SIZE as u64)
-        || paddr_out_ptr == 0
-        || (paddr_out_ptr & 7) != 0
-    {
-        return Err(SysError::Inval);
-    }
-    let vs_cap = process_vspace_cap(pid).ok_or(SysError::Perm)?;
-    let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
-    let now_epoch = current_lease_epoch();
-
-    let dev_idx = with_pinned_cap(cspace_id, subj_label, CapPtr(pci_cap_raw), req, now_epoch, |res| {
-        if res.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(res.obj_id, res.expected_obj_gen) {
-            return Err(CapError::WrongObjectKind);
-        }
-        Ok(res.obj_id as usize)
-    })
-    .map_err(|e| {
-        record_pci_denied_first_or(None);
-        map_cap_err_to_sys(e)
-    })?;
-
-    let dma_label = SecLabel::new(
-        SecDomain::RootSystem,
-        SecFlags(SecFlags::DEVICE_DMA.0 | SecFlags::NO_DELEGATE.0),
-        subj_label.compartment_id,
-        subj_label.policy_tag,
-    );
-    let order = if is_2m {
-        PageOrder::Order2MiB
-    } else {
-        PageOrder::Order4KiB
-    };
-    let (frame_cap, fh) =
-        cspace_alloc_frame(cspace_id, subj_label, dma_label, order, false, 0)
-            .map_err(map_cap_err_to_sys)?;
-
-    let map_res = if is_2m {
-        cspace_vspace_map_2m(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, VmProt::USER_RW, 0)
-    } else {
-        cspace_vspace_map_4k(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, VmProt::USER_RW, 0)
-    };
-    if let Err(e) = map_res {
-        let _ = cspace_destroy_object(cspace_id, subj_label, frame_cap, 0);
-        return Err(map_cap_err_to_sys(e));
-    }
-
-    let len_bytes = if is_2m {
-        (HUGE_2M_FRAMES as u64) * (PAGE_SIZE as u64)
-    } else {
-        PAGE_SIZE as u64
-    };
-    let dma_paddr: u64 = fh.phys_addr();
-    let Some(vdev) = validated_pci_slot(dev_idx) else {
-        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
-        return Err(SysError::Inval);
-    };
-
-    let mut rollback_claimed = false;
-    let pinned_ok = with_dma_lock(dev_idx, |_slot, pins| {
-        let claimed_new = claim_pci_slot(dev_idx, cspace_id, &vdev).map_err(map_cap_err_to_sys)?;
-        let Some(free_slot) = pins.iter_mut().find(|s| s.is_none()) else {
-            release_claimed_pci_slot(dev_idx, claimed_new);
-            return Err(SysError::NoMem);
-        };
-        if adjust_frame_iommu_pin(fh, 1).is_err() {
-            release_claimed_pci_slot(dev_idx, claimed_new);
-            return Err(SysError::NoMem);
-        }
-        if map_dma_range(dev_idx, dma_paddr, len_bytes).is_err() {
-            let _ = adjust_frame_iommu_pin(fh, -1);
-            release_claimed_pci_slot(dev_idx, claimed_new);
-            return Err(SysError::NoMem);
-        }
-        *free_slot = Some(fh);
-        rollback_claimed = claimed_new;
-        Ok(())
-    });
-    if let Err(e) = pinned_ok {
-        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
-        return Err(e);
-    }
-
-    let pa_bytes = dma_paddr.to_le_bytes();
-    if let Err(fault) = copy_to_user(paddr_out_ptr, &pa_bytes) {
-        with_dma_lock(dev_idx, |_slot, pins| {
-            unmap_dma_range(dev_idx, dma_paddr, len_bytes);
-            for pin in pins.iter_mut() {
-                if *pin == Some(fh) {
-                    *pin = None;
-                    let _ = adjust_frame_iommu_pin(fh, -1);
-                    break;
-                }
-            }
-            if rollback_claimed && pins.iter().all(|p| p.is_none()) {
-                release_claimed_pci_slot(dev_idx, true);
-            }
-        });
-        unmap_and_destroy_dma_frame(cspace_id, subj_label, vs_cap, frame_cap, map_vaddr, is_2m);
-        return Err(fault);
-    }
-
-    Ok((0, frame_cap.0))
 }

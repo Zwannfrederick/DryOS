@@ -21,16 +21,21 @@ use core::ptr::{read_volatile, write_volatile};
 
 use dry_userspace::init_legacy::log_line;
 use dry_userspace::shell::LineBuilder;
+use dry_userspace::surface_pool::verify_surface_pool_invariants;
 use dry_userspace::{
-    msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_dev_map_window,
-    sys_dev_query_bars, sys_dma_alloc, sys_ep_create, sys_exit, sys_ipc_recv_ext,
-    sys_ipc_reply_inline, sys_irq_ack, sys_irq_bind, sys_notify_bind_tcb, sys_notify_create,
-    sys_notify_signal, sys_notify_unbind_tcb, sys_notify_wait, sys_proc_spawn_with_fault_ep,
-    sys_proc_wait, sys_sysinfo, UserIpcRecvExt, UserPciDeviceInfo, UserSysInfo, EBUSY, EINVAL,
-    FAULT_MSG_LABEL, FAULT_REPLY_KILL, IPC_OP_BOUND_NOTIF, IRQF_ONESHOT, IRQ_ACK_UNBIND,
-    IRQ_ACK_UNMASK, MSG_FLAG_NON_BLOCKING, PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G,
-    PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE, PCI_DEV_FLAG_IOMMU_ACTIVE, PCI_DEV_FLAG_MSI,
-    RIGHT_CALL, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_SEND, RIGHT_WRITE,
+    msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_dev_cfg_read,
+    sys_dev_cfg_write, sys_dev_map_window, sys_dev_map_window_2m, sys_dev_mint_slot,
+    sys_dev_query_bars, sys_dma_alloc, sys_dma_alloc_sg, sys_dma_free, sys_dma_query_stats,
+    sys_dma_sync, sys_ep_create, sys_exit, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_irq_ack,
+    sys_irq_bind, sys_notify_bind_tcb, sys_notify_create, sys_notify_signal,
+    sys_notify_unbind_tcb, sys_notify_wait, sys_proc_spawn_with_fault_ep, sys_proc_wait,
+    sys_sysinfo, UserDmaSgSeg, UserDmaStats, UserIpcRecvExt, UserPciDeviceInfo, UserSysInfo,
+    DMA_DIR_BIDIR, DMA_DIR_FROM_DEV, DMA_DIR_TO_DEV, DMA_SG_FLAG_HW_IOMMU,
+    DMA_SG_FLAG_IOVA_DISTINCT, EBUSY, EINVAL, EPERM, FAULT_MSG_LABEL, FAULT_REPLY_KILL,
+    IPC_OP_BOUND_NOTIF, IRQF_ONESHOT, IRQ_ACK_UNBIND, IRQ_ACK_UNMASK, MSG_FLAG_NON_BLOCKING,
+    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_ABOVE_4G, PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE,
+    PCI_DEV_FLAG_ECAM, PCI_DEV_FLAG_IOMMU_ACTIVE, PCI_DEV_FLAG_MSI, RIGHT_CALL, RIGHT_GRANT,
+    RIGHT_MAP, RIGHT_READ, RIGHT_SEND, RIGHT_WRITE,
 };
 
 const HW_TEST_BOOT_MAGIC: u64 = 0x4452_595f_4857_5431;
@@ -42,6 +47,9 @@ const IV_WC_VA: u64 = 0x2000_0000;
 const IV_UC_OFF_VA: u64 = 0x2010_0000;
 const IV_UC_ALIAS_VA: u64 = 0x2020_0000;
 const OOB_PROBE_VA: u64 = 0x2030_0000;
+const IV_2M_UC_ALIAS_VA: u64 = 0x2040_0000;
+const IV_WC_2M_VA: u64 = 0x2400_0000;
+const EDU_SG_DMA_VA: u64 = 0x2500_0000;
 
 const EDU_BAR_VA: u64 = 0x2100_0000;
 const EDU_DMA_VA: u64 = 0x2110_0000;
@@ -281,6 +289,56 @@ fn test_ivshmem_bar64_wc_and_bounds(iv_cap: u64, edu_cap: u64) -> (u64, u64, u64
     sfence();
     let uc_64k_cyc = rdtsc_user().saturating_sub(tu0);
 
+    // 2 MiB Huge-Page WC MMIO (`DEV_MAP_OP_MAP_WINDOW_2M = 4`) + bounds + revoke unmap check.
+    if sys_dev_map_window_2m(iv_cap, IV_WC_2M_VA + 4096, 2, true, 1, 1) != Err(EINVAL) {
+        fail(112);
+    }
+    if sys_dev_map_window_2m(iv_cap, IV_WC_2M_VA, 2, true, 0, 1) != Err(EINVAL) {
+        fail(113);
+    }
+    if sys_dev_map_window_2m(iv_cap, IV_WC_2M_VA, 2, true, 2, 128) != Err(EINVAL) {
+        fail(114);
+    }
+    let iv_2m_a = sys_cap_derive(iv_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, 0, 0)
+        .unwrap_or_else(|_| fail(115));
+    if sys_dev_map_window_2m(iv_2m_a, IV_WC_2M_VA, 2, true, 2, 1) != Ok(2) {
+        fail(116);
+    }
+    if sys_dev_map_window(iv_cap, IV_2M_UC_ALIAS_VA, 2, false, 1, 512).is_err() {
+        fail(117);
+    }
+    // SAFETY: `IV_WC_2M_VA` covers BAR2 `[2 MiB..6 MiB)`, aliased at `IV_2M_UC_ALIAS_VA` (`+2 MiB`).
+    unsafe {
+        write_volatile(IV_WC_2M_VA as *mut u64, 0x2026_0200_4452_5901);
+        write_volatile((IV_WC_2M_VA + 0x20_0000) as *mut u64, 0x2026_0200_4452_5902);
+        sfence();
+        if read_volatile(IV_2M_UC_ALIAS_VA as *const u64) != 0x2026_0200_4452_5901 {
+            fail(118);
+        }
+        if read_volatile((IV_WC_2M_VA + 0x20_0000) as *const u64) != 0x2026_0200_4452_5902 {
+            fail(119);
+        }
+    }
+    if sys_cap_revoke(iv_2m_a, 1).is_err() {
+        fail(120);
+    }
+    let iv_2m_b = sys_cap_derive(iv_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, 0, 0)
+        .unwrap_or_else(|_| fail(121));
+    if sys_dev_map_window_2m(iv_2m_b, IV_WC_2M_VA, 2, true, 1, 2) != Ok(1) {
+        fail(122);
+    }
+    // SAFETY: Re-mapped cleanly after multi-2M revocation with zero residual PDE collisions.
+    unsafe {
+        write_volatile(IV_WC_2M_VA as *mut u64, 0x5151_6262_7373_8484);
+        sfence();
+        if read_volatile(IV_WC_2M_VA as *const u64) != 0x5151_6262_7373_8484 {
+            fail(123);
+        }
+    }
+    if sys_cap_revoke(iv_2m_b, 1).is_err() {
+        fail(124);
+    }
+
     (bounds_rej, wc_64k_cyc, uc_64k_cyc)
 }
 
@@ -345,7 +403,7 @@ fn median_32(vals: &mut [u64; 32]) -> u64 {
     vals[16]
 }
 
-fn test_edu_msi_bound_notif_and_vtd_dma(edu_cap: u64, timeout_tsc: u64) -> (u8, u64, u64, u64, u64) {
+fn test_edu_msi_bound_notif_and_vtd_dma(edu_cap: u64, timeout_tsc: u64) -> (u8, u64, u64, u64, u64, u64) {
     let mut edu_info = UserPciDeviceInfo::default();
     if sys_dev_query_bars(edu_cap, &mut edu_info).is_err() {
         fail(301);
@@ -521,7 +579,156 @@ fn test_edu_msi_bound_notif_and_vtd_dma(edu_cap: u64, timeout_tsc: u64) -> (u8, 
     let _ = sys_cap_revoke(ep, 1);
     let _ = sys_cap_revoke(msi_notif, 1);
     let _ = sys_cap_revoke(pause_notif, 1);
-    (vec, 32, msi_p50_cyc, dma_rt_cyc, observed_faults)
+    (vec, 32, msi_p50_cyc, dma_rt_cyc, observed_faults, dma_pa)
+}
+
+fn test_ascension6_m2_cfg_enum_and_sg_iova(edu_cap: u64, identity_dma_pa: u64, timeout_tsc: u64) {
+    // 1. Capability-gated PCI/ECAM Config R/W (`DEV_MAP_OP_CFG_RW = 3`).
+    let mut edu_info = UserPciDeviceInfo::default();
+    if sys_dev_query_bars(edu_cap, &mut edu_info).is_err() {
+        fail(401);
+    }
+    if (edu_info.dev_flags & PCI_DEV_FLAG_ECAM) == 0 {
+        fail(402);
+    }
+    if sys_dev_cfg_read(edu_cap, 0x00, 4) != Ok(0x11e8_1234) {
+        fail(403);
+    }
+    if sys_dev_cfg_read(edu_cap, 0x100, 4).is_err() {
+        fail(404);
+    }
+    if sys_dev_cfg_write(edu_cap, 0x04, 2, 0) != Err(EPERM) {
+        fail(405);
+    }
+    if sys_dev_cfg_write(edu_cap, 0x10, 4, 0) != Err(EPERM) {
+        fail(406);
+    }
+    if sys_dev_cfg_write(edu_cap, 0x0c, 1, 0x10).is_err() {
+        fail(407);
+    }
+
+    // 2. Dynamic 64-slot enumeration mint (`DEV_MAP_OP_ENUM_MINT = 5`).
+    let minted_iv = sys_dev_mint_slot(edu_cap, 4).unwrap_or_else(|_| fail(408));
+    let mut minted_info = UserPciDeviceInfo::default();
+    if sys_dev_query_bars(minted_iv, &mut minted_info).is_err()
+        || minted_info.vendor_id != 0x1af4
+        || minted_info.device_id != 0x1110
+    {
+        fail(409);
+    }
+    let _ = sys_cap_revoke(minted_iv, 1);
+
+    // 3. Scatter-Gather IOVA != HPA (`SYS_DMA_CTL = 32`) hardware translation + free fault check.
+    let mut segs = [UserDmaSgSeg::default(); 4];
+    let desc = sys_dma_alloc_sg(edu_cap, EDU_SG_DMA_VA, 4, DMA_DIR_BIDIR, Some(&mut segs))
+        .unwrap_or_else(|_| fail(412));
+    let req_sg_flags = DMA_SG_FLAG_HW_IOMMU | DMA_SG_FLAG_IOVA_DISTINCT;
+    if (desc.out_flags & req_sg_flags) != req_sg_flags
+        || desc.total_bytes != 4 * 4096
+        || desc.iova_base == identity_dma_pa
+    {
+        fail(413);
+    }
+    for (idx, seg) in segs.iter().enumerate() {
+        if seg.iova != desc.iova_base + (idx as u64) * 4096 || seg.len_bytes != 4096 {
+            fail(414);
+        }
+    }
+
+    // Write pattern in SG page 3, zero SG page 0, DMA via VT-d IOVAs `page3 -> EDU -> page0`.
+    // SAFETY: `EDU_SG_DMA_VA .. +16 KiB` is mapped `USER_RW` to pinned SG pages.
+    unsafe {
+        write_volatile((EDU_SG_DMA_VA + 3 * 4096) as *mut u64, 0x5347_5f33_a6a6_0003);
+        write_volatile(EDU_SG_DMA_VA as *mut u64, 0);
+    }
+    if sys_dma_sync(edu_cap, desc.buf_id, DMA_DIR_TO_DEV).is_err() {
+        fail(415);
+    }
+    // SAFETY: Program `edu` DMA engine using virtualized VT-d IOVAs (`desc.iova_base != HPA`).
+    unsafe {
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_SRC, desc.iova_base + 3 * 4096);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_DST, EDU_INTERNAL_BUF);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CNT, 64);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CMD, EDU_DMA_START);
+    }
+    if !edu_wait_dma_idle(EDU_BAR_VA, timeout_tsc) {
+        fail(416);
+    }
+    // SAFETY: DMA `EDU_INTERNAL_BUF -> SG IOVA page 0`.
+    unsafe {
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_SRC, EDU_INTERNAL_BUF);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_DST, desc.iova_base);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CNT, 64);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CMD, EDU_DMA_START | EDU_DMA_TO_RAM);
+    }
+    if !edu_wait_dma_idle(EDU_BAR_VA, timeout_tsc) {
+        fail(417);
+    }
+    if sys_dma_sync(edu_cap, desc.buf_id, DMA_DIR_FROM_DEV).is_err() {
+        fail(418);
+    }
+    // SAFETY: Read SG page 0 written back via hardware VT-d IOVA translation.
+    if unsafe { read_volatile(EDU_SG_DMA_VA as *const u64) } != 0x5347_5f33_a6a6_0003 {
+        fail(419);
+    }
+
+    let mut stats = UserDmaStats::default();
+    if sys_dma_query_stats(edu_cap, &mut stats).is_err()
+        || stats.active_sg_bufs != 1
+        || stats.mapped_iova_bytes != 16384
+        || stats.hw_enforcing != 1
+    {
+        fail(420);
+    }
+    let faults_before_free = stats.iommu_faults;
+
+    if sys_dma_free(edu_cap, desc.buf_id) != Ok(4) {
+        fail(421);
+    }
+    if sys_dma_query_stats(edu_cap, &mut stats).is_err()
+        || stats.active_sg_bufs != 0
+        || stats.mapped_iova_bytes != 0
+    {
+        fail(422);
+    }
+
+    // Attempt DMA to the newly unmapped SG IOVA -> must trigger an additional VT-d `FRCD` fault.
+    // SAFETY: Deliberate post-free rogue IOVA DMA probe to verify IOTLB invalidation.
+    unsafe {
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_SRC, EDU_INTERNAL_BUF);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_DST, desc.iova_base);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CNT, 64);
+        mmio_write64(EDU_BAR_VA + EDU_REG_DMA_CMD, EDU_DMA_START | EDU_DMA_TO_RAM);
+    }
+    let _ = edu_wait_dma_idle(EDU_BAR_VA, timeout_tsc);
+    let pause_notif = sys_notify_create(0).unwrap_or_else(|_| fail(423));
+    let mut freed_fault_seen = false;
+    for _ in 0..20 {
+        if sys_dma_query_stats(edu_cap, &mut stats).is_err() {
+            fail(424);
+        }
+        if stats.iommu_faults > faults_before_free {
+            freed_fault_seen = true;
+            break;
+        }
+        let _ = sys_notify_wait(pause_notif, 0, timeout_tsc / 200);
+    }
+    let _ = sys_cap_revoke(pause_notif, 1);
+    if !freed_fault_seen {
+        fail(425);
+    }
+
+    // Verify attenuated PciDev handle (missing MANAGE/GRANT) cannot mint new PCI slots.
+    let non_mgr = sys_cap_derive(edu_cap, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, 0, 0)
+        .unwrap_or_else(|_| fail(410));
+    if sys_dev_mint_slot(non_mgr, 4) != Err(EPERM) {
+        fail(411);
+    }
+    let _ = sys_cap_revoke(non_mgr, 1);
+
+    if !verify_surface_pool_invariants() {
+        fail(426);
+    }
 }
 
 #[no_mangle]
@@ -552,8 +759,9 @@ pub extern "C" fn _start(arg0: u64, arg1: u64) -> ! {
         boot.edu_pci_cap,
         timeout_tsc,
     );
-    let (msi_vec, msi_irqs, msi_p50_cyc, dma_rt_cyc, vtd_rogue_faults) =
+    let (msi_vec, msi_irqs, msi_p50_cyc, dma_rt_cyc, vtd_rogue_faults, identity_dma_pa) =
         test_edu_msi_bound_notif_and_vtd_dma(boot.edu_pci_cap, timeout_tsc);
+    test_ascension6_m2_cfg_enum_and_sg_iova(boot.edu_pci_cap, identity_dma_pa, timeout_tsc);
 
     let mut plb = LineBuilder::new();
     plb.push_bytes(b"[DRY-HW-PASS] bar64_above4g=1 wc_ok=1 bounds_rej=");
@@ -568,6 +776,10 @@ pub extern "C" fn _start(arg0: u64, arg1: u64) -> ! {
     plb.push_u64(crash_vec);
     plb.push_bytes(b" recovery_ok=1");
     log_line(&plb);
+
+    let mut a6 = LineBuilder::new();
+    a6.push_bytes(b"[DRY-HW-A6-PASS] cfg_rw_ok=1 enum_mint_ok=1 mmio_2m_wc_ok=1 sg_iova_ok=1 surf_pool_ok=1");
+    log_line(&a6);
 
     let mut blb = LineBuilder::new();
     blb.push_bytes(b"[DRY-HW-BENCH] tsc_mhz=");

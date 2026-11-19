@@ -333,8 +333,10 @@ pub fn destroy_vspace(handle: VSpaceHandle) -> Result<(), VSpaceError> {
                         }
                         write_volatile(pd_ptr.add(i2), 0);
                         if (e2 & PTE_HUGE_PAGE) != 0 {
-                            let base_pfn = ((e2 & PTE_PHYS_MASK_2M) >> PAGE_SHIFT) as u32;
-                            let _ = map_ref_dec_data_pfn_after_shootdown(base_pfn, PageOrder::Order2MiB);
+                            if (e2 & PTE_SW_MMIO) == 0 {
+                                let base_pfn = ((e2 & PTE_PHYS_MASK_2M) >> PAGE_SHIFT) as u32;
+                                let _ = map_ref_dec_data_pfn_after_shootdown(base_pfn, PageOrder::Order2MiB);
+                            }
                             let _ = pt_frame_adjust_entries(pd_pfn, -1);
                         } else {
                             let pt_pfn = ((e2 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;

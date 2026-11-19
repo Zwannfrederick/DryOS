@@ -36,9 +36,9 @@ use crate::security::{
 };
 use crate::syscall::{
     UserCapInfo, DRY_SYSCALL_ABI_VERSION, SYS_CAP_DERIVE, SYS_CAP_QUERY, SYS_CAP_REVOKE,
-    SYS_DEV_MAP, SYS_DMA_ALLOC, SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC, SYS_IOPORT_RW,
-    SYS_IRQ_ACK, SYS_IRQ_BIND, SYS_NOTIFY_CREATE, SYS_POWER_CTL, SYS_PROC_KILL, SYS_PROC_LIST,
-    SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO, SYS_VAULT_CTL, SYS_VSPACE_MAP,
+    SYS_DEV_MAP, SYS_DMA_ALLOC, SYS_DMA_CTL, SYS_EP_CREATE, SYS_FB_MAP, SYS_FRAME_ALLOC,
+    SYS_IOPORT_RW, SYS_IRQ_ACK, SYS_IRQ_BIND, SYS_NOTIFY_CREATE, SYS_POWER_CTL, SYS_PROC_KILL,
+    SYS_PROC_LIST, SYS_PROC_SPAWN, SYS_PROC_WAIT, SYS_SYSINFO, SYS_VAULT_CTL, SYS_VSPACE_MAP,
 };
 use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::VmProt;
@@ -433,7 +433,15 @@ pub(crate) fn sys_cold_dispatch(
         SYS_DMA_ALLOC => {
             let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
-            match crate::pci::sys_dma_alloc(pid, cs_id, subj, a0, a1, a2) {
+            match crate::dma::sys_dma_alloc(pid, cs_id, subj, a0, a1, a2) {
+                Ok(pair) => pair,
+                Err(e) => (e.as_raw(), 0),
+            }
+        }
+        SYS_DMA_CTL => {
+            let cs_id = cur_tcb.cspace_id.load(Ordering::Acquire);
+            let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
+            match crate::dma::sys_dma_ctl(pid, cs_id, subj, a0, a1, a2, a3) {
                 Ok(pair) => pair,
                 Err(e) => (e.as_raw(), 0),
             }

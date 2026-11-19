@@ -71,6 +71,7 @@ def run_p8a_hw_foundations_e2e(
 
     vtd_line = _find_prefixed_line(log, "[DRY-IOMMU] VTD_ACTIVE ")
     hw_pass_line = _find_prefixed_line(log, "[DRY-HW-PASS] ")
+    hw_a6_line = _find_prefixed_line(log, "[DRY-HW-A6-PASS] ")
     hw_bench_line = _find_prefixed_line(log, "[DRY-HW-BENCH] ")
     hw_kernel_line = _find_prefixed_line(log, "[DRY-HW-KERNEL] PASS: ")
     boot_ok_line = _find_prefixed_line(log, "[DRY-BOOT-OK] Milestone 2C-2 ")
@@ -78,6 +79,7 @@ def run_p8a_hw_foundations_e2e(
     for label, line in (
         ("VTD_ACTIVE", vtd_line),
         ("DRY-HW-PASS", hw_pass_line),
+        ("DRY-HW-A6-PASS", hw_a6_line),
         ("DRY-HW-BENCH", hw_bench_line),
         ("DRY-HW-KERNEL", hw_kernel_line),
         ("DRY-BOOT-OK", boot_ok_line),
@@ -86,6 +88,7 @@ def run_p8a_hw_foundations_e2e(
             raise AssertionError(f"{name}: missing {label} marker.\nLog tail:\n{log[-3000:]}")
 
     pkv = _parse_kv_any(hw_pass_line)
+    a6kv = _parse_kv_any(hw_a6_line)
     bkv = _parse_kv_any(hw_bench_line)
     kkv = _parse_kv_any(hw_kernel_line)
 
@@ -99,12 +102,17 @@ def run_p8a_hw_foundations_e2e(
     assert pkv.get("vtd_rogue_faults", 0) >= 1, f"{name}: VT-d rogue fault not observed: {hw_pass_line}"
     assert pkv.get("crash_vec") == 6, f"{name}: unexpected child fault vec: {hw_pass_line}"
     assert pkv.get("recovery_ok") == 1, f"{name}: post-crash recovery failed: {hw_pass_line}"
+    assert a6kv.get("cfg_rw_ok") == 1, f"{name}: DEV_MAP_OP_CFG_RW check failed: {hw_a6_line}"
+    assert a6kv.get("enum_mint_ok") == 1, f"{name}: DEV_MAP_OP_ENUM_MINT check failed: {hw_a6_line}"
+    assert a6kv.get("mmio_2m_wc_ok") == 1, f"{name}: 2 MiB WC MMIO check failed: {hw_a6_line}"
+    assert a6kv.get("sg_iova_ok") == 1, f"{name}: SG DMA IOVA != HPA check failed: {hw_a6_line}"
+    assert a6kv.get("surf_pool_ok") == 1, f"{name}: SurfaceBufferSet check failed: {hw_a6_line}"
 
     assert kkv.get("vtd_enabled") == 1, f"{name}: kernel VT-d not enabled: {hw_kernel_line}"
     assert kkv.get("vtd_present") == 1, f"{name}: kernel VT-d not present: {hw_kernel_line}"
     assert kkv.get("dmar_drhd", 0) >= 1, f"{name}: DMAR DRHD count < 1: {hw_kernel_line}"
     assert kkv.get("quiesces", 0) >= 1, f"{name}: PCI crash quiesce count < 1: {hw_kernel_line}"
-    assert kkv.get("vtd_faults", 0) >= 1, f"{name}: kernel VT-d fault count < 1: {hw_kernel_line}"
+    assert kkv.get("vtd_faults", 0) >= 2, f"{name}: kernel VT-d fault count < 2: {hw_kernel_line}"
     assert kkv.get("leaked_frames") == 0, f"{name}: frame leak detected: {hw_kernel_line}"
 
     tsc_mhz = max(1, bkv.get("tsc_mhz", 2000))
@@ -113,6 +121,11 @@ def run_p8a_hw_foundations_e2e(
         "milestone": "2C-2-hw-foundations",
         "tsc_mhz": tsc_mhz,
         "bar64_above4g": pkv["bar64_above4g"] == 1,
+        "cfg_rw_ok": a6kv["cfg_rw_ok"] == 1,
+        "enum_mint_ok": a6kv["enum_mint_ok"] == 1,
+        "mmio_2m_wc_ok": a6kv["mmio_2m_wc_ok"] == 1,
+        "sg_iova_ok": a6kv["sg_iova_ok"] == 1,
+        "surf_pool_ok": a6kv["surf_pool_ok"] == 1,
         "wc_64k_cyc": bkv.get("wc_64k_cyc", 0),
         "uc_64k_cyc": bkv.get("uc_64k_cyc", 0),
         "msi_vec": hex(pkv["msi_vec"]),

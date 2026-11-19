@@ -16,6 +16,7 @@ pub const PTE_PWT: u64 = 1 << 3;
 pub const PTE_PCD: u64 = 1 << 4;
 pub const PTE_PAT_4K: u64 = 1 << 7;
 pub const PTE_HUGE_PAGE: u64 = 1 << 7;
+pub const PTE_PAT_2M: u64 = 1 << 12;
 pub const PTE_GLOBAL: u64 = 1 << 8;
 /// OS software AVL bit (`bit 9`, ignored by x86-64 MMU) marking capability-validated device MMIO leaf PTEs.
 pub const PTE_SW_MMIO: u64 = 1 << 9;
@@ -182,9 +183,6 @@ pub fn prot_to_pte_flags(prot: VmProt, is_huge_2m: bool) -> Result<u64, VSpaceEr
     if prot.contains(VmProt::UNCACHED) && prot.contains(VmProt::WRITE_COMBINING) {
         return Err(VSpaceError::PermissionViolation);
     }
-    if prot.contains(VmProt::WRITE_COMBINING) && is_huge_2m {
-        return Err(VSpaceError::PageSizeMismatch);
-    }
 
     let mut flags = PTE_PRESENT;
     if prot.contains(VmProt::WRITE) {
@@ -199,8 +197,8 @@ pub fn prot_to_pte_flags(prot: VmProt, is_huge_2m: bool) -> Result<u64, VSpaceEr
     if prot.contains(VmProt::UNCACHED) {
         flags |= PTE_PCD | PTE_PWT;
     } else if prot.contains(VmProt::WRITE_COMBINING) {
-        // Selects PA4 (`WC = 01`) programmed into `IA32_PAT` without changing `PA0..PA3`.
-        flags |= PTE_PAT_4K;
+        // Selects PA4 (`WC = 01`) programmed into `IA32_PAT`: bit 7 on 4 KiB PTE, bit 12 on 2 MiB PDE.PS.
+        flags |= if is_huge_2m { PTE_PAT_2M } else { PTE_PAT_4K };
     }
     if prot.contains(VmProt::GLOBAL) {
         flags |= PTE_GLOBAL;

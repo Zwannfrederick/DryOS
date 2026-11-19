@@ -78,6 +78,7 @@ pub const SYS_POWER_CTL: u64 = 28;
 pub const SYS_DEV_MAP: u64 = 29;
 pub const SYS_DMA_ALLOC: u64 = 30;
 pub const SYS_VAULT_CTL: u64 = 31;
+pub const SYS_DMA_CTL: u64 = 32;
 
 pub const MAX_WRITE_DEBUG_LEN: usize = 512;
 

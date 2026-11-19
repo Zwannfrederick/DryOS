@@ -141,8 +141,11 @@ pub(crate) fn unmap_all_records_for_slot(global_slot: u32) -> usize {
             generation: rec.vspace_gen,
         };
         if rec.is_huge_2m {
-            if unmap_2m(vs, rec.vaddr).is_ok() {
-                unmapped += 1;
+            let pages = rec.num_pages.max(1) as u64;
+            for p in 0..pages {
+                if unmap_2m(vs, rec.vaddr + p * (2 * 1024 * 1024)).is_ok() {
+                    unmapped += 1;
+                }
             }
         } else {
             let pages = rec.num_pages.max(1) as u64;

@@ -37,6 +37,7 @@ pub mod sup_services;
 pub mod supervisor;
 pub mod usb;
 pub mod surface;
+pub mod surface_pool;
 pub mod ttf;
 pub mod ui;
 pub mod vault_crypto;
@@ -86,6 +87,7 @@ pub const SYS_VSPACE_MAP: u64 = 25;
 pub const SYS_PROC_LIST: u64 = 26;
 pub const SYS_PROC_KILL: u64 = 27;
 pub const SYS_POWER_CTL: u64 = 28;
+pub const SYS_DMA_CTL: u64 = 32;
 
 pub const EPERM: isize = -1;
 pub const ENOENT: isize = -2;

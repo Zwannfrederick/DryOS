@@ -15,13 +15,13 @@ use crate::iommu::dmar::{
 use crate::iommu::ivrs::{is_ivrs_present_or_malformed, ivrs_snapshot};
 use crate::iommu::ops::{
     evaluate_iommu_policy, is_dma_allowed_status, is_hw_enforcing_status, IommuBackendKind,
-    IommuCaps, IommuOps, IommuPerms, IommuStatus,
+    IommuCaps, IommuPerms, IommuStatus,
 };
 use crate::iommu::slpt::{
     bdf_has_active_rmrr, clear_slpt_4k, flush_descriptor_cacheline, flush_entire_page,
     free_all_domain_frames, get_or_alloc_bus_ctx, is_dedicated_gop_drhd, map_slpt_4k,
-    premap_unit_rmrrs, release_bus_ctx_if_idle, write_ctx_entry, DomainState, VtdUnit,
-    BOOT_RMRR_DID, VTD_KERNEL_LABEL,
+    map_slpt_4k_iova, premap_unit_rmrrs, release_bus_ctx_if_idle, write_ctx_entry, DomainState,
+    VtdUnit, BOOT_RMRR_DID, VTD_KERNEL_LABEL,
 };
 use crate::pci::{active_gop_bdf, MAX_MANAGED_PCI_DEVS};
 use crate::pmm::{alloc_pages, free_pages, AllocFlags, PageOrder, PAGE_SIZE};
@@ -158,111 +158,9 @@ pub fn caps() -> IommuCaps {
     }
 }
 
-struct VtdIommuOps;
-struct QemuBypassIommuOps;
-struct FailClosedIommuOps;
-
-static VTD_OPS: VtdIommuOps = VtdIommuOps;
-static QEMU_BYPASS_OPS: QemuBypassIommuOps = QemuBypassIommuOps;
-static FAIL_CLOSED_OPS: FailClosedIommuOps = FailClosedIommuOps;
-
-impl IommuOps for VtdIommuOps {
-    fn kind(&self) -> IommuBackendKind {
-        IommuBackendKind::IntelVtd
-    }
-    fn caps(&self) -> IommuCaps {
-        caps()
-    }
-    fn attach_device(&self, dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
-        attach_device_domain(dev_idx, bus, dev, func)
-    }
-    fn detach_device(&self, dev_idx: usize) {
-        detach_and_scrub_domain(dev_idx);
-    }
-    fn map_iova(
-        &self,
-        dev_idx: usize,
-        _iova: u64,
-        hpa: u64,
-        len_bytes: u64,
-        _perms: IommuPerms,
-    ) -> Result<(), ()> {
-        map_dma_range(dev_idx, hpa, len_bytes)
-    }
-    fn unmap_iova(&self, dev_idx: usize, iova: u64, len_bytes: u64) {
-        unmap_dma_range(dev_idx, iova, len_bytes);
-    }
-    fn poll_faults(&self) -> u64 {
-        poll_and_clear_faults()
-    }
-}
-
-impl IommuOps for QemuBypassIommuOps {
-    fn kind(&self) -> IommuBackendKind {
-        IommuBackendKind::QemuTestBypass
-    }
-    fn caps(&self) -> IommuCaps {
-        caps()
-    }
-    fn attach_device(&self, dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
-        attach_device_domain(dev_idx, bus, dev, func)
-    }
-    fn detach_device(&self, _dev_idx: usize) {}
-    fn map_iova(
-        &self,
-        dev_idx: usize,
-        _iova: u64,
-        hpa: u64,
-        len_bytes: u64,
-        _perms: IommuPerms,
-    ) -> Result<(), ()> {
-        map_dma_range(dev_idx, hpa, len_bytes)
-    }
-    fn unmap_iova(&self, _dev_idx: usize, _iova: u64, _len_bytes: u64) {}
-    fn poll_faults(&self) -> u64 {
-        0
-    }
-}
-
-impl IommuOps for FailClosedIommuOps {
-    fn kind(&self) -> IommuBackendKind {
-        backend_kind()
-    }
-    fn caps(&self) -> IommuCaps {
-        caps()
-    }
-    fn attach_device(&self, _dev_idx: usize, _bus: u8, _dev: u8, _func: u8) -> Result<(), ()> {
-        Err(())
-    }
-    fn detach_device(&self, _dev_idx: usize) {}
-    fn map_iova(
-        &self,
-        _dev_idx: usize,
-        _iova: u64,
-        _hpa: u64,
-        _len_bytes: u64,
-        _perms: IommuPerms,
-    ) -> Result<(), ()> {
-        Err(())
-    }
-    fn unmap_iova(&self, _dev_idx: usize, _iova: u64, _len_bytes: u64) {}
-    fn poll_faults(&self) -> u64 {
-        VTD_FAULT_COUNT.load(Ordering::Acquire)
-    }
-}
-
-pub fn active_iommu_ops() -> &'static dyn IommuOps {
-    match status() {
-        IommuStatus::Enforcing => &VTD_OPS,
-        IommuStatus::TestUnsafeNoIommu => &QEMU_BYPASS_OPS,
-        IommuStatus::Uninitialized
-        | IommuStatus::UnsupportedFailClosed
-        | IommuStatus::FailedClosed => &FAIL_CLOSED_OPS,
-    }
-}
-
-pub(crate) fn fail_closed_ops_for_test() -> &'static dyn IommuOps {
-    &FAIL_CLOSED_OPS
+#[inline]
+pub(super) fn latched_fault_count() -> u64 {
+    VTD_FAULT_COUNT.load(Ordering::Acquire)
 }
 
 #[inline]
@@ -760,9 +658,21 @@ pub fn attach_device_domain(dev_idx: usize, bus: u8, dev: u8, func: u8) -> Resul
     })
 }
 
-/// Map `len_bytes` (`4 KiB` or `2 MiB` pinned `DEVICE_DMA`) into `dev_idx`'s isolated SLPT.
-pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(), ()> {
-    if dev_idx >= MAX_MANAGED_PCI_DEVS || (len_bytes & ((PAGE_SIZE as u64) - 1)) != 0 || len_bytes == 0 {
+/// Map `[iova_base .. iova_base + len_bytes)` -> `[phys_base .. phys_base + len_bytes)`
+/// into `dev_idx`'s isolated SLPT with explicit DMA direction permissions (`R`/`W`).
+pub fn map_dma_range_iova(
+    dev_idx: usize,
+    iova_base: u64,
+    phys_base: u64,
+    len_bytes: u64,
+    perms: IommuPerms,
+) -> Result<(), ()> {
+    if dev_idx >= MAX_MANAGED_PCI_DEVS
+        || (iova_base & ((PAGE_SIZE as u64) - 1)) != 0
+        || (phys_base & ((PAGE_SIZE as u64) - 1)) != 0
+        || (len_bytes & ((PAGE_SIZE as u64) - 1)) != 0
+        || len_bytes == 0
+    {
         return Err(());
     }
     match status() {
@@ -781,15 +691,16 @@ pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(
         let u = &eng.units[dom.unit_idx as usize];
         let (coherent, levels_4, did) = (u.coherent, u.levels_4, dom.domain_id as u64);
         for p in 0..pages {
+            let iova = iova_base + (p as u64) * (PAGE_SIZE as u64);
             let pa = phys_base + (p as u64) * (PAGE_SIZE as u64);
-            if map_slpt_4k(dom, coherent, pa, levels_4).is_err() {
+            if map_slpt_4k_iova(dom, coherent, iova, pa, perms, levels_4).is_err() {
                 if let Some(root_h) = dom.sl_root {
                     let rpa = root_h.phys_addr();
                     for rb in 0..p {
                         clear_slpt_4k(
                             coherent,
                             rpa,
-                            phys_base + (rb as u64) * (PAGE_SIZE as u64),
+                            iova_base + (rb as u64) * (PAGE_SIZE as u64),
                             levels_4,
                         );
                     }
@@ -804,8 +715,13 @@ pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(
     })
 }
 
-/// Unmap `len_bytes` from `dev_idx`'s SLPT and synchronize IOTLB.
-pub fn unmap_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) {
+/// Map `len_bytes` (`4 KiB` or `2 MiB` pinned `DEVICE_DMA`) identity (`IOVA = phys_base`).
+pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(), ()> {
+    map_dma_range_iova(dev_idx, phys_base, phys_base, len_bytes, IommuPerms::RW)
+}
+
+/// Unmap `len_bytes` from `dev_idx`'s SLPT (`iova_base`) and synchronize IOTLB.
+pub fn unmap_dma_range(dev_idx: usize, iova_base: u64, len_bytes: u64) {
     if status() != IommuStatus::Enforcing || dev_idx >= MAX_MANAGED_PCI_DEVS {
         return;
     }
@@ -822,7 +738,7 @@ pub fn unmap_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) {
                 clear_slpt_4k(
                     u.coherent,
                     rpa,
-                    phys_base + (p as u64) * (PAGE_SIZE as u64),
+                    iova_base + (p as u64) * (PAGE_SIZE as u64),
                     u.levels_4,
                 );
             }

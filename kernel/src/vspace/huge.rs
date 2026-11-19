@@ -14,9 +14,9 @@ use crate::pmm::{
 use crate::security::{SecDomain, SecFlags, SecLabel};
 use crate::serial_println;
 use crate::vspace::pte::{
-    prot_to_pte_flags, pt_indices, validate_user_range, VSpaceError, VmProt, PAGE_SIZE_2M,
-    PAGE_SIZE_4K, PTE_HUGE_PAGE, PTE_PHYS_MASK_2M, PTE_PHYS_MASK_4K, PTE_PRESENT,
-    PTE_USER_TABLE_INTERMEDIATE,
+    cpu_max_phys_addr_limit, prot_to_pte_flags, pt_indices, validate_user_range, VSpaceError,
+    VmProt, PAGE_SIZE_2M, PAGE_SIZE_4K, PTE_HUGE_PAGE, PTE_PHYS_MASK_2M, PTE_PHYS_MASK_4K,
+    PTE_PRESENT, PTE_SW_MMIO, PTE_USER_TABLE_INTERMEDIATE,
 };
 use crate::vspace::{
     alloc_pinned_pt_frame, create_vspace, destroy_vspace, map_4k, pt_virt_ptr,
@@ -101,6 +101,73 @@ fn map_2m_internal(
     })
 }
 
+/// Map a validated `2 MiB` device MMIO aperture (`FrameState::ReservedOrMmio` across all 512 subframes)
+/// using a `PDE.PS` huge page (`UC` or `WC` via `PTE_PAT_2M`). Rejects RAM frames & `EXEC` (`W^X`).
+pub fn map_mmio_2m(
+    handle: VSpaceHandle,
+    vaddr: u64,
+    phys_addr: u64,
+    prot: VmProt,
+) -> Result<(), VSpaceError> {
+    validate_user_range(vaddr, PAGE_SIZE_2M, PAGE_SIZE_2M)?;
+    if (phys_addr & (PAGE_SIZE_2M - 1)) != 0 {
+        return Err(VSpaceError::UnalignedAddress);
+    }
+    let max_pa = cpu_max_phys_addr_limit();
+    if phys_addr
+        .checked_add(PAGE_SIZE_2M - 1)
+        .is_none_or(|end_pa| end_pa > max_pa)
+    {
+        return Err(VSpaceError::AddressOverflow);
+    }
+    if prot.contains(VmProt::EXEC) {
+        return Err(VSpaceError::WxViolation);
+    }
+    for sub in 0..HUGE_2M_FRAMES {
+        let pa = phys_addr + (sub as u64) * PAGE_SIZE_4K;
+        if crate::pmm::query_frame_state(pa) != crate::pmm::FrameState::ReservedOrMmio {
+            return Err(VSpaceError::PermissionViolation);
+        }
+    }
+    let leaf_flags = prot_to_pte_flags(prot, true)? | PTE_SW_MMIO;
+    let (i4, i3, i2, _) = pt_indices(vaddr);
+
+    with_vspace_locked(handle, |slot, _| {
+        let pml4_pfn = slot.pml4_pfn.load(Ordering::Acquire);
+        // SAFETY: `slot.locked` held.
+        unsafe {
+            let pml4 = pt_virt_ptr(pml4_pfn);
+            let mut e4 = read_volatile(pml4.add(i4));
+            if (e4 & PTE_PRESENT) == 0 {
+                let pdpt = alloc_pinned_pt_frame()?;
+                slot.pt_frames_owned.fetch_add(1, Ordering::Relaxed);
+                let _ = pt_frame_adjust_entries(pml4_pfn, 1);
+                e4 = pdpt.phys_addr() | PTE_USER_TABLE_INTERMEDIATE;
+                write_volatile(pml4.add(i4), e4);
+            }
+            let pdpt_pfn = ((e4 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+            let pdpt = pt_virt_ptr(pdpt_pfn);
+            let mut e3 = read_volatile(pdpt.add(i3));
+            if (e3 & PTE_PRESENT) == 0 {
+                let pd = alloc_pinned_pt_frame()?;
+                slot.pt_frames_owned.fetch_add(1, Ordering::Relaxed);
+                let _ = pt_frame_adjust_entries(pdpt_pfn, 1);
+                e3 = pd.phys_addr() | PTE_USER_TABLE_INTERMEDIATE;
+                write_volatile(pdpt.add(i3), e3);
+            }
+            let pd_pfn = ((e3 & PTE_PHYS_MASK_4K) >> PAGE_SHIFT) as u32;
+            let pd = pt_virt_ptr(pd_pfn);
+            if (read_volatile(pd.add(i2)) & PTE_PRESENT) != 0 {
+                return Err(VSpaceError::AlreadyMapped);
+            }
+            let _ = pt_frame_adjust_entries(pd_pfn, 1);
+            write_volatile(pd.add(i2), (phys_addr & PTE_PHYS_MASK_2M) | leaf_flags);
+            slot.mapped_4k_equiv_pages.fetch_add(512, Ordering::Relaxed);
+            Ok(())
+        }
+    })
+}
+
 /// Unmap a `2 MiB` huge page (`PDE.PS`), reclaim emptied `PD/PDPT` tables, and shoot down TLBs.
 pub fn unmap_2m(handle: VSpaceHandle, vaddr: u64) -> Result<FrameHandle, VSpaceError> {
     validate_user_range(vaddr, PAGE_SIZE_2M, PAGE_SIZE_2M)?;
@@ -135,7 +202,7 @@ pub fn unmap_2m(handle: VSpaceHandle, vaddr: u64) -> Result<FrameHandle, VSpaceE
             let mut pending = PendingReclaim {
                 data_pfn: ((old_pde & PTE_PHYS_MASK_2M) >> PAGE_SHIFT) as u32,
                 order: PageOrder::Order2MiB,
-                is_mmio: false,
+                is_mmio: (old_pde & PTE_SW_MMIO) != 0,
                 pt_pfns: [0; 3],
                 pt_len: 0,
             };

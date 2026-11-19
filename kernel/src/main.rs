@@ -10,6 +10,7 @@ mod arch;
 mod audit_tests;
 mod cspace;
 mod display;
+mod dma;
 mod fpu;
 mod gdt_tss;
 mod idt;

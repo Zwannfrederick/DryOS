@@ -345,6 +345,173 @@ pub fn sys_dev_mint_slot(pci_root_cap: u64, slot_idx: u16) -> Result<u64, isize>
     }
 }
 
+pub fn sys_dev_map_window_2m(
+    pci_cap: u64,
+    user_vaddr: u64,
+    bar_idx: u8,
+    write_combining: bool,
+    huge_count: u16,
+    huge_offset: u32,
+) -> Result<usize, isize> {
+    if (user_vaddr & 0x1f_ffff) != 0 {
+        return Err(crate::EINVAL);
+    }
+    let packed = (bar_idx as u64)
+        | ((write_combining as u64) << 8)
+        | ((huge_count as u64) << 16)
+        | ((huge_offset as u64) << 32);
+    let (r0, _) = raw_syscall6(
+        SYS_DEV_MAP,
+        pci_cap,
+        user_vaddr | DEV_MAP_OP_MAP_WINDOW_2M,
+        packed,
+        0,
+        0,
+        0,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(r0 as usize)
+    }
+}
+
+pub const DMA_OP_ALLOC_SG: u64 = 1;
+pub const DMA_OP_FREE: u64 = 2;
+pub const DMA_OP_SYNC: u64 = 3;
+pub const DMA_OP_QUERY_STATS: u64 = 4;
+
+pub const DMA_DIR_BIDIR: u8 = 0;
+pub const DMA_DIR_TO_DEV: u8 = 1;
+pub const DMA_DIR_FROM_DEV: u8 = 2;
+
+pub const DMA_MAX_SG_SEGS: usize = 64;
+pub const DMA_SG_FLAG_IOVA_DISTINCT: u8 = 1 << 0;
+pub const DMA_SG_FLAG_HW_IOMMU: u8 = 1 << 1;
+
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct UserDmaSgSeg {
+    pub iova: u64,
+    pub len_bytes: u32,
+    pub flags: u32,
+}
+
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct UserDmaSgDesc {
+    pub user_vaddr: u64,
+    pub buf_id: u64,
+    pub iova_base: u64,
+    pub total_bytes: u64,
+    pub page_count: u16,
+    pub direction: u8,
+    pub out_flags: u8,
+    pub _pad: u32,
+}
+
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct UserDmaStats {
+    pub active_sg_bufs: u32,
+    pub active_single_pins: u32,
+    pub pinned_pages: u32,
+    pub hw_enforcing: u8,
+    pub _pad: [u8; 3],
+    pub mapped_iova_bytes: u64,
+    pub iova_cursor: u64,
+    pub iommu_faults: u64,
+}
+
+const _: () = assert!(size_of::<UserDmaSgSeg>() == 16);
+const _: () = assert!(size_of::<UserDmaSgDesc>() == 40);
+const _: () = assert!(size_of::<UserDmaStats>() == 40);
+
+#[inline]
+pub fn sys_dma_alloc_sg(
+    pci_cap: u64,
+    user_vaddr: u64,
+    page_count: u16,
+    direction: u8,
+    segs_out: Option<&mut [UserDmaSgSeg]>,
+) -> Result<UserDmaSgDesc, isize> {
+    let mut desc = UserDmaSgDesc {
+        user_vaddr,
+        page_count,
+        direction,
+        ..UserDmaSgDesc::default()
+    };
+    let segs_ptr = match segs_out {
+        Some(s) => {
+            if s.len() < page_count as usize {
+                return Err(crate::EINVAL);
+            }
+            s.as_mut_ptr() as u64
+        }
+        None => 0,
+    };
+    let (r0, _) = raw_syscall6(
+        crate::SYS_DMA_CTL,
+        pci_cap,
+        DMA_OP_ALLOC_SG,
+        (&raw mut desc) as u64,
+        segs_ptr,
+        0,
+        0,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(desc)
+    }
+}
+
+#[inline]
+pub fn sys_dma_free(pci_cap: u64, buf_id: u64) -> Result<usize, isize> {
+    let (r0, _) = raw_syscall6(crate::SYS_DMA_CTL, pci_cap, DMA_OP_FREE, buf_id, 0, 0, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(r0 as usize)
+    }
+}
+
+#[inline]
+pub fn sys_dma_sync(pci_cap: u64, buf_id: u64, direction: u8) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(
+        crate::SYS_DMA_CTL,
+        pci_cap,
+        DMA_OP_SYNC,
+        buf_id,
+        direction as u64,
+        0,
+        0,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(())
+    }
+}
+
+#[inline]
+pub fn sys_dma_query_stats(pci_cap: u64, out: &mut UserDmaStats) -> Result<(), isize> {
+    let (r0, _) = raw_syscall6(
+        crate::SYS_DMA_CTL,
+        pci_cap,
+        DMA_OP_QUERY_STATS,
+        (out as *mut UserDmaStats) as u64,
+        0,
+        0,
+        0,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(())
+    }
+}
+
 #[inline]
 pub fn sys_dev_map(
     pci_cap: u64,

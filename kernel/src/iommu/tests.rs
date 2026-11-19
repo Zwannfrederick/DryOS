@@ -9,7 +9,7 @@ use crate::iommu::ops::{
     cmdline_has_token, evaluate_iommu_policy_flags, is_dma_allowed_status,
     is_hw_enforcing_status, IommuBackendKind, IommuCaps, IommuOps, IommuPerms, IommuStatus,
 };
-use crate::iommu::vtd::{
+use crate::iommu::{
     active_iommu_ops, backend_kind, caps, fail_closed_ops_for_test, status,
 };
 use crate::iommu::slpt::{
