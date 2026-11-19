@@ -24,12 +24,14 @@ use crate::cspace::objects::{
 };
 use crate::cspace::revoke::{attach_cap_mapping_range_record, cspace_destroy_object};
 use crate::cspace::{insert_root_cap, split_global_slot, with_pinned_cap};
-use crate::iommu::{attach_device_domain, detach_and_scrub_domain, map_dma_range, unmap_dma_range, VtdStatus};
+use crate::iommu::{attach_device_domain, detach_and_scrub_domain, is_dma_permitted, is_hw_enforcing, map_dma_range, unmap_dma_range};
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci_bar::{
-    DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW, DEV_MAP_OP_MASK, DEV_MAP_OP_QUERY_BARS,
-    PCI_BAR_FLAG_64BIT, PCI_BAR_FLAG_IO, PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE,
-    PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_VIRTIO,
+    DEV_MAP_OP_CFG_RW, DEV_MAP_OP_ENUM_MINT, DEV_MAP_OP_LEGACY_VIRTIO, DEV_MAP_OP_MAP_WINDOW,
+    DEV_MAP_OP_MAP_WINDOW_2M, DEV_MAP_OP_MASK, DEV_MAP_OP_QUERY_BARS, PCI_BAR_FLAG_64BIT,
+    PCI_BAR_FLAG_IO, PCI_BAR_FLAG_MMIO, PCI_BAR_FLAG_PREFETCHABLE, PCI_DEV_FLAG_ECAM,
+    PCI_DEV_FLAG_FLR, PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_PCIE, PCI_DEV_FLAG_REBAR,
+    PCI_DEV_FLAG_VIRTIO,
 };
 use crate::pmm::{
     adjust_frame_iommu_pin, FrameHandle, PageOrder, HUGE_2M_FRAMES, PAGE_SIZE,
@@ -39,7 +41,8 @@ use crate::security::{current_lease_epoch, CapRights, SecDomain, SecFlags, SecLa
 use crate::serial_println;
 use crate::uaccess::{copy_to_user, SysError};
 use crate::vspace::pte::{
-    pci_msix_table_vaddr, pci_virtio_common_vaddr, VmProt, KERNEL_MSIX_MAX_PAGES, USER_VADDR_LIMIT,
+    pci_ecam_vaddr, pci_msix_table_vaddr, pci_virtio_common_vaddr, VmProt, KERNEL_MSIX_MAX_PAGES,
+    USER_VADDR_LIMIT,
 };
 use crate::vspace::{inspect_vspace_live, map_mmio_4k, unmap_4k, VSpaceHandle, VSpaceId};
 
@@ -50,18 +53,18 @@ mod pci_window;
 
 pub use crate::pci_slots::{
     active_gop_bdf, latched_boot_pci_funcs, pci_topology_summary, BootPciFuncRecord,
-    BOOT_PCI_ENUM_OFFSET, MAX_BOOT_PCI_FUNCS, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU,
-    PCI_OBJ_IVSHMEM, PCI_OBJ_NET, PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK,
-    PCI_OBJ_VIRTIO_GPU, PCI_OBJ_VIRTIO_RNG, PCI_OBJ_XHCI,
+    BOOT_PCI_ENUM_OFFSET, MAX_BOOT_PCI_FUNCS, PCI_OBJ_DISPLAY_AUX, PCI_OBJ_IGPU, PCI_OBJ_IVSHMEM,
+    PCI_OBJ_NET, PCI_OBJ_NVME, PCI_OBJ_QEMU_EDU, PCI_OBJ_VIRTIO_BLK, PCI_OBJ_VIRTIO_GPU,
+    PCI_OBJ_VIRTIO_RNG, PCI_OBJ_XHCI,
 };
 pub(crate) use crate::pci_slots::{
     encode_bar_desc_flags, publish_boot_pci_count, push_boot_pci_record, record_topology_hints,
-    slot_label, PCI_DEV_COUNT,
+    slot_label, MAX_MANAGED_PCI_DEVS, PCI_LEGACY_FIXED_SLOTS,
 };
 pub use pci_cfg::UserVirtioPciInfo;
 pub(crate) use pci_cfg::{
-    pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16, pci_write_u32, probe_all_bars_raw,
-    probe_pci_function, ValidatedVirtioPci,
+    pci_ecam_read_u32, pci_raw_cfg_rw, pci_read_u16, pci_read_u32, pci_read_u8, pci_write_u16,
+    pci_write_u32, probe_all_bars_raw, probe_pci_function, ValidatedVirtioPci,
 };
 
 #[inline]
@@ -101,7 +104,8 @@ impl PciVirtioSlot {
 // SAFETY: `dev_inner` is written once on BSP before `present = true`; `pinned_frames` is mutated under `dma_lock` + `CLI`.
 unsafe impl Sync for PciVirtioSlot {}
 
-static PCI_DEVS: [PciVirtioSlot; PCI_DEV_COUNT] = [const { PciVirtioSlot::new() }; PCI_DEV_COUNT];
+static PCI_DEVS: [PciVirtioSlot; MAX_MANAGED_PCI_DEVS] =
+    [const { PciVirtioSlot::new() }; MAX_MANAGED_PCI_DEVS];
 
 #[inline]
 fn with_dma_lock<R>(
@@ -126,7 +130,7 @@ fn with_dma_lock<R>(
 
 #[inline]
 pub fn is_pci_dev_present(dev_idx: usize) -> bool {
-    dev_idx < PCI_DEV_COUNT && PCI_DEVS[dev_idx].present.load(Ordering::Acquire)
+    dev_idx < MAX_MANAGED_PCI_DEVS && PCI_DEVS[dev_idx].present.load(Ordering::Acquire)
 }
 
 #[inline]
@@ -137,7 +141,7 @@ pub fn is_pci_blk_present() -> bool {
 #[inline]
 pub fn is_pci_cap_live(obj_id: u32, expected_gen: u32) -> bool {
     let idx = obj_id as usize;
-    idx < PCI_DEV_COUNT
+    idx < MAX_MANAGED_PCI_DEVS
         && PCI_DEVS[idx].present.load(Ordering::Acquire)
         && PCI_DEVS[idx].generation.load(Ordering::Acquire) == expected_gen
 }
@@ -153,129 +157,191 @@ pub fn pci_dma_telemetry() -> (u64, u64) {
     (denied, quiesces)
 }
 
-/// Enumerate PCI buses `0..=15` on the BSP after `init_pmm` to discover VirtIO, USB/NVMe/NET,
-/// GPU/Display, and test controllers without hardcoding host vendor drivers.
+/// Enumerate PCI/PCIe buses (`0..=max_bus` via bridge-aware discovery + `MCFG`) on the BSP
+/// after `init_pmm` into the dynamic `64`-slot registry without hardcoding vendor drivers.
 #[inline(never)]
 pub fn init_pci_devices() -> bool {
     crate::pci_bar::run_bar64_unit_tests();
+    crate::pci_ecam::run_mcfg_unit_tests();
+    let max_bus = crate::pci_ecam::mcfg_max_bus();
+    let mut bus_mask = [0u64; 4];
+    for b in 0..=15u8 {
+        bus_mask[(b as usize) >> 6] |= 1u64 << (b & 63);
+    }
+    let mut scanned_mask = [0u64; 4];
     let mut found = 0usize;
     let mut rec_cnt = 0usize;
-    for bus in 0..=15u8 {
-        for dev in 0..32u8 {
-            let id0 = pci_read_u32(bus, dev, 0, 0x00);
-            if (id0 & 0xffff) == 0xffff {
+
+    for _pass in 0..8 {
+        let mut any_new = false;
+        for bus_u in 0..=(max_bus as usize) {
+            let w = bus_u >> 6;
+            let bit = 1u64 << (bus_u & 63);
+            if (bus_mask[w] & bit) == 0 || (scanned_mask[w] & bit) != 0 {
                 continue;
             }
-            let hdr = pci_read_u8(bus, dev, 0, 0x0e);
-            let max_fn = if (hdr & 0x80) != 0 { 8u8 } else { 1u8 };
-            for func in 0..max_fn {
-                let id = pci_read_u32(bus, dev, func, 0x00);
-                let vid = (id & 0xffff) as u16;
-                if vid == 0xffff {
+            scanned_mask[w] |= bit;
+            any_new = true;
+            let bus = bus_u as u8;
+            for dev in 0..32u8 {
+                let id0 = pci_read_u32(bus, dev, 0, 0x00);
+                if (id0 & 0xffff) == 0xffff {
                     continue;
                 }
-                let did = (id >> 16) as u16;
-                let class_rev = pci_read_u32(bus, dev, func, 0x08);
-                let fn_hdr = pci_read_u8(bus, dev, func, 0x0e) & 0x7f;
-                let subsys = if fn_hdr == 0 {
-                    pci_read_u32(bus, dev, func, 0x2c)
-                } else {
-                    0
-                };
-                let irq_pin = pci_read_u8(bus, dev, func, 0x3d);
-                let bdf = ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
-
-                let mut rec = BootPciFuncRecord {
-                    bus_dev_fn: bdf,
-                    vendor_id: vid,
-                    device_id: did,
-                    subsys_vendor_id: (subsys & 0xffff) as u16,
-                    subsys_id: (subsys >> 16) as u16,
-                    revision_id: (class_rev & 0xff) as u8,
-                    prog_if: ((class_rev >> 8) & 0xff) as u8,
-                    subclass: ((class_rev >> 16) & 0xff) as u8,
-                    class_code: (class_rev >> 24) as u8,
-                    managed_slot: 0xff,
-                    dev_flags: 0,
-                    bar_flags: [0; 6],
-                    irq_pin,
-                    _pad: 0,
-                    bar0_size_bytes: 0,
-                };
-                if fn_hdr == 0 {
-                    for bi in 0..6usize {
-                        let raw = pci_read_u32(bus, dev, func, (0x10 + bi * 4) as u8);
-                        if raw != 0 && (raw & 1) != 0 {
-                            rec.bar_flags[bi] = PCI_BAR_FLAG_IO as u8;
-                        } else if (raw & !0xf) != 0 {
-                            let mut f = PCI_BAR_FLAG_MMIO as u8;
-                            if (raw & 0x6) == 0x4 {
-                                f |= PCI_BAR_FLAG_64BIT as u8;
+                let hdr = pci_read_u8(bus, dev, 0, 0x0e);
+                let max_fn = if (hdr & 0x80) != 0 { 8u8 } else { 1u8 };
+                for func in 0..max_fn {
+                    let id = pci_read_u32(bus, dev, func, 0x00);
+                    let vid = (id & 0xffff) as u16;
+                    if vid == 0xffff {
+                        continue;
+                    }
+                    let did = (id >> 16) as u16;
+                    let class_rev = pci_read_u32(bus, dev, func, 0x08);
+                    let fn_hdr = pci_read_u8(bus, dev, func, 0x0e) & 0x7f;
+                    let class_code = (class_rev >> 24) as u8;
+                    let subclass = ((class_rev >> 16) & 0xff) as u8;
+                    if fn_hdr == 1 && class_code == 0x06 && subclass == 0x04 {
+                        let bus_info = pci_read_u32(bus, dev, func, 0x18);
+                        let sec = ((bus_info >> 8) & 0xff) as u8;
+                        let sub = ((bus_info >> 16) & 0xff) as u8;
+                        if sec > bus && sec <= max_bus {
+                            for b2 in sec..=sub.min(max_bus) {
+                                bus_mask[(b2 as usize) >> 6] |= 1u64 << (b2 & 63);
                             }
-                            if (raw & 0x8) != 0 {
-                                f |= PCI_BAR_FLAG_PREFETCHABLE as u8;
-                            }
-                            rec.bar_flags[bi] = f;
                         }
                     }
-                }
-                record_topology_hints(&rec);
+                    let subsys = if fn_hdr == 0 {
+                        pci_read_u32(bus, dev, func, 0x2c)
+                    } else {
+                        0
+                    };
+                    let irq_pin = pci_read_u8(bus, dev, func, 0x3d);
+                    let bdf =
+                        ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
 
-                if let Some((slot_idx, vdev)) = probe_pci_function(bus, dev, func) {
-                    rec.managed_slot = slot_idx as u8;
-                    rec.bar0_size_bytes = vdev.bars[0].size_bytes;
-                    for (bi, b) in vdev.bars.iter().enumerate() {
-                        rec.bar_flags[bi] = encode_bar_desc_flags(*b);
-                    }
-                    if vdev.is_virtio {
-                        rec.dev_flags |= PCI_DEV_FLAG_VIRTIO as u8;
-                    }
-                    if vdev.msi_cap_off != 0 {
-                        rec.dev_flags |= PCI_DEV_FLAG_MSI as u8;
-                    }
-                    if vdev.msix_cap_off != 0 {
-                        rec.dev_flags |= PCI_DEV_FLAG_MSIX as u8;
-                    }
-                    if !PCI_DEVS[slot_idx].present.load(Ordering::Relaxed) {
-                        // SAFETY: Single-threaded BSP init before `present = true`.
-                        unsafe {
-                            *PCI_DEVS[slot_idx].dev_inner.get() = vdev;
+                    let mut rec = BootPciFuncRecord {
+                        bus_dev_fn: bdf,
+                        vendor_id: vid,
+                        device_id: did,
+                        subsys_vendor_id: (subsys & 0xffff) as u16,
+                        subsys_id: (subsys >> 16) as u16,
+                        revision_id: (class_rev & 0xff) as u8,
+                        prog_if: ((class_rev >> 8) & 0xff) as u8,
+                        subclass,
+                        class_code,
+                        managed_slot: 0xff,
+                        dev_flags: 0,
+                        bar_flags: [0; 6],
+                        irq_pin,
+                        _pad: 0,
+                        bar0_size_bytes: 0,
+                    };
+                    if fn_hdr == 0 {
+                        for (bi, bflag) in rec.bar_flags.iter_mut().enumerate() {
+                            let raw = pci_read_u32(bus, dev, func, (0x10 + bi * 4) as u8);
+                            if raw != 0 && (raw & 1) != 0 {
+                                *bflag = PCI_BAR_FLAG_IO as u8;
+                            } else if (raw & !0xf) != 0 {
+                                let mut f = PCI_BAR_FLAG_MMIO as u8;
+                                if (raw & 0x6) == 0x4 {
+                                    f |= PCI_BAR_FLAG_64BIT as u8;
+                                }
+                                if (raw & 0x8) != 0 {
+                                    f |= PCI_BAR_FLAG_PREFETCHABLE as u8;
+                                }
+                                *bflag = f;
+                            }
                         }
-                        PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
-                        found += 1;
-                        let label = slot_label(slot_idx);
-                        let bar64_cnt = vdev
-                            .bars
-                            .iter()
-                            .filter(|b| b.kind == crate::pci_bar::PciBarKind::Mem64)
-                            .count();
-                        let above_4g = vdev.bars.iter().any(|b| b.is_mmio() && b.above_4g);
-                        serial_println!(
-                            "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x} bar64={} above4g={} msi={:#x} msix={:#x}({})",
-                            label,
-                            vdev.bus,
-                            vdev.dev,
-                            vdev.func,
-                            vdev.info.vendor_id,
-                            vdev.info.device_id,
-                            vdev.bar_idx,
-                            vdev.phys_base,
-                            vdev.num_pages,
-                            vdev.info.common_off,
-                            vdev.info.notify_off,
-                            vdev.info.notify_mult,
-                            vdev.info.device_off,
-                            bar64_cnt,
-                            above_4g as u8,
-                            vdev.msi_cap_off,
-                            vdev.msix_cap_off,
-                            vdev.msix_table_len,
-                        );
                     }
+                    record_topology_hints(&rec);
+
+                    if let Some((pref_slot, vdev)) = probe_pci_function(bus, dev, func) {
+                        let chosen = match pref_slot {
+                            Some(s)
+                                if s < MAX_MANAGED_PCI_DEVS
+                                    && !PCI_DEVS[s].present.load(Ordering::Relaxed) =>
+                            {
+                                Some(s)
+                            }
+                            _ => (PCI_LEGACY_FIXED_SLOTS..MAX_MANAGED_PCI_DEVS)
+                                .find(|&s| !PCI_DEVS[s].present.load(Ordering::Relaxed)),
+                        };
+                        if let Some(slot_idx) = chosen {
+                            rec.managed_slot = slot_idx as u8;
+                            rec.bar0_size_bytes = vdev.bars[0].size_bytes;
+                            for (bi, b) in vdev.bars.iter().enumerate() {
+                                rec.bar_flags[bi] = encode_bar_desc_flags(*b);
+                            }
+                            if vdev.is_virtio {
+                                rec.dev_flags |= PCI_DEV_FLAG_VIRTIO as u8;
+                            }
+                            if vdev.msi_cap_off != 0 {
+                                rec.dev_flags |= PCI_DEV_FLAG_MSI as u8;
+                            }
+                            if vdev.msix_cap_off != 0 {
+                                rec.dev_flags |= PCI_DEV_FLAG_MSIX as u8;
+                            }
+                            if vdev.ext_caps.pcie_cap_off != 0 {
+                                rec.dev_flags |= PCI_DEV_FLAG_PCIE as u8;
+                            }
+                            if vdev.ext_caps.ecam_phys != 0 {
+                                rec.dev_flags |= PCI_DEV_FLAG_ECAM as u8;
+                            }
+                            if vdev.ext_caps.has_flr {
+                                rec.dev_flags |= PCI_DEV_FLAG_FLR as u8;
+                            }
+                            if vdev.ext_caps.rebar_cap_off != 0 {
+                                rec.dev_flags |= PCI_DEV_FLAG_REBAR as u8;
+                            }
+                            // SAFETY: Single-threaded BSP init before `present = true`.
+                            unsafe {
+                                *PCI_DEVS[slot_idx].dev_inner.get() = vdev;
+                            }
+                            PCI_DEVS[slot_idx].present.store(true, Ordering::Release);
+                            found += 1;
+                            let label = slot_label(slot_idx);
+                            let bar64_cnt = vdev
+                                .bars
+                                .iter()
+                                .filter(|b| b.kind == crate::pci_bar::PciBarKind::Mem64)
+                                .count();
+                            let above_4g = vdev.bars.iter().any(|b| b.is_mmio() && b.above_4g);
+                            serial_println!(
+                                "[DRY-PCI] PASS: {} {:02x}:{:02x}.{} id={:#06x}:{:#06x} bar={} phys={:#x} pages={} common={:#x} notify={:#x}(x{}) dev={:#x} bar64={} above4g={} msi={:#x} msix={:#x}({}) slot={} ecam={} pcie={:#x} flr={} rebar={:#x}",
+                                label,
+                                vdev.bus,
+                                vdev.dev,
+                                vdev.func,
+                                vdev.info.vendor_id,
+                                vdev.info.device_id,
+                                vdev.bar_idx,
+                                vdev.phys_base,
+                                vdev.num_pages,
+                                vdev.info.common_off,
+                                vdev.info.notify_off,
+                                vdev.info.notify_mult,
+                                vdev.info.device_off,
+                                bar64_cnt,
+                                above_4g as u8,
+                                vdev.msi_cap_off,
+                                vdev.msix_cap_off,
+                                vdev.msix_table_len,
+                                slot_idx,
+                                (vdev.ext_caps.ecam_phys != 0) as u8,
+                                vdev.ext_caps.pcie_cap_off,
+                                vdev.ext_caps.has_flr as u8,
+                                vdev.ext_caps.rebar_cap_off,
+                            );
+                        }
+                    }
+                    push_boot_pci_record(rec_cnt, rec);
+                    rec_cnt += 1;
                 }
-                push_boot_pci_record(rec_cnt, rec);
-                rec_cnt += 1;
             }
+        }
+        if !any_new {
+            break;
         }
     }
     publish_boot_pci_count(rec_cnt);
@@ -321,7 +387,7 @@ pub fn mint_root_pci_blk_cap(
 }
 
 pub(crate) fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
-    if dev_idx >= PCI_DEV_COUNT || !PCI_DEVS[dev_idx].present.load(Ordering::Acquire) {
+    if dev_idx >= MAX_MANAGED_PCI_DEVS || !PCI_DEVS[dev_idx].present.load(Ordering::Acquire) {
         return None;
     }
     // SAFETY: Immutable after `PCI_DEVS[dev_idx].present` is published with `Release`.
@@ -330,16 +396,19 @@ pub(crate) fn validated_pci_slot(dev_idx: usize) -> Option<ValidatedVirtioPci> {
 
 #[inline]
 pub(super) fn is_iommu_enforcing_for_pci() -> bool {
-    crate::iommu::status() == VtdStatus::Enforcing
+    is_hw_enforcing()
 }
 
-/// Enumerate supervisor-owned MMIO shadow pages (MSI-X tables and VirtIO `common_cfg`) to map in
-/// `KERNEL_VSPACE` (`PML4[385]`) before CR3 handover.
+/// Enumerate supervisor-owned MMIO shadow pages (`ECAM`, MSI-X tables, and VirtIO `common_cfg`)
+/// to map in `KERNEL_VSPACE` (`PML4[385]`) before CR3 handover.
 pub(crate) fn for_each_kernel_shadow_mmio_page(mut f: impl FnMut(u64, u64)) {
-    for slot_idx in 0..PCI_DEV_COUNT {
+    for slot_idx in 0..MAX_MANAGED_PCI_DEVS {
         let Some(vdev) = validated_pci_slot(slot_idx) else {
             continue;
         };
+        if vdev.ext_caps.ecam_phys != 0 {
+            f(pci_ecam_vaddr(slot_idx), vdev.ext_caps.ecam_phys);
+        }
         if vdev.preserve_active_gop {
             continue;
         }
@@ -371,10 +440,7 @@ pub(super) fn claim_pci_slot(
     cspace_id: CSpaceId,
     vdev: &ValidatedVirtioPci,
 ) -> Result<bool, CapError> {
-    if matches!(
-        crate::iommu::status(),
-        VtdStatus::Uninitialized | VtdStatus::FailedClosed
-    ) {
+    if !is_dma_permitted() {
         return Err(CapError::InsufficientRights);
     }
     let slot = &PCI_DEVS[dev_idx];
@@ -411,7 +477,7 @@ pub(super) fn release_claimed_pci_slot(dev_idx: usize, claimed_new: bool) {
 }
 
 pub(super) fn enable_pci_bme(vdev: &ValidatedVirtioPci) {
-    if vdev.preserve_active_gop {
+    if vdev.preserve_active_gop || !is_dma_permitted() {
         return;
     }
     let cmd = pci_read_u16(vdev.bus, vdev.dev, vdev.func, 0x04);
@@ -467,7 +533,7 @@ pub fn quiesce_pci_for_cspace(cspace_id: CSpaceId) {
     if cspace_id == 0 {
         return;
     }
-    for dev_idx in 0..PCI_DEV_COUNT {
+    for dev_idx in 0..MAX_MANAGED_PCI_DEVS {
         quiesce_slot_for_cspace(dev_idx, cspace_id);
     }
 }
@@ -481,7 +547,7 @@ pub fn on_pci_cap_revoked(obj_id: u32, expected_gen: u32, global_slot: u32) {
 }
 
 fn record_pci_denied_first_or(dev_idx: Option<usize>) {
-    let idx = dev_idx.filter(|&i| i < PCI_DEV_COUNT).unwrap_or(0);
+    let idx = dev_idx.filter(|&i| i < MAX_MANAGED_PCI_DEVS).unwrap_or(0);
     PCI_DEVS[idx].dma_denied_ops.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -502,7 +568,8 @@ fn unmap_and_destroy_dma_frame(
 }
 
 /// `SYS_DEV_MAP` (`29`): Map the authorized VirtIO MMIO BAR (`op=0`), query sanitized BAR metadata
-/// (`op=1`), or map a bounded MMIO window at `page_offset` (`op=2`, `UC` or prefetchable `WC`).
+/// (`op=1`), map a bounded MMIO window (`op=2`), perform capability-gated PCI/ECAM config R/W
+/// (`op=3`), or mint a dynamically enumerated `PciDev` slot capability (`op=5`).
 #[inline(never)]
 pub fn sys_dev_map(
     cspace_id: CSpaceId,
@@ -511,7 +578,7 @@ pub fn sys_dev_map(
     pci_cap_raw: u64,
     user_vaddr_or_op: u64,
     arg2: u64,
-) -> Result<isize, SysError> {
+) -> Result<(isize, u64), SysError> {
     if subj_label.domain != SecDomain::RootSystem
         || subj_label.flags.contains(SecFlags::DEV_WORKSPACE)
     {
@@ -520,7 +587,25 @@ pub fn sys_dev_map(
     }
     let op = user_vaddr_or_op & DEV_MAP_OP_MASK;
     if user_vaddr_or_op == DEV_MAP_OP_QUERY_BARS {
-        return pci_window::sys_dev_query_bars(cspace_id, subj_label, pci_cap_raw, arg2);
+        return Ok((
+            pci_window::sys_dev_query_bars(cspace_id, subj_label, pci_cap_raw, arg2)?,
+            0,
+        ));
+    }
+    if op == DEV_MAP_OP_CFG_RW {
+        return pci_window::sys_dev_cfg_rw(
+            cspace_id,
+            subj_label,
+            pci_cap_raw,
+            user_vaddr_or_op,
+            arg2,
+        );
+    }
+    if op == DEV_MAP_OP_ENUM_MINT {
+        return pci_window::sys_dev_enum_mint(cspace_id, subj_label, pci_cap_raw, user_vaddr_or_op);
+    }
+    if op == DEV_MAP_OP_MAP_WINDOW_2M {
+        return Err(SysError::NoSys);
     }
     let Some((vs_gen, _, _)) = inspect_vspace_live(vspace_id) else {
         return Err(SysError::Inval);
@@ -530,14 +615,17 @@ pub fn sys_dev_map(
         generation: vs_gen,
     };
     if op == DEV_MAP_OP_MAP_WINDOW {
-        return pci_window::sys_dev_map_window(
-            cspace_id,
-            subj_label,
-            vs_h,
-            pci_cap_raw,
-            user_vaddr_or_op & !DEV_MAP_OP_MASK,
-            arg2,
-        );
+        return Ok((
+            pci_window::sys_dev_map_window(
+                cspace_id,
+                subj_label,
+                vs_h,
+                pci_cap_raw,
+                user_vaddr_or_op & !DEV_MAP_OP_MASK,
+                arg2,
+            )?,
+            0,
+        ));
     }
     if op != DEV_MAP_OP_LEGACY_VIRTIO {
         return Err(SysError::Inval);
@@ -647,7 +735,7 @@ pub fn sys_dev_map(
         }
         return Err(fault);
     }
-    Ok(vdev.num_pages as isize)
+    Ok((vdev.num_pages as isize, 0))
 }
 
 /// `SYS_DMA_ALLOC` (`30`): Allocate a pinned `4 KiB` or `2 MiB` (`user_vaddr & DMA_ALLOC_FLAG_2M`)

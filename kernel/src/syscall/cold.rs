@@ -426,7 +426,7 @@ pub(crate) fn sys_cold_dispatch(
             let subj = unpack_seclabel_u64(cur_tcb.subj_label_raw.load(Ordering::Acquire));
             let vs_id = cur_tcb.vspace_id.load(Ordering::Acquire);
             match crate::pci::sys_dev_map(cs_id, subj, vs_id, a0, a1, a2) {
-                Ok(pages) => (pages, 0),
+                Ok(pair) => pair,
                 Err(e) => (e.as_raw(), 0),
             }
         }

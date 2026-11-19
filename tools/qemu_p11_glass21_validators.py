@@ -378,9 +378,9 @@ def run_p11_glass21_suite(
     esp_1280 = build_dir / "esp_p11_1280.img"
     esp_1024 = build_dir / "esp_p11_1024.img"
     esp_1080 = build_dir / "esp_p11_1080.img"
-    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1", resolution="1280x800x32")
-    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1", resolution="1024x768x32")
-    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1", resolution="1920x1080x32")
+    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1280x800x32")
+    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1024x768x32")
+    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1920x1080x32")
 
     res_a = run_p11a_glass21_1280x800_grouped_overview_dpi(
         "p11a_glass21_1280x800_grouped_overview_dpi",

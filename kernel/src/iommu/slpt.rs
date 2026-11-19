@@ -5,7 +5,7 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::iommu::dmar::{DrhdUnit, ParsedDmar};
-use crate::pci::PCI_DEV_COUNT;
+use crate::pci::MAX_MANAGED_PCI_DEVS;
 use crate::pmm::{
     alloc_pages, free_pages, phys_to_hhdm, AllocFlags, FrameHandle, PageOrder, PAGE_SIZE,
 };
@@ -13,7 +13,7 @@ use crate::security::{SecDomain, SecFlags, SecLabel};
 
 pub(super) const VTD_KERNEL_LABEL: SecLabel =
     SecLabel::new(SecDomain::Kernel, SecFlags::NONE, 0, 0);
-pub(super) const BOOT_RMRR_DID: u16 = (PCI_DEV_COUNT + 1) as u16;
+pub(super) const BOOT_RMRR_DID: u16 = (MAX_MANAGED_PCI_DEVS + 1) as u16;
 
 pub(super) const SLPT_R: u64 = 1 << 0;
 pub(super) const SLPT_W: u64 = 1 << 1;
@@ -282,13 +282,11 @@ pub(crate) fn is_dedicated_gop_drhd(src: &DrhdUnit, gop_bdf: Option<(u8, u8, u8)
 }
 
 fn unit_owns_bdf(dmar: &ParsedDmar, unit_idx: usize, seg: u16, bus: u8, dev: u8, func: u8) -> bool {
-    for u in 0..dmar.drhd_count {
-        let src = &dmar.drhds[u];
+    for (u, src) in dmar.drhds.iter().enumerate().take(dmar.drhd_count) {
         if src.segment != seg {
             continue;
         }
-        for s in 0..src.scope_count {
-            let sc = src.scopes[s];
+        for &sc in src.scopes.iter().take(src.scope_count) {
             if sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func {
                 return u == unit_idx;
             }

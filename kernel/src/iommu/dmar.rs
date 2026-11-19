@@ -308,8 +308,8 @@ pub fn parse_and_latch_dmar(bytes: &[u8]) -> bool {
     }
 
     let max_pa = cpu_max_phys_addr_limit();
-    for u in 0..parsed.drhd_count {
-        let base = parsed.drhds[u].register_base_phys;
+    for (u, drhd) in parsed.drhds.iter().enumerate().take(parsed.drhd_count) {
+        let base = drhd.register_base_phys;
         if base >= max_pa || query_frame_state(base) != FrameState::ReservedOrMmio {
             DMAR_MALFORMED.store(true, Ordering::Release);
             serial_println!(

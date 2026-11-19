@@ -203,6 +203,9 @@ pub const DMA_ALLOC_FLAG_2M: u64 = 1;
 
 pub const DEV_MAP_OP_QUERY_BARS: u64 = 1;
 pub const DEV_MAP_OP_MAP_WINDOW: u64 = 2;
+pub const DEV_MAP_OP_CFG_RW: u64 = 3;
+pub const DEV_MAP_OP_MAP_WINDOW_2M: u64 = 4;
+pub const DEV_MAP_OP_ENUM_MINT: u64 = 5;
 
 pub const PCI_BAR_FLAG_MMIO: u32 = 1 << 0;
 pub const PCI_BAR_FLAG_64BIT: u32 = 1 << 1;
@@ -214,6 +217,13 @@ pub const PCI_DEV_FLAG_IOMMU_ACTIVE: u16 = 1 << 0;
 pub const PCI_DEV_FLAG_MSI: u16 = 1 << 1;
 pub const PCI_DEV_FLAG_MSIX: u16 = 1 << 2;
 pub const PCI_DEV_FLAG_VIRTIO: u16 = 1 << 3;
+pub const PCI_DEV_FLAG_PCIE: u16 = 1 << 4;
+pub const PCI_DEV_FLAG_ECAM: u16 = 1 << 5;
+pub const PCI_DEV_FLAG_FLR: u16 = 1 << 6;
+pub const PCI_DEV_FLAG_REBAR: u16 = 1 << 7;
+pub const PCI_DEV_FLAG_ACS: u16 = 1 << 8;
+pub const PCI_DEV_FLAG_AER: u16 = 1 << 9;
+pub const PCI_DEV_FLAG_SRIOV: u16 = 1 << 10;
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
@@ -288,6 +298,50 @@ pub fn sys_dev_map_window(
         Err(r0)
     } else {
         Ok(r0 as usize)
+    }
+}
+
+#[inline]
+pub fn sys_dev_cfg_read(pci_cap: u64, offset: u16, width: u8) -> Result<u32, isize> {
+    if !matches!(width, 1 | 2 | 4) || (offset as usize) + (width as usize) > 4096 {
+        return Err(crate::EINVAL);
+    }
+    let op = DEV_MAP_OP_CFG_RW
+        | (((offset as u64) & 0xfff) << 12)
+        | (((width as u64) & 0xf) << 24);
+    let (r0, r1) = raw_syscall6(SYS_DEV_MAP, pci_cap, op, 0, 0, 0, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(r1 as u32)
+    }
+}
+
+#[inline]
+pub fn sys_dev_cfg_write(pci_cap: u64, offset: u16, width: u8, val: u32) -> Result<(), isize> {
+    if !matches!(width, 1 | 2 | 4) || (offset as usize) + (width as usize) > 4096 {
+        return Err(crate::EINVAL);
+    }
+    let op = DEV_MAP_OP_CFG_RW
+        | (((offset as u64) & 0xfff) << 12)
+        | (((width as u64) & 0xf) << 24)
+        | (1u64 << 28);
+    let (r0, _) = raw_syscall6(SYS_DEV_MAP, pci_cap, op, val as u64, 0, 0, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(())
+    }
+}
+
+#[inline]
+pub fn sys_dev_mint_slot(pci_root_cap: u64, slot_idx: u16) -> Result<u64, isize> {
+    let op = DEV_MAP_OP_ENUM_MINT | (((slot_idx as u64) & 0x3ff) << 12);
+    let (r0, cap) = raw_syscall6(SYS_DEV_MAP, pci_root_cap, op, 0, 0, 0, 0);
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok(cap)
     }
 }
 

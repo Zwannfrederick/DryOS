@@ -337,7 +337,8 @@ pub const KERNEL_MMIO_SLOT_STRIDE: u64 = 0x1_0000;
 pub const KERNEL_VTD_MAX_PAGES: usize = 4;
 pub const KERNEL_MSIX_MMIO_OFFSET: u64 = 0x0010_0000;
 pub const KERNEL_MSIX_MAX_PAGES: usize = 4;
-pub const KERNEL_VIRTIO_COMMON_MMIO_OFFSET: u64 = 0x0020_0000;
+pub const KERNEL_VIRTIO_COMMON_MMIO_OFFSET: u64 = 0x0080_0000;
+pub const KERNEL_ECAM_MMIO_OFFSET: u64 = 0x0100_0000;
 pub const KERNEL_GOP_DIAG_BASE: u64 = KERNEL_MMIO_DYN_BASE + 0x0200_0000;
 
 #[inline]
@@ -355,4 +356,9 @@ pub const fn pci_virtio_common_vaddr(slot_idx: usize) -> u64 {
     KERNEL_MMIO_DYN_BASE
         + KERNEL_VIRTIO_COMMON_MMIO_OFFSET
         + (slot_idx as u64) * KERNEL_MMIO_SLOT_STRIDE
+}
+
+#[inline]
+pub const fn pci_ecam_vaddr(slot_idx: usize) -> u64 {
+    KERNEL_MMIO_DYN_BASE + KERNEL_ECAM_MMIO_OFFSET + (slot_idx as u64) * 4096
 }

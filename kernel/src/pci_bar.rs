@@ -15,6 +15,9 @@ pub const DEV_MAP_OP_MASK: u64 = 0xfff;
 pub const DEV_MAP_OP_LEGACY_VIRTIO: u64 = 0;
 pub const DEV_MAP_OP_QUERY_BARS: u64 = 1;
 pub const DEV_MAP_OP_MAP_WINDOW: u64 = 2;
+pub const DEV_MAP_OP_CFG_RW: u64 = 3;
+pub const DEV_MAP_OP_MAP_WINDOW_2M: u64 = 4;
+pub const DEV_MAP_OP_ENUM_MINT: u64 = 5;
 
 pub const PCI_BAR_FLAG_MMIO: u32 = 1 << 0;
 pub const PCI_BAR_FLAG_64BIT: u32 = 1 << 1;
@@ -26,6 +29,13 @@ pub const PCI_DEV_FLAG_IOMMU_ACTIVE: u16 = 1 << 0;
 pub const PCI_DEV_FLAG_MSI: u16 = 1 << 1;
 pub const PCI_DEV_FLAG_MSIX: u16 = 1 << 2;
 pub const PCI_DEV_FLAG_VIRTIO: u16 = 1 << 3;
+pub const PCI_DEV_FLAG_PCIE: u16 = 1 << 4;
+pub const PCI_DEV_FLAG_ECAM: u16 = 1 << 5;
+pub const PCI_DEV_FLAG_FLR: u16 = 1 << 6;
+pub const PCI_DEV_FLAG_REBAR: u16 = 1 << 7;
+pub const PCI_DEV_FLAG_ACS: u16 = 1 << 8;
+pub const PCI_DEV_FLAG_AER: u16 = 1 << 9;
+pub const PCI_DEV_FLAG_SRIOV: u16 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PciBarKind {

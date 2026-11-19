@@ -463,9 +463,9 @@ def run_p10_glass2_suite(
     esp_1280 = build_dir / "esp_p10_1280.img"
     esp_1080 = build_dir / "esp_p10_1080.img"
     esp_1024 = build_dir / "esp_p10_1024.img"
-    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1", resolution="1280x800x32")
-    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1", resolution="1920x1080x32")
-    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1", resolution="1024x768x32")
+    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1280x800x32")
+    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1920x1080x32")
+    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1024x768x32")
 
     res_a = run_p10a_glass2_1280x800_showcase(
         "p10a_glass2_1280x800_showcase", esp_1280, ovmf_code, ovmf_vars, build_dir, shots_dir

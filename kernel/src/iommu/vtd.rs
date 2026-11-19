@@ -9,14 +9,21 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::arch::{irq_restore, irq_save_cli};
-use crate::iommu::dmar::{dmar_snapshot, is_dmar_present_or_malformed, DrhdUnit, ParsedDmar, MAX_DRHD_UNITS};
+use crate::iommu::dmar::{
+    dmar_snapshot, is_dmar_present_or_malformed, DrhdUnit, ParsedDmar, MAX_DRHD_UNITS,
+};
+use crate::iommu::ivrs::{is_ivrs_present_or_malformed, ivrs_snapshot};
+use crate::iommu::ops::{
+    evaluate_iommu_policy, is_dma_allowed_status, is_hw_enforcing_status, IommuBackendKind,
+    IommuCaps, IommuOps, IommuPerms, IommuStatus,
+};
 use crate::iommu::slpt::{
     bdf_has_active_rmrr, clear_slpt_4k, flush_descriptor_cacheline, flush_entire_page,
     free_all_domain_frames, get_or_alloc_bus_ctx, is_dedicated_gop_drhd, map_slpt_4k,
     premap_unit_rmrrs, release_bus_ctx_if_idle, write_ctx_entry, DomainState, VtdUnit,
     BOOT_RMRR_DID, VTD_KERNEL_LABEL,
 };
-use crate::pci::{active_gop_bdf, PCI_DEV_COUNT};
+use crate::pci::{active_gop_bdf, MAX_MANAGED_PCI_DEVS};
 use crate::pmm::{alloc_pages, free_pages, AllocFlags, PageOrder, PAGE_SIZE};
 use crate::serial_println;
 use crate::vspace::pte::{vtd_unit_vaddr, KERNEL_VTD_MAX_PAGES};
@@ -49,19 +56,10 @@ const IOTLB_DW: u64 = 1 << 48;
 
 const VTD_POLL_SPIN_LIMIT: usize = 1_000_000;
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VtdStatus {
-    Uninitialized = 0,
-    NotPresent = 1,
-    Enforcing = 2,
-    FailedClosed = 3,
-}
-
-const fn init_device_domains() -> [DomainState; PCI_DEV_COUNT] {
-    let mut arr = [const { DomainState::empty(0) }; PCI_DEV_COUNT];
+const fn init_device_domains() -> [DomainState; MAX_MANAGED_PCI_DEVS] {
+    let mut arr = [const { DomainState::empty(0) }; MAX_MANAGED_PCI_DEVS];
     let mut i = 0;
-    while i < PCI_DEV_COUNT {
+    while i < MAX_MANAGED_PCI_DEVS {
         arr[i] = DomainState::empty((i + 1) as u16);
         i += 1;
     }
@@ -70,7 +68,7 @@ const fn init_device_domains() -> [DomainState; PCI_DEV_COUNT] {
 
 struct VtdEngineState {
     units: [VtdUnit; MAX_DRHD_UNITS],
-    domains: [DomainState; PCI_DEV_COUNT],
+    domains: [DomainState; MAX_MANAGED_PCI_DEVS],
     rmrr_domains: [DomainState; MAX_DRHD_UNITS],
 }
 
@@ -90,7 +88,10 @@ struct VtdLockBox {
 }
 unsafe impl Sync for VtdLockBox {}
 
-static VTD_STATUS: AtomicU8 = AtomicU8::new(VtdStatus::Uninitialized as u8);
+static VTD_STATUS: AtomicU8 = AtomicU8::new(IommuStatus::Uninitialized as u8);
+static IOMMU_BACKEND: AtomicU8 = AtomicU8::new(IommuBackendKind::None as u8);
+static IOMMU_CAPS_BITS: AtomicU8 = AtomicU8::new(0);
+static IOMMU_CAPS_FLAGS: AtomicU8 = AtomicU8::new(0);
 static VTD_GFX_SCANOUT_DEFERRED: AtomicBool = AtomicBool::new(false);
 static VTD_FAULT_COUNT: AtomicU64 = AtomicU64::new(0);
 static VTD_ENGINE: VtdLockBox = VtdLockBox {
@@ -120,13 +121,148 @@ fn with_vtd_lock<R>(f: impl FnOnce(&mut VtdEngineState) -> R) -> R {
 }
 
 #[inline]
-pub fn status() -> VtdStatus {
-    match VTD_STATUS.load(Ordering::Acquire) {
-        1 => VtdStatus::NotPresent,
-        2 => VtdStatus::Enforcing,
-        3 => VtdStatus::FailedClosed,
-        _ => VtdStatus::Uninitialized,
+pub fn status() -> IommuStatus {
+    IommuStatus::from_raw(VTD_STATUS.load(Ordering::Acquire))
+}
+
+#[inline]
+pub fn is_dma_permitted() -> bool {
+    is_dma_allowed_status(status())
+}
+
+#[inline]
+pub fn is_hw_enforcing() -> bool {
+    is_hw_enforcing_status(status())
+}
+
+pub fn backend_kind() -> IommuBackendKind {
+    match IOMMU_BACKEND.load(Ordering::Acquire) {
+        1 => IommuBackendKind::IntelVtd,
+        2 => IommuBackendKind::AmdVi,
+        3 => IommuBackendKind::QemuTestBypass,
+        _ => IommuBackendKind::None,
     }
+}
+
+pub fn caps() -> IommuCaps {
+    let flags = IOMMU_CAPS_FLAGS.load(Ordering::Acquire);
+    IommuCaps {
+        backend: backend_kind(),
+        max_aw_bits: IOMMU_CAPS_BITS.load(Ordering::Acquire),
+        page_4k: (flags & (1 << 0)) != 0,
+        page_2m: (flags & (1 << 1)) != 0,
+        coherent: (flags & (1 << 2)) != 0,
+        int_remap: (flags & (1 << 3)) != 0,
+        fault_reporting: (flags & (1 << 4)) != 0,
+        reserved_regions: (flags & (1 << 5)) != 0,
+    }
+}
+
+struct VtdIommuOps;
+struct QemuBypassIommuOps;
+struct FailClosedIommuOps;
+
+static VTD_OPS: VtdIommuOps = VtdIommuOps;
+static QEMU_BYPASS_OPS: QemuBypassIommuOps = QemuBypassIommuOps;
+static FAIL_CLOSED_OPS: FailClosedIommuOps = FailClosedIommuOps;
+
+impl IommuOps for VtdIommuOps {
+    fn kind(&self) -> IommuBackendKind {
+        IommuBackendKind::IntelVtd
+    }
+    fn caps(&self) -> IommuCaps {
+        caps()
+    }
+    fn attach_device(&self, dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
+        attach_device_domain(dev_idx, bus, dev, func)
+    }
+    fn detach_device(&self, dev_idx: usize) {
+        detach_and_scrub_domain(dev_idx);
+    }
+    fn map_iova(
+        &self,
+        dev_idx: usize,
+        _iova: u64,
+        hpa: u64,
+        len_bytes: u64,
+        _perms: IommuPerms,
+    ) -> Result<(), ()> {
+        map_dma_range(dev_idx, hpa, len_bytes)
+    }
+    fn unmap_iova(&self, dev_idx: usize, iova: u64, len_bytes: u64) {
+        unmap_dma_range(dev_idx, iova, len_bytes);
+    }
+    fn poll_faults(&self) -> u64 {
+        poll_and_clear_faults()
+    }
+}
+
+impl IommuOps for QemuBypassIommuOps {
+    fn kind(&self) -> IommuBackendKind {
+        IommuBackendKind::QemuTestBypass
+    }
+    fn caps(&self) -> IommuCaps {
+        caps()
+    }
+    fn attach_device(&self, dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
+        attach_device_domain(dev_idx, bus, dev, func)
+    }
+    fn detach_device(&self, _dev_idx: usize) {}
+    fn map_iova(
+        &self,
+        dev_idx: usize,
+        _iova: u64,
+        hpa: u64,
+        len_bytes: u64,
+        _perms: IommuPerms,
+    ) -> Result<(), ()> {
+        map_dma_range(dev_idx, hpa, len_bytes)
+    }
+    fn unmap_iova(&self, _dev_idx: usize, _iova: u64, _len_bytes: u64) {}
+    fn poll_faults(&self) -> u64 {
+        0
+    }
+}
+
+impl IommuOps for FailClosedIommuOps {
+    fn kind(&self) -> IommuBackendKind {
+        backend_kind()
+    }
+    fn caps(&self) -> IommuCaps {
+        caps()
+    }
+    fn attach_device(&self, _dev_idx: usize, _bus: u8, _dev: u8, _func: u8) -> Result<(), ()> {
+        Err(())
+    }
+    fn detach_device(&self, _dev_idx: usize) {}
+    fn map_iova(
+        &self,
+        _dev_idx: usize,
+        _iova: u64,
+        _hpa: u64,
+        _len_bytes: u64,
+        _perms: IommuPerms,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn unmap_iova(&self, _dev_idx: usize, _iova: u64, _len_bytes: u64) {}
+    fn poll_faults(&self) -> u64 {
+        VTD_FAULT_COUNT.load(Ordering::Acquire)
+    }
+}
+
+pub fn active_iommu_ops() -> &'static dyn IommuOps {
+    match status() {
+        IommuStatus::Enforcing => &VTD_OPS,
+        IommuStatus::TestUnsafeNoIommu => &QEMU_BYPASS_OPS,
+        IommuStatus::Uninitialized
+        | IommuStatus::UnsupportedFailClosed
+        | IommuStatus::FailedClosed => &FAIL_CLOSED_OPS,
+    }
+}
+
+pub(crate) fn fail_closed_ops_for_test() -> &'static dyn IommuOps {
+    &FAIL_CLOSED_OPS
 }
 
 #[inline]
@@ -341,65 +477,121 @@ fn init_single_unit(
     true
 }
 
-/// Initialize Intel VT-d units from ACPI `DMAR`. Must run once on BSP right after `init_and_activate_kernel_vspace`.
+/// Initialize hardware IOMMU (Intel VT-d or AMD-Vi IVRS discovery) and apply fail-closed DMA policy.
 #[inline(never)]
-pub fn init_vtd_units() {
+pub fn init_vtd_units(cmdline: &str) {
     VTD_GFX_SCANOUT_DEFERRED.store(false, Ordering::Release);
+    IOMMU_BACKEND.store(IommuBackendKind::None as u8, Ordering::Release);
+    IOMMU_CAPS_BITS.store(0, Ordering::Release);
+    IOMMU_CAPS_FLAGS.store(0, Ordering::Release);
+
+    let policy = evaluate_iommu_policy(cmdline);
     let (present, malformed) = is_dmar_present_or_malformed();
     if malformed {
-        VTD_STATUS.store(VtdStatus::FailedClosed as u8, Ordering::Release);
-        serial_println!("[DRY-IOMMU] VTD_FAIL_CLOSED: malformed DMAR");
+        VTD_STATUS.store(IommuStatus::FailedClosed as u8, Ordering::Release);
+        serial_println!("[DRY-IOMMU] FAIL_CLOSED: malformed DMAR");
         return;
     }
-    if !present {
-        VTD_STATUS.store(VtdStatus::NotPresent as u8, Ordering::Release);
-        serial_println!("[DRY-IOMMU] VTD_NOT_PRESENT (fail-open baseline disabled)");
-        return;
-    }
-    let Some(dmar) = dmar_snapshot() else {
-        VTD_STATUS.store(VtdStatus::FailedClosed as u8, Ordering::Release);
-        return;
-    };
 
-    let (ok, units_up, bits, cm, coh) = with_vtd_lock(|eng| {
-        let mut bits = 48u8;
-        let mut cm = false;
-        let mut coh = true;
-        let mut have_enforced = false;
-        for u in 0..dmar.drhd_count {
-            let src = &dmar.drhds[u];
-            if !init_single_unit(
-                dmar,
-                u,
-                &mut eng.units[u],
-                &mut eng.rmrr_domains[u],
-                vtd_unit_vaddr(u),
-                src,
-            ) {
-                return (false, 0usize, 0u8, false, true);
+    if present {
+        let Some(dmar) = dmar_snapshot() else {
+            VTD_STATUS.store(IommuStatus::FailedClosed as u8, Ordering::Release);
+            return;
+        };
+
+        let (ok, units_up, bits, cm, coh) = with_vtd_lock(|eng| {
+            let mut bits = 48u8;
+            let mut cm = false;
+            let mut coh = true;
+            let mut have_enforced = false;
+            for u in 0..dmar.drhd_count {
+                let src = &dmar.drhds[u];
+                if !init_single_unit(
+                    dmar,
+                    u,
+                    &mut eng.units[u],
+                    &mut eng.rmrr_domains[u],
+                    vtd_unit_vaddr(u),
+                    src,
+                ) {
+                    return (false, 0usize, 0u8, false, true);
+                }
+                if eng.units[u].translation_enabled && !have_enforced {
+                    bits = if eng.units[u].levels_4 { 48 } else { 39 };
+                    cm = eng.units[u].caching_mode;
+                    coh = eng.units[u].coherent;
+                    have_enforced = true;
+                }
             }
-            if eng.units[u].translation_enabled && !have_enforced {
-                bits = if eng.units[u].levels_4 { 48 } else { 39 };
-                cm = eng.units[u].caching_mode;
-                coh = eng.units[u].coherent;
-                have_enforced = true;
+            (have_enforced, dmar.drhd_count, bits, cm, coh)
+        });
+
+        if ok {
+            let mut cflags = (1u8 << 0) | (1u8 << 4); // 4K + fault_reporting
+            if coh {
+                cflags |= 1 << 2;
             }
+            if dmar.rmrr_count > 0 {
+                cflags |= 1 << 5;
+            }
+            IOMMU_BACKEND.store(IommuBackendKind::IntelVtd as u8, Ordering::Release);
+            IOMMU_CAPS_BITS.store(bits, Ordering::Release);
+            IOMMU_CAPS_FLAGS.store(cflags, Ordering::Release);
+            VTD_STATUS.store(IommuStatus::Enforcing as u8, Ordering::Release);
+            serial_println!(
+                "[DRY-IOMMU] VTD_ACTIVE units={} sagaw={}-bit caching_mode={} coherent={}",
+                units_up,
+                bits,
+                cm,
+                coh
+            );
+        } else {
+            VTD_STATUS.store(IommuStatus::FailedClosed as u8, Ordering::Release);
+            serial_println!("[DRY-IOMMU] FAIL_CLOSED: DRHD initialization error");
         }
-        (have_enforced, dmar.drhd_count, bits, cm, coh)
-    });
+        return;
+    }
 
-    if ok {
-        VTD_STATUS.store(VtdStatus::Enforcing as u8, Ordering::Release);
+    let (ivrs_present, ivrs_malformed) = is_ivrs_present_or_malformed();
+    if ivrs_malformed {
+        IOMMU_BACKEND.store(IommuBackendKind::AmdVi as u8, Ordering::Release);
+        VTD_STATUS.store(IommuStatus::FailedClosed as u8, Ordering::Release);
+        serial_println!("[DRY-IOMMU] FAIL_CLOSED: malformed IVRS");
+        return;
+    }
+    if ivrs_present {
+        if let Some(ivrs) = ivrs_snapshot() {
+            IOMMU_BACKEND.store(IommuBackendKind::AmdVi as u8, Ordering::Release);
+            IOMMU_CAPS_BITS.store(ivrs.pa_bits, Ordering::Release);
+            serial_println!(
+                "[DRY-IOMMU] IVRS detected ivhd={} ivmd={} pa={}b va={}b amd_svm={}; AMD-Vi backend unverified",
+                ivrs.ivhd_count,
+                ivrs.ivmd_count,
+                ivrs.pa_bits,
+                ivrs.va_bits,
+                ivrs.amd_svm_cpu as u8
+            );
+        }
+    }
+
+    if policy.allow_qemu_test_bypass {
+        IOMMU_BACKEND.store(IommuBackendKind::QemuTestBypass as u8, Ordering::Release);
+        IOMMU_CAPS_BITS.store(48, Ordering::Release);
+        VTD_STATUS.store(IommuStatus::TestUnsafeNoIommu as u8, Ordering::Release);
         serial_println!(
-            "[DRY-IOMMU] VTD_ACTIVE units={} sagaw={}-bit caching_mode={} coherent={}",
-            units_up,
-            bits,
-            cm,
-            coh
+            "[DRY-IOMMU] QEMU_TEST_NO_IOMMU active (hv={} opt_in={} live_usb={}): test bypass enabled",
+            policy.hypervisor_cpuid as u8,
+            policy.qemu_test_opt_in as u8,
+            policy.live_usb as u8
         );
     } else {
-        VTD_STATUS.store(VtdStatus::FailedClosed as u8, Ordering::Release);
-        serial_println!("[DRY-IOMMU] VTD_FAIL_CLOSED: DRHD initialization error");
+        VTD_STATUS.store(IommuStatus::UnsupportedFailClosed as u8, Ordering::Release);
+        serial_println!(
+            "[DRY-IOMMU] FAIL_CLOSED: no supported hardware IOMMU (hv={} opt_in={} live_usb={}); DMA claims & BME refused",
+            policy.hypervisor_cpuid as u8,
+            policy.qemu_test_opt_in as u8,
+            policy.live_usb as u8
+        );
     }
 }
 
@@ -410,8 +602,7 @@ fn find_unit_for_bdf(eng: &VtdEngineState, bus: u8, dev: u8, func: u8) -> Option
             continue;
         }
         let src = &dmar.drhds[u];
-        for s in 0..src.scope_count {
-            let sc = src.scopes[s];
+        for &sc in src.scopes.iter().take(src.scope_count) {
             if sc.valid && sc.bus == bus && sc.dev == dev && sc.func == func {
                 return if eng.units[u].translation_enabled {
                     Some(u)
@@ -426,13 +617,15 @@ fn find_unit_for_bdf(eng: &VtdEngineState, bus: u8, dev: u8, func: u8) -> Option
 
 /// Fail-closed gate checked before claiming a PCI device or enabling `Command.BME = 1`.
 pub fn attach_device_domain(dev_idx: usize, bus: u8, dev: u8, func: u8) -> Result<(), ()> {
-    match status() {
-        VtdStatus::NotPresent => return Ok(()),
-        VtdStatus::Uninitialized | VtdStatus::FailedClosed => return Err(()),
-        VtdStatus::Enforcing => {}
-    }
-    if dev_idx >= PCI_DEV_COUNT {
+    if dev_idx >= MAX_MANAGED_PCI_DEVS {
         return Err(());
+    }
+    match status() {
+        IommuStatus::Enforcing => {}
+        IommuStatus::TestUnsafeNoIommu => return Ok(()),
+        IommuStatus::Uninitialized
+        | IommuStatus::UnsupportedFailClosed
+        | IommuStatus::FailedClosed => return Err(()),
     }
     let rmrr_snap = dmar_snapshot();
 
@@ -453,8 +646,7 @@ pub fn attach_device_domain(dev_idx: usize, bus: u8, dev: u8, func: u8) -> Resul
         eng.domains[dev_idx].pt_count = 0;
 
         if let Some(dmar) = rmrr_snap {
-            for r in 0..dmar.rmrr_count {
-                let rmrr = &dmar.rmrrs[r];
+            for rmrr in dmar.rmrrs.iter().take(dmar.rmrr_count) {
                 if !rmrr.valid || rmrr.segment != seg {
                     continue;
                 }
@@ -570,13 +762,15 @@ pub fn attach_device_domain(dev_idx: usize, bus: u8, dev: u8, func: u8) -> Resul
 
 /// Map `len_bytes` (`4 KiB` or `2 MiB` pinned `DEVICE_DMA`) into `dev_idx`'s isolated SLPT.
 pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(), ()> {
-    match status() {
-        VtdStatus::NotPresent => return Ok(()),
-        VtdStatus::Uninitialized | VtdStatus::FailedClosed => return Err(()),
-        VtdStatus::Enforcing => {}
-    }
-    if dev_idx >= PCI_DEV_COUNT || (len_bytes & ((PAGE_SIZE as u64) - 1)) != 0 || len_bytes == 0 {
+    if dev_idx >= MAX_MANAGED_PCI_DEVS || (len_bytes & ((PAGE_SIZE as u64) - 1)) != 0 || len_bytes == 0 {
         return Err(());
+    }
+    match status() {
+        IommuStatus::Enforcing => {}
+        IommuStatus::TestUnsafeNoIommu => return Ok(()),
+        IommuStatus::Uninitialized
+        | IommuStatus::UnsupportedFailClosed
+        | IommuStatus::FailedClosed => return Err(()),
     }
     let pages = (len_bytes / (PAGE_SIZE as u64)) as usize;
     with_vtd_lock(|eng| {
@@ -612,7 +806,7 @@ pub fn map_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) -> Result<(
 
 /// Unmap `len_bytes` from `dev_idx`'s SLPT and synchronize IOTLB.
 pub fn unmap_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) {
-    if status() != VtdStatus::Enforcing || dev_idx >= PCI_DEV_COUNT {
+    if status() != IommuStatus::Enforcing || dev_idx >= MAX_MANAGED_PCI_DEVS {
         return;
     }
     let pages = (len_bytes / (PAGE_SIZE as u64)) as usize;
@@ -639,7 +833,7 @@ pub fn unmap_dma_range(dev_idx: usize, phys_base: u64, len_bytes: u64) {
 
 /// Clear Context Entry, invalidate Context + Domain IOTLB, and free all SLPT frames (`leaked_frames == 0`).
 pub fn detach_and_scrub_domain(dev_idx: usize) {
-    if status() != VtdStatus::Enforcing || dev_idx >= PCI_DEV_COUNT {
+    if status() != IommuStatus::Enforcing || dev_idx >= MAX_MANAGED_PCI_DEVS {
         return;
     }
     let rmrr_snap = dmar_snapshot();
@@ -755,7 +949,7 @@ fn poll_and_clear_unit_faults(unit: &mut VtdUnit) -> u64 {
 
 /// Poll and W1C-clear all VT-d Fault Recording Registers (`FRCD`) across active DRHD units.
 pub fn poll_and_clear_faults() -> u64 {
-    if status() == VtdStatus::Enforcing {
+    if status() == IommuStatus::Enforcing {
         with_vtd_lock(|eng| {
             for u in eng.units.iter_mut() {
                 if u.active {

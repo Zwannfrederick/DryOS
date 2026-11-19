@@ -24,6 +24,9 @@ const SLOT_CHILD_START: usize = 18; // 64 pages (256 KiB, MADT)
 const SLOT_FADT_START: usize = 82; // 16 pages (64 KiB, FADT)
 const SLOT_DSDT_START: usize = 98; // 256 pages (1 MiB, DSDT)
 const SLOT_DMAR_START: usize = 354; // 16 pages (64 KiB, DMAR)
+const SLOT_IVRS_START: usize = 370; // 16 pages (64 KiB, IVRS)
+const SLOT_MCFG_START: usize = 386; // 8 pages (32 KiB, MCFG)
+const SLOT_ECAM_SCRATCH: usize = 394; // 1 page (4 KiB, early ECAM probe)
 
 #[repr(C, align(4096))]
 struct AcpiPtPage([u64; 512]);
@@ -65,6 +68,8 @@ pub struct AcpiMadtSummary {
     pub ioapic_count: u8,
     pub iso_override_count: u8,
     pub isa_routes: [IsaIrqRoute; ISA_IRQ_COUNT],
+    pub ivrs_found: bool,
+    pub mcfg_found: bool,
 }
 
 impl AcpiMadtSummary {
@@ -85,6 +90,8 @@ impl AcpiMadtSummary {
             ioapic_count: 0,
             iso_override_count: 0,
             isa_routes: routes,
+            ivrs_found: false,
+            mcfg_found: false,
         }
     }
 }
@@ -232,6 +239,83 @@ unsafe fn map_acpi_window_ro(slot_base: usize, max_slots: usize, phys_addr: u64,
     Some((ACPI_BOOT_WIN_BASE + (slot_base as u64) * 4096 + (page_off as u64)) as *const u8)
 }
 
+/// Map a single `4 KiB` physical MMIO page (`Uncacheable`, RW+NX) in `SLOT_ECAM_SCRATCH` for
+/// single-core BSP early-boot discovery prior to `KERNEL_VSPACE` handover.
+pub unsafe fn map_acpi_scratch_uc(phys_4k: u64) -> Option<*mut u8> {
+    if !ACPI_READY.load(Ordering::Acquire) {
+        return None;
+    }
+    let paddr = phys_4k & PHYS_PAGE_MASK;
+    // SAFETY: Single-threaded BSP early boot mutating dedicated `SLOT_ECAM_SCRATCH` PTE + `invlpg`.
+    unsafe {
+        let pt_ptr = (*ACPI_WIN_PT.0.get()).0.as_mut_ptr();
+        // Present | Writable | PWT | PCD | NX (`UC` MMIO).
+        write_volatile(
+            pt_ptr.add(SLOT_ECAM_SCRATCH),
+            paddr | (1u64 << 63) | 0x1b,
+        );
+        let vaddr = ACPI_BOOT_WIN_BASE + (SLOT_ECAM_SCRATCH as u64) * 4096;
+        asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+        Some(vaddr as *mut u8)
+    }
+}
+
+struct RootAcpiTables {
+    madt: Option<*const u8>,
+    fadt: Option<*const u8>,
+    dmar: Option<(*const u8, usize)>,
+    ivrs: Option<(*const u8, usize)>,
+    mcfg: Option<(*const u8, usize)>,
+}
+
+impl RootAcpiTables {
+    const fn empty() -> Self {
+        Self {
+            madt: None,
+            fadt: None,
+            dmar: None,
+            ivrs: None,
+            mcfg: None,
+        }
+    }
+
+    fn any_found(&self) -> bool {
+        self.madt.is_some()
+            || self.fadt.is_some()
+            || self.dmar.is_some()
+            || self.ivrs.is_some()
+            || self.mcfg.is_some()
+    }
+}
+
+unsafe fn try_map_sdt(
+    slot_base: usize,
+    max_slots: usize,
+    child_phys: u64,
+    sig: &[u8; 4],
+    min_len: usize,
+    verify_sum: bool,
+) -> Option<(*const u8, usize)> {
+    let probe = unsafe {
+        map_acpi_window_ro(
+            slot_base,
+            max_slots,
+            child_phys,
+            core::mem::size_of::<AcpiSdtHeader>(),
+        )
+    }?;
+    let hdr: AcpiSdtHeader = unsafe { read_unaligned(probe.cast()) };
+    let len = hdr.length as usize;
+    if hdr.signature != *sig || len < min_len {
+        return None;
+    }
+    let virt = unsafe { map_acpi_window_ro(slot_base, max_slots, child_phys, len) }?;
+    if verify_sum && !unsafe { verify_checksum(virt, len) } {
+        return None;
+    }
+    Some((virt, len))
+}
+
 /// Validate standard 8-bit ACPI table byte checksum (`sum(bytes[0..len]) & 0xFF == 0`).
 unsafe fn verify_checksum(ptr: *const u8, len: usize) -> bool {
     if ptr.is_null() || len == 0 || len > (1024 * 1024) {
@@ -247,40 +331,29 @@ unsafe fn verify_checksum(ptr: *const u8, len: usize) -> bool {
     sum == 0
 }
 
-unsafe fn find_tables_in_root_sdt(
-    hhdm_offset: u64,
-    root_raw: u64,
-    is_xsdt: bool,
-) -> (Option<*const u8>, Option<*const u8>, Option<(*const u8, usize)>) {
+unsafe fn find_tables_in_root_sdt(hhdm_offset: u64, root_raw: u64, is_xsdt: bool) -> RootAcpiTables {
     let root_phys = to_phys_addr(hhdm_offset, root_raw);
     if root_phys == 0 {
-        return (None, None, None);
+        return RootAcpiTables::empty();
     }
-    // Map initial 36-byte SDT header first, then remap over full `hdr.length`.
-    let Some(hdr_probe) = (unsafe {
-        map_acpi_window_ro(SLOT_ROOT_START, 16, root_phys, core::mem::size_of::<AcpiSdtHeader>())
-    }) else {
-        return (None, None, None);
-    };
-    let hdr: AcpiSdtHeader = unsafe { read_unaligned(hdr_probe.cast()) };
     let expected_sig = if is_xsdt { *b"XSDT" } else { *b"RSDT" };
-    let total_len = hdr.length as usize;
-    if hdr.signature != expected_sig || total_len < core::mem::size_of::<AcpiSdtHeader>() {
-        return (None, None, None);
-    }
-    let Some(hdr_ptr) = (unsafe { map_acpi_window_ro(SLOT_ROOT_START, 16, root_phys, total_len) }) else {
-        return (None, None, None);
+    let Some((hdr_ptr, total_len)) = (unsafe {
+        try_map_sdt(
+            SLOT_ROOT_START,
+            16,
+            root_phys,
+            &expected_sig,
+            core::mem::size_of::<AcpiSdtHeader>(),
+            true,
+        )
+    }) else {
+        return RootAcpiTables::empty();
     };
-    if !unsafe { verify_checksum(hdr_ptr, total_len) } {
-        return (None, None, None);
-    }
 
     let payload_off = core::mem::size_of::<AcpiSdtHeader>();
     let entry_size = if is_xsdt { 8usize } else { 4usize };
     let entries = (total_len - payload_off) / entry_size;
-    let mut madt_out: Option<*const u8> = None;
-    let mut fadt_out: Option<*const u8> = None;
-    let mut dmar_out: Option<(*const u8, usize)> = None;
+    let mut out = RootAcpiTables::empty();
 
     for idx in 0..entries {
         let e_ptr = unsafe { hdr_ptr.add(payload_off + idx * entry_size) };
@@ -293,53 +366,47 @@ unsafe fn find_tables_in_root_sdt(
         if child_phys == 0 {
             continue;
         }
-        if madt_out.is_none() {
-            if let Some(c_probe) = unsafe {
-                map_acpi_window_ro(SLOT_CHILD_START, 64, child_phys, core::mem::size_of::<AcpiSdtHeader>())
-            } {
-                let c_hdr: AcpiSdtHeader = unsafe { read_unaligned(c_probe.cast()) };
-                let c_len = c_hdr.length as usize;
-                if c_hdr.signature == *b"APIC" && c_len >= 44 {
-                    if let Some(c_virt) = unsafe { map_acpi_window_ro(SLOT_CHILD_START, 64, child_phys, c_len) } {
-                        if unsafe { verify_checksum(c_virt, c_len) } {
-                            madt_out = Some(c_virt);
-                            continue;
-                        }
-                    }
-                }
+        if out.madt.is_none() {
+            if let Some((v, _)) =
+                unsafe { try_map_sdt(SLOT_CHILD_START, 64, child_phys, b"APIC", 44, true) }
+            {
+                out.madt = Some(v);
+                continue;
             }
         }
-        if fadt_out.is_none() {
-            if let Some(f_probe) = unsafe {
-                map_acpi_window_ro(SLOT_FADT_START, 16, child_phys, core::mem::size_of::<AcpiSdtHeader>())
-            } {
-                let f_hdr: AcpiSdtHeader = unsafe { read_unaligned(f_probe.cast()) };
-                let f_len = f_hdr.length as usize;
-                if f_hdr.signature == *b"FACP" && f_len >= 116 {
-                    if let Some(f_virt) = unsafe { map_acpi_window_ro(SLOT_FADT_START, 16, child_phys, f_len) } {
-                        if unsafe { verify_checksum(f_virt, f_len) } {
-                            fadt_out = Some(f_virt);
-                            continue;
-                        }
-                    }
-                }
+        if out.fadt.is_none() {
+            if let Some((v, _)) =
+                unsafe { try_map_sdt(SLOT_FADT_START, 16, child_phys, b"FACP", 116, true) }
+            {
+                out.fadt = Some(v);
+                continue;
             }
         }
-        if dmar_out.is_none() {
-            if let Some(d_probe) = unsafe {
-                map_acpi_window_ro(SLOT_DMAR_START, 16, child_phys, core::mem::size_of::<AcpiSdtHeader>())
-            } {
-                let d_hdr: AcpiSdtHeader = unsafe { read_unaligned(d_probe.cast()) };
-                let d_len = d_hdr.length as usize;
-                if d_hdr.signature == *b"DMAR" && d_len >= 48 {
-                    if let Some(d_virt) = unsafe { map_acpi_window_ro(SLOT_DMAR_START, 16, child_phys, d_len) } {
-                        dmar_out = Some((d_virt, d_len));
-                    }
-                }
+        if out.dmar.is_none() {
+            if let Some(s) =
+                unsafe { try_map_sdt(SLOT_DMAR_START, 16, child_phys, b"DMAR", 48, false) }
+            {
+                out.dmar = Some(s);
+                continue;
+            }
+        }
+        if out.ivrs.is_none() {
+            if let Some(s) =
+                unsafe { try_map_sdt(SLOT_IVRS_START, 16, child_phys, b"IVRS", 48, false) }
+            {
+                out.ivrs = Some(s);
+                continue;
+            }
+        }
+        if out.mcfg.is_none() {
+            if let Some(s) =
+                unsafe { try_map_sdt(SLOT_MCFG_START, 8, child_phys, b"MCFG", 44, true) }
+            {
+                out.mcfg = Some(s);
             }
         }
     }
-    (madt_out, fadt_out, dmar_out)
+    out
 }
 
 unsafe fn read_aml_int_u8(dsdt: *const u8, total_len: usize, cur: &mut usize) -> Option<u8> {
@@ -539,47 +606,63 @@ pub fn discover_acpi_madt(
         }
         summary.rsdp_revision = v1.revision;
 
-        let mut madt_ptr: Option<*const u8> = None;
-        let mut fadt_ptr: Option<*const u8> = None;
-        let mut dmar_slice: Option<(*const u8, usize)> = None;
+        let mut tables = RootAcpiTables::empty();
         if v1.revision >= 2 {
             let v2: RsdpV2 = read_unaligned(rsdp_ptr.cast());
             let v2_len = (v2.length as usize).clamp(core::mem::size_of::<RsdpV2>(), 4096);
             if let Some(rsdp_full) = map_acpi_window_ro(SLOT_RSDP_START, 2, rsdp_phys, v2_len) {
                 if verify_checksum(rsdp_full, v2_len) && v2.xsdt_phys != 0 {
-                    let (m, f, d) = find_tables_in_root_sdt(hhdm_offset, v2.xsdt_phys, true);
-                    if m.is_some() || f.is_some() || d.is_some() {
+                    let t = find_tables_in_root_sdt(hhdm_offset, v2.xsdt_phys, true);
+                    if t.any_found() {
                         summary.used_xsdt = true;
-                        madt_ptr = m;
-                        fadt_ptr = f;
-                        dmar_slice = d;
+                        tables = t;
                     }
                 }
             }
         }
-        if (madt_ptr.is_none() || fadt_ptr.is_none() || dmar_slice.is_none()) && v1.rsdt_phys != 0 {
-            let (m, f, d) = find_tables_in_root_sdt(hhdm_offset, v1.rsdt_phys as u64, false);
-            if madt_ptr.is_none() {
-                madt_ptr = m;
+        if (tables.madt.is_none()
+            || tables.fadt.is_none()
+            || tables.dmar.is_none()
+            || tables.ivrs.is_none()
+            || tables.mcfg.is_none())
+            && v1.rsdt_phys != 0
+        {
+            let r = find_tables_in_root_sdt(hhdm_offset, v1.rsdt_phys as u64, false);
+            if tables.madt.is_none() {
+                tables.madt = r.madt;
             }
-            if fadt_ptr.is_none() {
-                fadt_ptr = f;
+            if tables.fadt.is_none() {
+                tables.fadt = r.fadt;
             }
-            if dmar_slice.is_none() {
-                dmar_slice = d;
+            if tables.dmar.is_none() {
+                tables.dmar = r.dmar;
+            }
+            if tables.ivrs.is_none() {
+                tables.ivrs = r.ivrs;
+            }
+            if tables.mcfg.is_none() {
+                tables.mcfg = r.mcfg;
             }
         }
 
-        if let Some((dmar_ptr, dmar_len)) = dmar_slice {
+        if let Some((dmar_ptr, dmar_len)) = tables.dmar {
             let bytes = core::slice::from_raw_parts(dmar_ptr, dmar_len);
             let _ = crate::iommu::parse_and_latch_dmar(bytes);
         }
+        if let Some((ivrs_ptr, ivrs_len)) = tables.ivrs {
+            let bytes = core::slice::from_raw_parts(ivrs_ptr, ivrs_len);
+            summary.ivrs_found = crate::iommu::parse_and_latch_ivrs(bytes).is_ok();
+        }
+        if let Some((mcfg_ptr, mcfg_len)) = tables.mcfg {
+            let bytes = core::slice::from_raw_parts(mcfg_ptr, mcfg_len);
+            summary.mcfg_found = crate::pci_ecam::parse_and_latch_mcfg(bytes).is_ok();
+        }
 
-        if let Some(fadt) = fadt_ptr {
+        if let Some(fadt) = tables.fadt {
             *ACPI_POWER.0.get() = parse_fadt_and_dsdt(hhdm_offset, fadt);
         }
 
-        if let Some(madt) = madt_ptr {
+        if let Some(madt) = tables.madt {
             let m_hdr: AcpiSdtHeader = read_unaligned(madt.cast());
             let total_len = m_hdr.length as usize;
             // MADT header (`36 B`) + Local APIC Addr (`4 B`) + Flags (`4 B`) = `44 B`.

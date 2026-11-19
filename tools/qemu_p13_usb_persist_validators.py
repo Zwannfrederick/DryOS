@@ -275,11 +275,11 @@ def run_p13_usb_persist_suite(
     usb_img = build_dir / "usb_p13_storage.img"
     nvme_img = build_dir / "nvme_p13_ro.img"
 
-    write_mbr_esp_image(esp_rw, kernel_elf, "console=com1 desktop4=1 usb_persist_test=1 usb_persist_prefer=1")
+    write_mbr_esp_image(esp_rw, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 usb_persist_test=1 usb_persist_prefer=1")
     write_mbr_esp_image(
         esp_ro,
         kernel_elf,
-        "console=com1 desktop4=1 usb_persist_test=1 usb_persist_prefer=1 storage=ro",
+        "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 usb_persist_test=1 usb_persist_prefer=1 storage=ro",
     )
 
     usb_secs = 65536

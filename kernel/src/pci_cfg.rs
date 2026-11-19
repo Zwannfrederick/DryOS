@@ -33,6 +33,7 @@ const QEMU_IOMMU_TESTDEV_ID: u16 = 0x0014;
 
 const PCI_CAP_ID_MSI: u8 = 0x05;
 const PCI_CAP_ID_VNDR: u8 = 0x09;
+const PCI_CAP_ID_PCIE: u8 = 0x10;
 const PCI_CAP_ID_MSIX: u8 = 0x11;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
@@ -75,6 +76,7 @@ pub(crate) struct ValidatedVirtioPci {
     pub msix_table_bir: u8,
     pub msix_table_off: u32,
     pub msix_table_len: u16,
+    pub ext_caps: crate::pci_ecam::PcieExtCaps,
     pub bars: [PciBarDesc; 6],
     pub info: UserVirtioPciInfo,
 }
@@ -94,6 +96,7 @@ impl ValidatedVirtioPci {
         msix_table_bir: 0,
         msix_table_off: 0,
         msix_table_len: 0,
+        ext_caps: crate::pci_ecam::PcieExtCaps::EMPTY,
         bars: [PciBarDesc::UNUSED; 6],
         info: UserVirtioPciInfo {
             common_off: 0,
@@ -138,6 +141,11 @@ fn pci_cfg_addr(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
 
 #[inline]
 unsafe fn raw_read_u32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
+    if let Some(v) =
+        unsafe { crate::pci_ecam::early_ecam_read(bus, dev, func, (offset & 0xfc) as u16, 4) }
+    {
+        return v;
+    }
     let addr = pci_cfg_addr(bus, dev, func, offset);
     unsafe {
         outl(PCI_CONFIG_ADDR, addr);
@@ -147,6 +155,11 @@ unsafe fn raw_read_u32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
 
 #[inline]
 unsafe fn raw_write_u32(bus: u8, dev: u8, func: u8, offset: u8, val: u32) {
+    if unsafe {
+        crate::pci_ecam::early_ecam_write(bus, dev, func, (offset & 0xfc) as u16, 4, val)
+    } {
+        return;
+    }
     let addr = pci_cfg_addr(bus, dev, func, offset);
     unsafe {
         outl(PCI_CONFIG_ADDR, addr);
@@ -156,6 +169,11 @@ unsafe fn raw_write_u32(bus: u8, dev: u8, func: u8, offset: u8, val: u32) {
 
 #[inline]
 unsafe fn raw_write_u16(bus: u8, dev: u8, func: u8, offset: u8, val: u16) {
+    if unsafe {
+        crate::pci_ecam::early_ecam_write(bus, dev, func, (offset & 0xfe) as u16, 2, val as u32)
+    } {
+        return;
+    }
     let addr = pci_cfg_addr(bus, dev, func, offset);
     let data_port = PCI_CONFIG_DATA + ((offset & 2) as u16);
     unsafe {
@@ -166,6 +184,87 @@ unsafe fn raw_write_u16(bus: u8, dev: u8, func: u8, offset: u8, val: u16) {
 
 pub(crate) fn pci_read_u32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
     with_pci_cfg_lock(|| unsafe { raw_read_u32(bus, dev, func, offset) })
+}
+
+pub(crate) fn pci_ecam_read_u32(bus: u8, dev: u8, func: u8, offset: u16) -> Option<u32> {
+    if (offset & 3) != 0 || offset > 0xffc {
+        return None;
+    }
+    with_pci_cfg_lock(|| {
+        if let Some(v) = unsafe { crate::pci_ecam::early_ecam_read(bus, dev, func, offset, 4) } {
+            return Some(v);
+        }
+        if offset < 256 {
+            Some(unsafe { raw_read_u32(bus, dev, func, offset as u8) })
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) fn pci_raw_cfg_rw(
+    slot_idx: usize,
+    vdev: &ValidatedVirtioPci,
+    offset: u16,
+    width: u8,
+    is_write: bool,
+    write_val: u32,
+) -> Option<u32> {
+    if !matches!(width, 1 | 2 | 4)
+        || (offset & ((width as u16) - 1)) != 0
+        || (offset as usize) + (width as usize) > 4096
+    {
+        return None;
+    }
+    with_pci_cfg_lock(|| {
+        if vdev.ext_caps.ecam_phys != 0 && crate::pci_ecam::is_kernel_ecam_ready() {
+            return crate::pci_ecam::runtime_slot_ecam_rw(
+                slot_idx,
+                true,
+                offset,
+                width,
+                is_write,
+                write_val,
+            );
+        }
+        if (offset as usize) + (width as usize) > 256 {
+            return None;
+        }
+        if !is_write {
+            let dw = unsafe { raw_read_u32(vdev.bus, vdev.dev, vdev.func, (offset as u8) & !3) };
+            let shift = ((offset & 3) * 8) as u32;
+            let mask = match width {
+                1 => 0xffu32,
+                2 => 0xffffu32,
+                _ => 0xffff_ffffu32,
+            };
+            Some((dw >> shift) & mask)
+        } else {
+            // SAFETY: Single-slot config write serialized under `PCI_CFG_LOCK`, offset < 256.
+            unsafe {
+                match width {
+                    1 => {
+                        let aligned = (offset as u8) & !3;
+                        let shift = ((offset & 3) * 8) as u32;
+                        let cur = raw_read_u32(vdev.bus, vdev.dev, vdev.func, aligned);
+                        let next =
+                            (cur & !(0xffu32 << shift)) | ((write_val & 0xff) << shift);
+                        raw_write_u32(vdev.bus, vdev.dev, vdev.func, aligned, next);
+                    }
+                    2 => raw_write_u16(
+                        vdev.bus,
+                        vdev.dev,
+                        vdev.func,
+                        offset as u8,
+                        write_val as u16,
+                    ),
+                    4 => raw_write_u32(vdev.bus, vdev.dev, vdev.func, offset as u8, write_val),
+                    _ => return None,
+                }
+            }
+            Some(0)
+        }
+    })
 }
 
 #[inline]
@@ -324,9 +423,13 @@ pub(crate) fn probe_pci_function(
     bus: u8,
     dev: u8,
     func: u8,
-) -> Option<(usize, ValidatedVirtioPci)> {
+) -> Option<(Option<usize>, ValidatedVirtioPci)> {
     let id = pci_read_u32(bus, dev, func, 0x00);
     let vendor_id = (id & 0xffff) as u16;
+    let fn_hdr = pci_read_u8(bus, dev, func, 0x0e) & 0x7f;
+    if vendor_id == 0xffff || fn_hdr != 0 {
+        return None;
+    }
     let device_id = (id >> 16) as u16;
     let class_rev = pci_read_u32(bus, dev, func, 0x08);
     let class_code = (class_rev >> 24) as u8;
@@ -334,9 +437,9 @@ pub(crate) fn probe_pci_function(
     let prog_if = ((class_rev >> 8) & 0xff) as u8;
 
     let mut ro_bars_cache: Option<[PciBarDesc; 6]> = None;
-    let (slot_idx, is_virtio, preserve_active_gop) =
+    let (pref_slot, is_virtio, preserve_active_gop) =
         if let Some((slot, v)) = match_managed_pci_slot(vendor_id, device_id) {
-            (slot, v, false)
+            (Some(slot), v, false)
         } else {
             match (class_code, subclass, prog_if) {
                 (0x03, _, _) => {
@@ -345,16 +448,17 @@ pub(crate) fn probe_pci_function(
                     ro_bars_cache = Some(ro);
                     if active_gop {
                         set_active_gop_bdf(bus, dev, func);
-                        (PCI_OBJ_IGPU, false, true)
+                        (Some(PCI_OBJ_IGPU), false, true)
                     } else if subclass == 0x00 && !crate::display::is_framebuffer_available() {
                         return None;
                     } else {
-                        (PCI_OBJ_DISPLAY_AUX, false, false)
+                        (Some(PCI_OBJ_DISPLAY_AUX), false, false)
                     }
                 }
-                (0x0c, 0x03, 0x30) => (PCI_OBJ_XHCI, false, false),
-                (0x01, 0x08, 0x02) => (PCI_OBJ_NVME, false, false),
-                (0x02, 0x00, _) => (PCI_OBJ_NET, vendor_id == VIRTIO_VENDOR_ID, false),
+                (0x0c, 0x03, 0x30) => (Some(PCI_OBJ_XHCI), false, false),
+                (0x01, 0x08, 0x02) => (Some(PCI_OBJ_NVME), false, false),
+                (0x02, 0x00, _) => (Some(PCI_OBJ_NET), vendor_id == VIRTIO_VENDOR_ID, false),
+                (0x01 | 0x02 | 0x0c | 0xff, _, _) => (None, false, false),
                 _ => return None,
             }
         };
@@ -373,6 +477,7 @@ pub(crate) fn probe_pci_function(
 
     let mut msi_cap_off = 0u8;
     let mut msix_cap_off = 0u8;
+    let mut pcie_cap_off = 0u8;
     let mut msix_table_bir = 0u8;
     let mut msix_table_off = 0u32;
     let mut msix_table_len = 0u16;
@@ -391,6 +496,9 @@ pub(crate) fn probe_pci_function(
                         pci_write_u16(bus, dev, func, cap_ptr.wrapping_add(2), ctrl & !0x0001);
                     }
                     msi_cap_off = cap_ptr;
+                }
+                PCI_CAP_ID_PCIE if pcie_cap_off == 0 => {
+                    pcie_cap_off = cap_ptr;
                 }
                 PCI_CAP_ID_MSIX if msix_cap_off == 0 => {
                     let ctrl = pci_read_u16(bus, dev, func, cap_ptr.wrapping_add(2));
@@ -492,6 +600,8 @@ pub(crate) fn probe_pci_function(
         (first_idx as u8, first_bar.base_phys, pages as u16, 0, 0, 0, 0, 0)
     };
 
+    let ext_caps = crate::pci_ecam::probe_pcie_and_ext_caps(bus, dev, func, pcie_cap_off);
+
     if !preserve_active_gop {
         // Keep Bus Master disabled until an authorized Ring 3 driver calls `SYS_DEV_MAP`.
         let cmd = pci_read_u16(bus, dev, func, 0x04);
@@ -500,7 +610,7 @@ pub(crate) fn probe_pci_function(
 
     let bdf = ((bus as u16) << 8) | (((dev & 0x1f) as u16) << 3) | ((func & 0x07) as u16);
     Some((
-        slot_idx,
+        pref_slot,
         ValidatedVirtioPci {
             bus,
             dev,
@@ -515,6 +625,7 @@ pub(crate) fn probe_pci_function(
             msix_table_bir,
             msix_table_off,
             msix_table_len,
+            ext_caps,
             bars,
             info: UserVirtioPciInfo {
                 common_off: c_off,

@@ -9,8 +9,10 @@ use crate::cspace::revoke::attach_cap_mapping_range_record;
 use crate::cspace::with_pinned_cap;
 use crate::ipc::map_cap_err_to_sys;
 use crate::pci_bar::{
-    build_user_pci_info, UserPciDeviceInfo, MAX_WINDOW_PAGES, PCI_DEV_FLAG_IOMMU_ACTIVE,
-    PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_VIRTIO,
+    build_user_pci_info, UserPciDeviceInfo, MAX_WINDOW_PAGES, PCI_DEV_FLAG_ACS,
+    PCI_DEV_FLAG_AER, PCI_DEV_FLAG_ECAM, PCI_DEV_FLAG_FLR, PCI_DEV_FLAG_IOMMU_ACTIVE,
+    PCI_DEV_FLAG_MSI, PCI_DEV_FLAG_MSIX, PCI_DEV_FLAG_PCIE, PCI_DEV_FLAG_REBAR,
+    PCI_DEV_FLAG_SRIOV, PCI_DEV_FLAG_VIRTIO,
 };
 use crate::pmm::PAGE_SIZE;
 use crate::security::{current_lease_epoch, CapRights, SecLabel};
@@ -19,8 +21,8 @@ use crate::vspace::pte::{VmProt, USER_VADDR_LIMIT};
 use crate::vspace::{map_mmio_4k, unmap_4k, VSpaceHandle};
 
 use super::{
-    claim_pci_slot, enable_pci_bme, is_pci_cap_live, record_pci_denied_first_or,
-    release_claimed_pci_slot, validated_pci_slot,
+    claim_pci_slot, enable_pci_bme, is_pci_cap_live, mint_root_pci_dev_cap, pci_raw_cfg_rw,
+    record_pci_denied_first_or, release_claimed_pci_slot, validated_pci_slot, MAX_MANAGED_PCI_DEVS,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,27 @@ pub(super) fn sys_dev_query_bars(
         }
         if vdev.is_virtio {
             dev_flags |= PCI_DEV_FLAG_VIRTIO;
+        }
+        if vdev.ext_caps.pcie_cap_off != 0 {
+            dev_flags |= PCI_DEV_FLAG_PCIE;
+        }
+        if vdev.ext_caps.ecam_phys != 0 {
+            dev_flags |= PCI_DEV_FLAG_ECAM;
+        }
+        if vdev.ext_caps.has_flr {
+            dev_flags |= PCI_DEV_FLAG_FLR;
+        }
+        if vdev.ext_caps.rebar_cap_off != 0 {
+            dev_flags |= PCI_DEV_FLAG_REBAR;
+        }
+        if vdev.ext_caps.acs_cap_off != 0 {
+            dev_flags |= PCI_DEV_FLAG_ACS;
+        }
+        if vdev.ext_caps.aer_cap_off != 0 {
+            dev_flags |= PCI_DEV_FLAG_AER;
+        }
+        if vdev.ext_caps.sriov_cap_off != 0 {
+            dev_flags |= PCI_DEV_FLAG_SRIOV;
         }
         if super::is_iommu_enforcing_for_pci() {
             dev_flags |= PCI_DEV_FLAG_IOMMU_ACTIVE;
@@ -213,4 +236,152 @@ pub(super) fn sys_dev_map_window(
         });
     }
     Ok(page_count as isize)
+}
+
+#[inline]
+fn cfg_ranges_overlap(off: u16, width: u8, start: u16, end: u16) -> bool {
+    let w_end = off.saturating_add(width as u16);
+    off < end && w_end > start
+}
+
+fn is_protected_cfg_write_offset(
+    vdev: &crate::pci::ValidatedVirtioPci,
+    off: u16,
+    width: u8,
+) -> bool {
+    if cfg_ranges_overlap(off, width, 0x00, 0x08)
+        || cfg_ranges_overlap(off, width, 0x10, 0x28)
+        || cfg_ranges_overlap(off, width, 0x30, 0x34)
+        || cfg_ranges_overlap(off, width, 0x3c, 0x40)
+    {
+        return true;
+    }
+    if vdev.msi_cap_off != 0 {
+        let s = vdev.msi_cap_off as u16;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(24)) {
+            return true;
+        }
+    }
+    if vdev.msix_cap_off != 0 {
+        let s = vdev.msix_cap_off as u16;
+        if cfg_ranges_overlap(off, width, s, s.saturating_add(12)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `DEV_MAP_OP_CFG_RW` (`op = 3`): Capability-gated PCI/PCIe config-space access (`0..4096` via
+/// ECAM when mapped, else `0..256` via `0xCF8`/`0xCFC`). Reads require `READ` only; writes
+/// require `READ | WRITE`, IOMMU slot ownership, and non-protected register offsets.
+#[inline(never)]
+pub(super) fn sys_dev_cfg_rw(
+    cspace_id: CSpaceId,
+    subj_label: SecLabel,
+    pci_cap_raw: u64,
+    op_arg: u64,
+    write_arg: u64,
+) -> Result<(isize, u64), SysError> {
+    let offset = ((op_arg >> 12) & 0xfff) as u16;
+    let width = ((op_arg >> 24) & 0xf) as u8;
+    let is_write = ((op_arg >> 28) & 1) != 0;
+    if !matches!(width, 1 | 2 | 4)
+        || (offset & ((width as u16) - 1)) != 0
+        || (offset as usize) + (width as usize) > 4096
+    {
+        return Err(SysError::Inval);
+    }
+
+    let req = if is_write {
+        CapRights(CapRights::READ.0 | CapRights::WRITE.0)
+    } else {
+        CapRights::READ
+    };
+    let now_epoch = current_lease_epoch();
+    let ptr = CapPtr(pci_cap_raw);
+    let mut sub_err = DevMapSubErr::None;
+    let mut no_ecam = false;
+    let mut out_val = 0u32;
+
+    let res = with_pinned_cap(cspace_id, subj_label, ptr, req, now_epoch, |cap| {
+        if cap.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(cap.obj_id, cap.expected_obj_gen) {
+            return Err(CapError::WrongObjectKind);
+        }
+        let dev_idx = cap.obj_id as usize;
+        let Some(vdev) = validated_pci_slot(dev_idx) else {
+            return Err(CapError::InvalidHandle);
+        };
+        if (offset as usize) + (width as usize) > 256
+            && (vdev.ext_caps.ecam_phys == 0 || !crate::pci_ecam::is_kernel_ecam_ready())
+        {
+            no_ecam = true;
+            return Err(CapError::InvalidHandle);
+        }
+        if is_write {
+            if vdev.preserve_active_gop || is_protected_cfg_write_offset(&vdev, offset, width) {
+                sub_err = DevMapSubErr::Perm;
+                return Err(CapError::InsufficientRights);
+            }
+            let claimed_new = claim_pci_slot(dev_idx, cspace_id, &vdev)?;
+            let Some(val) = pci_raw_cfg_rw(dev_idx, &vdev, offset, width, true, write_arg as u32) else {
+                release_claimed_pci_slot(dev_idx, claimed_new);
+                no_ecam = true;
+                return Err(CapError::InvalidHandle);
+            };
+            out_val = val;
+        } else {
+            let Some(val) = pci_raw_cfg_rw(dev_idx, &vdev, offset, width, false, 0) else {
+                no_ecam = true;
+                return Err(CapError::InvalidHandle);
+            };
+            out_val = val;
+        }
+        Ok(())
+    });
+
+    if let Err(e) = res {
+        record_pci_denied_first_or(None);
+        return Err(if no_ecam {
+            SysError::NoSys
+        } else {
+            match sub_err {
+                DevMapSubErr::Inval => SysError::Inval,
+                DevMapSubErr::Perm => SysError::Perm,
+                DevMapSubErr::None => map_cap_err_to_sys(e),
+            }
+        });
+    }
+    Ok((0, out_val as u64))
+}
+
+/// `DEV_MAP_OP_ENUM_MINT` (`op = 5`): Mint a `CapObjectKind::PciDev` capability for any live
+/// dynamically enumerated slot (`0..64`) for a `RootSystem` caller holding `PCI_ROOT` (`MANAGE|GRANT`).
+#[inline(never)]
+pub(super) fn sys_dev_enum_mint(
+    cspace_id: CSpaceId,
+    subj_label: SecLabel,
+    pci_cap_raw: u64,
+    op_arg: u64,
+) -> Result<(isize, u64), SysError> {
+    let slot_idx = ((op_arg >> 12) & 0x3ff) as usize;
+    if slot_idx >= MAX_MANAGED_PCI_DEVS {
+        return Err(SysError::Inval);
+    }
+    let req = CapRights(CapRights::MANAGE.0 | CapRights::GRANT.0);
+    let now_epoch = current_lease_epoch();
+    let check_res = with_pinned_cap(cspace_id, subj_label, CapPtr(pci_cap_raw), req, now_epoch, |cap| {
+        if cap.obj_kind != CapObjectKind::PciDev || !is_pci_cap_live(cap.obj_id, cap.expected_obj_gen) {
+            return Err(CapError::WrongObjectKind);
+        }
+        Ok(())
+    });
+    if let Err(e) = check_res {
+        record_pci_denied_first_or(None);
+        return Err(map_cap_err_to_sys(e));
+    }
+    let new_cap = mint_root_pci_dev_cap(cspace_id, subj_label, slot_idx).map_err(|e| {
+        record_pci_denied_first_or(None);
+        map_cap_err_to_sys(e)
+    })?;
+    Ok((0, new_cap.0))
 }

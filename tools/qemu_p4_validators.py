@@ -414,10 +414,10 @@ def run_p4_suite(
 ) -> int:
     """Execute all Milestone 2B hardware-backed QEMU/KVM storage, recovery & Vault scenarios."""
     esp_p4_std = build_dir / "esp_p4_desktop_std.img"
-    write_mbr_esp_image(esp_p4_std, kernel_elf, "console=com1 desktop4=1")
+    write_mbr_esp_image(esp_p4_std, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1")
 
     esp_p4_sec = build_dir / "esp_p4_desktop_sec.img"
-    write_mbr_esp_image(esp_p4_sec, kernel_elf, "console=com1 desktop4=1 p4_sec=1")
+    write_mbr_esp_image(esp_p4_sec, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 p4_sec=1")
 
     run_p4a_virtio_blk_persist_across_reboots_e2e(
         "p4a_virtio_blk_persist_across_reboots_e2e",

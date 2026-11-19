@@ -335,9 +335,9 @@ def run_p15_brand_icons_suite(
     esp_1024 = build_dir / "esp_p15_1024.img"
     esp_1080 = build_dir / "esp_p15_1080.img"
     write_mbr_esp_image(esp_banner, kernel_elf, "console=com1 screendump_hold=1")
-    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1", resolution="1280x800x32")
-    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1", resolution="1024x768x32")
-    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1", resolution="1920x1080x32")
+    write_mbr_esp_image(esp_1280, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1280x800x32")
+    write_mbr_esp_image(esp_1024, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1024x768x32")
+    write_mbr_esp_image(esp_1080, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1", resolution="1920x1080x32")
 
     capture_and_verify_gop_screendump(
         img_path=esp_banner,

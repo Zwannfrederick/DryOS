@@ -9,7 +9,7 @@ use crate::cspace::cap::CapError;
 use crate::cspace::objects::cspace_alloc_frame;
 use crate::cspace::revoke::attach_cap_mapping_record;
 use crate::cspace::cspace_lookup_fast;
-use crate::iommu::{dmar_snapshot, poll_and_clear_faults, status as vtd_status, VtdStatus};
+use crate::iommu::{dmar_snapshot, poll_and_clear_faults, status as vtd_status, IommuStatus};
 use crate::irq::msi::msi_telemetry;
 use crate::limine::get_boot_module;
 use crate::pci::{
@@ -125,8 +125,8 @@ pub fn verify_hw_foundations(online_cpus: usize) {
     assert_eq!(leaked, 0, "Frame leak after hw_test=1: {}", leaked);
 
     let vtd_st = vtd_status();
-    let vtd_present = vtd_st != VtdStatus::NotPresent && vtd_st != VtdStatus::Uninitialized;
-    let vtd_enabled = vtd_st == VtdStatus::Enforcing;
+    let vtd_present = matches!(vtd_st, IommuStatus::Enforcing | IommuStatus::FailedClosed);
+    let vtd_enabled = vtd_st == IommuStatus::Enforcing;
     let drhd = dmar_snapshot().map_or(0, |d| d.drhd_count);
     let vtd_faults = poll_and_clear_faults();
     let (denied1, quiesce1) = pci_dma_telemetry();

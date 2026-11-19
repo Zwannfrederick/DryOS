@@ -22,7 +22,8 @@ pub const PCI_OBJ_XHCI: usize = 7;
 pub const PCI_OBJ_NVME: usize = 8;
 pub const PCI_OBJ_NET: usize = 9;
 pub const PCI_OBJ_IGPU: usize = 10;
-pub(crate) const PCI_DEV_COUNT: usize = 11;
+pub(crate) const PCI_LEGACY_FIXED_SLOTS: usize = 11;
+pub(crate) const MAX_MANAGED_PCI_DEVS: usize = 64;
 
 pub const BOOT_PCI_ENUM_OFFSET: usize = 0x0800;
 pub const MAX_BOOT_PCI_FUNCS: usize = 64;

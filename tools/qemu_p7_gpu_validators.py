@@ -190,7 +190,7 @@ def run_p7_gpu_suite(
     write_mbr_esp_image: Callable[[pathlib.Path, pathlib.Path, str], None],
 ) -> int:
     esp_gpu = build_dir / "esp_p7_gpu.img"
-    write_mbr_esp_image(esp_gpu, kernel_elf, "console=com1 desktop4=1 gpu_test=1")
+    write_mbr_esp_image(esp_gpu, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 gpu_test=1")
     run_p7a_virtio_gpu_e2e(
         "p7a_virtio_gpu_2d_scanout_and_gop_fallback", esp_gpu, ovmf_code, ovmf_vars, build_dir, root_dir
     )

@@ -345,6 +345,7 @@ pub fn init_and_activate_kernel_vspace(
     let bsp_caps = detect_and_enable_cpu_paging_caps(0);
     // SAFETY: `kernel_cr3` maps active BSP code, stack, GDT/TSS/IST1, GS_BASE, IDT, HHDM, and APIC.
     unsafe { write_cr3(kernel_cr3) };
+    crate::pci_ecam::mark_kernel_ecam_ready();
     if crate::display::framebuffer_summary().is_some() {
         crate::panic_fb::set_kernel_gop_diag_mapped(true);
     }

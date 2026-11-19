@@ -249,10 +249,10 @@ def run_p5_island_suite(
 ) -> int:
     """Execute Milestone 2C-0 Adaptive Driver Islands PoC lifecycle & benchmark scenarios."""
     esp_poc = build_dir / "esp_p5_island_poc.img"
-    write_mbr_esp_image(esp_poc, kernel_elf, "console=com1 desktop4=1 island_poc=1")
+    write_mbr_esp_image(esp_poc, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 island_poc=1")
 
     esp_bench = build_dir / "esp_p5_island_bench.img"
-    write_mbr_esp_image(esp_bench, kernel_elf, "console=com1 desktop4=1 island_bench=1")
+    write_mbr_esp_image(esp_bench, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 island_bench=1")
 
     run_p5a_driver_island_broker_lifecycle_and_stale_cap_e2e(
         "p5a_driver_island_broker_lifecycle_and_stale_cap_e2e",

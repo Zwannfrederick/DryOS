@@ -149,6 +149,6 @@ def run_p14_lx_net_suite(
     write_mbr_esp_image: Callable[[pathlib.Path, pathlib.Path, str], None],
 ) -> int:
     esp_p14 = build_dir / "esp_p14_lx_net.img"
-    write_mbr_esp_image(esp_p14, kernel_elf, "console=com1 desktop4=1 lx_net_test=1")
+    write_mbr_esp_image(esp_p14, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 lx_net_test=1")
     run_p14a_lx_net_8139cp_slirp_recovery("p14a_lx_net_8139cp", esp_p14, ovmf_code, ovmf_vars, build_dir)
     return 1

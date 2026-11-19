@@ -21,6 +21,7 @@ mod mem_verify;
 mod panic_fb;
 mod pci;
 mod pci_bar;
+mod pci_ecam;
 mod pci_hw_test;
 mod pci_slots;
 mod percpu;
@@ -192,12 +193,12 @@ extern "C" fn bsp_kmain() -> ! {
     );
     let _pmm_inv = pmm::init_pmm(&mem);
     let _fb_valid = display::init_framebuffer(&mem, cmdline);
-    let _pci_blk = pci::init_pci_devices();
     let acpi_madt = acpi::discover_acpi_madt(
         mem.hhdm_offset,
         mem.kernel_phys_base,
         mem.kernel_virt_base,
     );
+    let _pci_blk = pci::init_pci_devices();
     serial_println!(
         "[DRY-ACPI] PASS: rsdp_rev={} xsdt={} ioapic_found={} ioapic_id={} ioapic_phys={:#x} gsi_base={} iso_overrides={}",
         acpi_madt.rsdp_revision,
@@ -295,7 +296,7 @@ extern "C" fn bsp_kmain() -> ! {
         }
         let vspace_summary =
             vspace::init_and_activate_kernel_vspace(&mem, smp.cpu_count, apic_cal.tsc_mhz);
-        iommu::init_vtd_units();
+        iommu::init_vtd_units(cmdline);
         iommu::run_dmar_unit_tests();
         let _ioapic_ok = irq::init_ioapic_and_irq_subsystem(mem.hhdm_offset, bsp_lapic_id);
         if cmdline.contains("irq_fault=") {

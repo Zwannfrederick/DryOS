@@ -183,7 +183,7 @@ def run_p6_lx_island_suite(
     write_mbr_esp_image: Callable[[pathlib.Path, pathlib.Path, str], None],
 ) -> int:
     esp_lx = build_dir / "esp_p6_lx_island.img"
-    write_mbr_esp_image(esp_lx, kernel_elf, "console=com1 desktop4=1 lx_island=1")
+    write_mbr_esp_image(esp_lx, kernel_elf, "console=com1 desktop4=1 dry_qemu_test_no_iommu=1 lx_island=1")
     run_p6a_linux_virtio_rng_island_e2e(
         "p6a_linux_v618_virtio_rng_island", esp_lx, ovmf_code, ovmf_vars, build_dir, root_dir
     )

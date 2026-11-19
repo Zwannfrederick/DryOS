@@ -342,7 +342,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             if crate::serial::is_uart_hw_present() {
                 boot_flags |= BOOT_FLAG_UART_PRESENT;
             }
-            if crate::iommu::status() == crate::iommu::VtdStatus::Enforcing {
+            if crate::iommu::is_hw_enforcing() {
                 boot_flags |= BOOT_FLAG_VTD_ENFORCING;
             }
             if crate::iommu::is_gfx_scanout_deferred() {
