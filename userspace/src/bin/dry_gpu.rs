@@ -59,6 +59,8 @@ fn reply_err(ep: u64, tok: u64, label: u32, code: isize) {
 unsafe fn blit_ro_backbuf_to_scanout(
     width: usize,
     height: usize,
+    x0: usize,
+    w0: usize,
     y0: usize,
     h0: usize,
     cur_x: usize,
@@ -69,6 +71,14 @@ unsafe fn blit_ro_backbuf_to_scanout(
     high_contrast: bool,
     light_mode: bool,
 ) {
+    let x_start = x0.min(width);
+    let x_end = x_start.saturating_add(w0).min(width);
+    let copy_px = x_end.saturating_sub(x_start);
+    if copy_px == 0 {
+        return;
+    }
+    let copy_bytes = copy_px * 4;
+
     let (cur_outline, cur_fill, cur_accent) = if high_contrast {
         (0x0000_0000u32, 0x00FF_EA00u32, 0x0000_FFEEu32)
     } else if light_mode {
@@ -80,25 +90,28 @@ unsafe fn blit_ro_backbuf_to_scanout(
     let cur_h_px = CURSOR_H * cur_scale;
 
     for y in y0..(y0 + h0).min(height) {
-        let row_bytes = width * 4;
-        let byte_off = (y * row_bytes) as u64;
-        // SAFETY: Both `[0..4 MiB)` RO backbuf and private `DEVICE_DMA` scanout frames are mapped at `0x2600_0000` and `0x2500_0000`.
-        let src_row = (BACKBUF_RO_VA0 + byte_off) as *const u32;
-        let dst_row = (GPU_SCANOUT_VA0 + byte_off) as *mut u32;
+        let row_byte_off = (y * width * 4) as u64;
+        let rect_byte_off = ((y * width + x_start) * 4) as u64;
+        // SAFETY: Both RO backbuf (`0x2600_0000..`) and private `DEVICE_DMA` scanout frames (`0x2500_0000..`)
+        // are mapped for `width * height * 4` bytes and `[x_start..x_end) <= width`.
+        let src_ptr = (BACKBUF_RO_VA0 + rect_byte_off) as *const u8;
+        let dst_row = (GPU_SCANOUT_VA0 + row_byte_off) as *mut u32;
+        let dst_ptr = unsafe { dst_row.add(x_start).cast::<u8>() };
         if blanked {
             unsafe {
-                write_bytes(dst_row.cast::<u8>(), 0, row_bytes);
+                write_bytes(dst_ptr, 0, copy_bytes);
             }
             continue;
         }
         unsafe {
-            copy_nonoverlapping(src_row.cast::<u8>(), dst_row.cast::<u8>(), row_bytes);
+            copy_nonoverlapping(src_ptr, dst_ptr, copy_bytes);
         }
         if cur_vis && y >= cur_y && y < cur_y + cur_h_px {
             let sy = ((y - cur_y) / cur_scale).min(CURSOR_H - 1);
             let sprite_row = &CURSOR_SPRITE_12X16[sy];
-            let x_end = (cur_x + cur_w_px).min(width);
-            for x in cur_x..x_end {
+            let cx_start = cur_x.max(x_start);
+            let cx_end = (cur_x + cur_w_px).min(x_end);
+            for x in cx_start..cx_end {
                 let sx = ((x - cur_x) / cur_scale).min(CURSOR_W - 1);
                 let px = match sprite_row[sx] {
                     1 => cur_outline,
@@ -324,6 +337,8 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
 
                 let t0 = rdtsc_user();
                 let fence_seq = fences.alloc_seq(t0);
+                let req_x = (mrs[0] & 0xffff_ffff) as usize;
+                let req_w = (mrs[1] & 0xffff_ffff) as usize;
                 let y0 = ((mrs[0] >> 32) as usize).min(h);
                 let req_h = (mrs[1] >> 32) as usize;
                 let h0 = req_h.min(h.saturating_sub(y0));
@@ -334,13 +349,21 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 let blanked = (mrs[3] & 1) != 0;
                 let high_contrast = (mrs[3] & 2) != 0;
                 let light_mode = (mrs[3] & 4) != 0;
+                let (x0, w0) = if blanked || req_w == 0 {
+                    (0, w)
+                } else {
+                    let sx = req_x.min(w);
+                    (sx, req_w.min(w.saturating_sub(sx)))
+                };
 
-                if h0 > 0 {
+                if h0 > 0 && w0 > 0 {
                     // SAFETY: `[0..need_pages)` RO backbuf pages (`0x2600_0000..`) are verified mapped above.
                     unsafe {
                         blit_ro_backbuf_to_scanout(
                             w,
                             h,
+                            x0,
+                            w0,
                             y0,
                             h0,
                             cur_x,
@@ -352,7 +375,9 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                             light_mode,
                         );
                     }
-                    if g.transfer_and_flush_rows(y0 as u32, h0 as u32).is_err() {
+                    if g.transfer_and_flush_rect(x0 as u32, y0 as u32, w0 as u32, h0 as u32)
+                        .is_err()
+                    {
                         reply_err(gpu_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
                         continue;
                     }
@@ -361,7 +386,7 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 let now = rdtsc_user();
                 let _ = fences.signal(fence_seq, now);
                 let dt = now.saturating_sub(t0);
-                let px = (w as u64) * (h0 as u64);
+                let px = (w0 as u64) * (h0 as u64);
                 if tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         gpu_ep_cap,

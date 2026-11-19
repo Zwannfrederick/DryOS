@@ -704,21 +704,22 @@ impl VirtioGpu2d {
         Ok(())
     }
 
-    pub fn transfer_and_flush_rows(&mut self, y: u32, h: u32) -> Result<(), i32> {
-        if h == 0 || y >= self.height {
+    pub fn transfer_and_flush_rect(&mut self, x: u32, y: u32, w: u32, h: u32) -> Result<(), i32> {
+        if x >= self.width || y >= self.height || w == 0 || h == 0 {
             return Ok(());
         }
+        let clamped_w = w.min(self.width - x);
         let clamped_h = h.min(self.height - y);
-        let offset = (y as u64) * (self.width as u64) * 4;
-        // SAFETY: Both `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` target clamped scanlines `[y..y+h)`.
+        let offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4;
+        // SAFETY: Both `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` target clamped dirty rect `[x..x+cw, y..y+ch)`.
         unsafe {
             self.cmd_simple(
                 &VirtioGpuTransferToHost2d {
                     hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
                     r: VirtioGpuRect {
-                        x: 0,
+                        x,
                         y,
-                        width: self.width,
+                        width: clamped_w,
                         height: clamped_h,
                     },
                     offset,
@@ -731,9 +732,9 @@ impl VirtioGpu2d {
                 &VirtioGpuResourceFlush {
                     hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
                     r: VirtioGpuRect {
-                        x: 0,
+                        x,
                         y,
-                        width: self.width,
+                        width: clamped_w,
                         height: clamped_h,
                     },
                     resource_id: GPU_RES_ID_PRIMARY,
@@ -744,8 +745,12 @@ impl VirtioGpu2d {
         }
         self.transfer_bytes = self
             .transfer_bytes
-            .saturating_add((clamped_h as u64) * (self.width as u64) * 4);
+            .saturating_add((clamped_w as u64) * (clamped_h as u64) * 4);
         Ok(())
+    }
+
+    pub fn transfer_and_flush_rows(&mut self, y: u32, h: u32) -> Result<(), i32> {
+        self.transfer_and_flush_rect(0, y, self.width, h)
     }
 
     /// Probe VirtIO-GPU 3D capset metadata read-only; never fails 2D operation when absent.
