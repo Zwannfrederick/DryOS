@@ -61,6 +61,24 @@ __attribute__((weak)) int32_t dry_lx_rust_irq_ack(uint32_t action) {
     return -ENOSYS;
 }
 
+__attribute__((weak)) int32_t dry_lx_rust_pci_cfg_rw(
+    uint16_t off, uint8_t width, uint8_t is_write, uint32_t *val) {
+    (void)off;
+    (void)width;
+    (void)is_write;
+    (void)val;
+    return -ENOSYS;
+}
+
+__attribute__((weak)) int32_t dry_lx_rust_dma_sg_alloc(
+    uint32_t n_pages, uint32_t dir_flags, uint64_t *va_out, uint64_t *iova_out) {
+    (void)n_pages;
+    (void)dir_flags;
+    (void)va_out;
+    (void)iova_out;
+    return -ENOSYS;
+}
+
 static void format_bdf(char *dst, u16 bdf) {
     static const char hex[] = "0123456789abcdef";
     u8 bus = (u8)(bdf >> 8);
@@ -200,15 +218,45 @@ void pci_release_regions(struct pci_dev *pdev) {
 }
 
 int pci_read_config_word(const struct pci_dev *pdev, int where, u16 *val) {
-    if (!pdev || !val) return -EINVAL;
-    (void)where;
-    *val = 0x0010U;
+    if (!pdev || !val || where < 0 || where > 0xfff) {
+        return -EINVAL;
+    }
+    uint32_t raw = 0U;
+    int32_t rc = dry_lx_rust_pci_cfg_rw((uint16_t)where, 2U, 0U, &raw);
+    if (rc != 0) {
+        return rc;
+    }
+    *val = (u16)(raw & 0xffffU);
     return 0;
 }
 
 int pci_write_config_word(const struct pci_dev *pdev, int where, u16 val) {
-    (void)pdev; (void)where; (void)val;
+    if (!pdev || where < 0 || where > 0xfff) {
+        return -EINVAL;
+    }
+    uint32_t raw = (uint32_t)val;
+    return dry_lx_rust_pci_cfg_rw((uint16_t)where, 2U, 1U, &raw);
+}
+
+int pci_read_config_dword(const struct pci_dev *pdev, int where, u32 *val) {
+    if (!pdev || !val || where < 0 || where > 0xffc) {
+        return -EINVAL;
+    }
+    uint32_t raw = 0U;
+    int32_t rc = dry_lx_rust_pci_cfg_rw((uint16_t)where, 4U, 0U, &raw);
+    if (rc != 0) {
+        return rc;
+    }
+    *val = raw;
     return 0;
+}
+
+int pci_write_config_dword(const struct pci_dev *pdev, int where, u32 val) {
+    if (!pdev || where < 0 || where > 0xffc) {
+        return -EINVAL;
+    }
+    uint32_t raw = val;
+    return dry_lx_rust_pci_cfg_rw((uint16_t)where, 4U, 1U, &raw);
 }
 
 int pci_enable_wake(struct pci_dev *pdev, int state, bool enable) {
@@ -381,6 +429,13 @@ void dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, enum dma
 int dma_mapping_error(struct device *dev, dma_addr_t dma_addr) {
     (void)dev;
     return dma_addr == DMA_MAPPING_ERROR;
+}
+
+int dry_lx_dma_alloc_sg(u32 n_pages, u32 dir_flags, u64 *va_out, u64 *iova_out) {
+    if (n_pages == 0U || !va_out || !iova_out) {
+        return -EINVAL;
+    }
+    return dry_lx_rust_dma_sg_alloc(n_pages, dir_flags, va_out, iova_out);
 }
 
 int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,

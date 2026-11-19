@@ -231,3 +231,52 @@ impl BrokerLifecycle {
         [mr0, mr1, mr2, mr3]
     }
 }
+
+/// Verify all 15 `LifecycleStep` transitions, illegal transition rejection, respawn & rollback.
+pub fn verify_broker_lifecycle_15_stages() -> Option<(u32, u64)> {
+    if validate_backend_request(1, CONTRACT_FLAG_REQUIRE_RING0_KO).is_ok()
+        || validate_backend_request(2, CONTRACT_FLAG_ASSUME_IGPU_PASSTHROUGH).is_ok()
+    {
+        return None;
+    }
+    let mut lc = BrokerLifecycle::new(DriverBackendKind::LxCompatIsland, 0x0212);
+    lc.pci_vendor_device = 0x1234_1111;
+    lc.prepare_for_spawn(DriverBackendKind::LxCompatIsland, 0x0212, 2);
+    if lc.advance(LifecycleStep::Monitoring).is_ok() {
+        return None;
+    }
+    for s in [
+        LifecycleStep::IslandCreated,
+        LifecycleStep::CapsAssigned,
+        LifecycleStep::ResourcesMapped,
+        LifecycleStep::Initialized,
+        LifecycleStep::Published,
+        LifecycleStep::Monitoring,
+    ] {
+        lc.advance(s).ok()?;
+    }
+    lc.begin_fault_recovery(2);
+    for s in [
+        LifecycleStep::IslandCreated,
+        LifecycleStep::CapsAssigned,
+        LifecycleStep::ResourcesMapped,
+        LifecycleStep::Initialized,
+        LifecycleStep::Published,
+        LifecycleStep::Monitoring,
+    ] {
+        lc.advance(s).ok()?;
+    }
+    lc.mark_unloaded();
+    lc.mark_spawn_failed();
+    if lc.visited_mask != 0x7fff || lc.generation != 2 || lc.restarts != 1 {
+        return None;
+    }
+    let regs = lc.encode_drvctl(99);
+    let required = DRVCTL_CONTRACT_RING0_KO_FORBIDDEN
+        | DRVCTL_CONTRACT_NO_IGPU_PASSTHROUGH
+        | DRVCTL_CONTRACT_VALID;
+    if (regs[3] & required) != required {
+        return None;
+    }
+    Some((lc.visited_mask, lc.restarts))
+}

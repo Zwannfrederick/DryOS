@@ -152,6 +152,8 @@ int pci_request_regions(struct pci_dev *pdev, const char *res_name);
 void pci_release_regions(struct pci_dev *pdev);
 int pci_read_config_word(const struct pci_dev *pdev, int where, u16 *val);
 int pci_write_config_word(const struct pci_dev *pdev, int where, u16 val);
+int pci_read_config_dword(const struct pci_dev *pdev, int where, u32 *val);
+int pci_write_config_dword(const struct pci_dev *pdev, int where, u32 val);
 int pci_enable_wake(struct pci_dev *pdev, int state, bool enable);
 int pci_set_power_state(struct pci_dev *pdev, int state);
 

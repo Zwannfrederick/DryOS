@@ -19,6 +19,19 @@
     "UNLOADED",
     "ROLLED_BACK"
   ],
+  "onboarding_stages": [
+    "01_DETECT",
+    "02_MATCH",
+    "03_COMPAT_ASSESS",
+    "04_LICENSE_ISOLATION",
+    "05_SOURCE_PIN_SHA256",
+    "06_FIRMWARE_VERIFY",
+    "07_BUILD_CACHE",
+    "08_CAP_MINT",
+    "09_DMA_IOMMU_GATE",
+    "10_PROBE_MODESET",
+    "11_FAULT_ROLLBACK"
+  ],
   "backends": {
     "native-driver-island": {
       "ring0_ko_forbidden": true,
@@ -74,6 +87,9 @@
       "compartment_id": "0x0212",
       "managed_slot": 6,
       "backend": "lx-compat-island",
+      "island_glue_sources": [
+        "drivers/lx-drm-bochs-island/src/bochs_island_glue.c"
+      ],
       "capabilities": ["pci_mmio_bar0_wc", "pci_mmio_bar2_uc", "prime_dmabuf_frame_cap", "fault_ep"],
       "cflags": ["-DCONFIG_HAS_IOPORT=0", "-DKBUILD_MODNAME=\"bochs\""],
       "status": "active_verified"
@@ -135,6 +151,49 @@
       "shim_check_source": "drivers/lx-nv-open-shim/nv_os_shim_check.c",
       "capabilities": ["pci_mmio_64bit_gt4g", "vtd_iommu_slpt", "msix_irq", "gsp_rpc_firmware", "nvidia_os_interface"],
       "status": "shim_compile_only"
+    },
+    "amdgpu_generic": {
+      "upstream_path": "drivers/gpu/drm/amd/amdgpu/",
+      "local_path": "",
+      "sha256": "",
+      "license": "MIT",
+      "pci_ids": ["1002:73df", "1002:1638"],
+      "pci_class": "0x030000",
+      "runtime_island": "planned-amdgpu",
+      "backend": "linux-microvm",
+      "hardware_present_assumed": false,
+      "firmware_blobs": [
+        "/lib/firmware/amdgpu/sienna_cichlid_sos.bin",
+        "/lib/firmware/amdgpu/sienna_cichlid_smc.bin"
+      ],
+      "capabilities": ["pci_mmio_64bit_gt4g", "iommu_vendor_neutral_fail_closed", "msi_irq", "amd_ucode_firmware", "gem_ttm_shmem"],
+      "status": "portability_profile_only"
+    },
+    "virtio_gpu_native": {
+      "upstream_path": "",
+      "local_path": "",
+      "sha256": "",
+      "license": "MIT OR GPL-2.0-only",
+      "pci_ids": ["1af4:1050"],
+      "pci_class": "0x030000",
+      "runtime_island": "dry-gpu",
+      "compartment_id": "0x0208",
+      "backend": "native-driver-island",
+      "capabilities": ["pci_mmio_64bit_gt4g", "dma_pinned_2m", "msix_notif", "fault_ep"],
+      "status": "active_verified"
+    },
+    "synthetic_gpu": {
+      "upstream_path": "",
+      "local_path": "",
+      "sha256": "",
+      "license": "MIT OR GPL-2.0-only",
+      "pci_ids": ["ffff:d001"],
+      "pci_class": "0x038000",
+      "runtime_island": "dry-display",
+      "compartment_id": "0x0002",
+      "backend": "native-driver-island",
+      "capabilities": ["gpu_svc_invariants", "gop_fallback_contract"],
+      "status": "active_verified"
     }
   }
 }

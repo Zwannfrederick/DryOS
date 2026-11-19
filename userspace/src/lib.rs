@@ -9,6 +9,7 @@ pub mod action;
 pub mod apps;
 pub mod compositor;
 pub mod display_banner;
+pub mod fw_store;
 pub mod gfx;
 pub mod glass;
 pub mod gpu_audit;

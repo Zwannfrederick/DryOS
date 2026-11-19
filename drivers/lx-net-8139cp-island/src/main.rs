@@ -10,6 +10,7 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use dry_userspace::abi_ext::{sys_dev_cfg_read, sys_dev_cfg_write, sys_dma_alloc_sg};
 use dry_userspace::init_legacy::log_line;
 use dry_userspace::ioring::{IoCqe, IoRingSharedPage};
 use dry_userspace::island_proto::{
@@ -250,6 +251,82 @@ pub extern "C" fn dry_lx_rust_irq_ack(action: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn dry_lx_rust_tsc_khz() -> u64 {
     TSC_KHZ.load(Ordering::Acquire)
+}
+
+/// Capability-backed PCI configuration space bridge (`DEV_MAP_OP_CFG_RW`).
+///
+/// # Safety
+/// `val` must be a valid non-null pointer to `u32` storage.
+#[no_mangle]
+pub unsafe extern "C" fn dry_lx_rust_pci_cfg_rw(
+    off: u16,
+    width: u8,
+    is_write: u8,
+    val: *mut u32,
+) -> i32 {
+    let pci_cap = PCI_CAP.load(Ordering::Acquire);
+    if pci_cap == 0 || val.is_null() {
+        return EINVAL as i32;
+    }
+    if is_write == 0 {
+        match sys_dev_cfg_read(pci_cap, off, width) {
+            Ok(v) => {
+                // SAFETY: Caller guarantees `val` is valid writable `u32` storage.
+                unsafe { *val = v };
+                0
+            }
+            Err(e) => e as i32,
+        }
+    } else {
+        // SAFETY: Caller guarantees `val` is valid readable `u32` storage.
+        let v = unsafe { *val };
+        match sys_dev_cfg_write(pci_cap, off, width, v) {
+            Ok(()) => 0,
+            Err(e) => e as i32,
+        }
+    }
+}
+
+static SG_VA_NEXT: AtomicU64 = AtomicU64::new(0x2900_0000);
+
+/// Capability-backed scatter-gather DMA bridge (`SYS_DMA_CTL` / `DMA_OP_ALLOC_SG`).
+///
+/// # Safety
+/// `va_out` and `iova_out` must be valid non-null writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn dry_lx_rust_dma_sg_alloc(
+    n_pages: u32,
+    dir_flags: u32,
+    va_out: *mut u64,
+    iova_out: *mut u64,
+) -> i32 {
+    let pci_cap = PCI_CAP.load(Ordering::Acquire);
+    if pci_cap == 0 || va_out.is_null() || iova_out.is_null() || n_pages == 0 || n_pages > 16 {
+        return EINVAL as i32;
+    }
+    let bytes = u64::from(n_pages) * 4096;
+    let base_va = SG_VA_NEXT.fetch_add(bytes, Ordering::Relaxed);
+    for i in 0..n_pages {
+        let Ok(fcap) = sys_frame_alloc(0) else {
+            return dry_userspace::ENOMEM as i32;
+        };
+        let va = base_va + u64::from(i) * 4096;
+        if let Err(e) = sys_vspace_map(fcap, va, VSPACE_MAP_OP_4K_RW) {
+            let _ = sys_cap_revoke(fcap, 1);
+            return e as i32;
+        }
+    }
+    match sys_dma_alloc_sg(pci_cap, base_va, n_pages as u16, dir_flags as u8, None) {
+        Ok(desc) => {
+            // SAFETY: Out pointers checked non-null above.
+            unsafe {
+                *va_out = base_va;
+                *iova_out = desc.iova_base;
+            }
+            0
+        }
+        Err(e) => e as i32,
+    }
 }
 
 #[inline]

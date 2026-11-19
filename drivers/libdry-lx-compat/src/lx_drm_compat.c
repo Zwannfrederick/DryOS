@@ -3,6 +3,7 @@
 #include <linux/dma-buf.h>
 #include <linux/pci.h>
 #include <drm/drm_compat_all.h>
+#include <dry_lx_drm.h>
 
 extern void dry_lx_devm_reset(void);
 extern const struct pci_driver *dry_lx_registered_pci_driver(void);
@@ -29,14 +30,6 @@ static const struct drm_format_info g_fmt_bgrx8888 = {
     .format = DRM_FORMAT_BGRX8888,
     .cpp = { 4, 0, 0, 0 },
     .num_planes = 1,
-};
-
-struct dry_lx_bochs_probe_info {
-    uint32_t edid_ok;
-    uint32_t pref_w;
-    uint32_t pref_h;
-    uint32_t mapped_bar0_ok;
-    uint32_t mapped_bar2_ok;
 };
 
 const struct drm_format_info *drm_format_info(u32 format) {
@@ -314,12 +307,12 @@ int drm_atomic_helper_check(void) { return 0; }
 int drm_atomic_helper_commit(void) { return 0; }
 void drm_atomic_helper_shutdown(struct drm_device *dev) { (void)dev; }
 
-int32_t dry_lx_bochs_probe(
+int32_t dry_lx_drm_probe_pci_device(
     uint16_t vendor_id, uint16_t device_id, uint16_t subvendor, uint16_t subdevice,
-    uint16_t bdf, uint64_t bar0_size, uint8_t bar0_flags,
-    uint64_t bar2_size, uint8_t bar2_flags, struct dry_lx_bochs_probe_info *out) {
+    uint16_t bdf, uint8_t revision, uint16_t dev_flags,
+    const struct dry_lx_pci_bar_init *bars, struct dry_lx_drm_probe_info *out) {
     const struct pci_driver *drv = dry_lx_registered_pci_driver();
-    if (!drv || !drv->probe) {
+    if (!drv || !drv->probe || !bars) {
         return -ENODEV;
     }
     dry_lx_devm_reset();
@@ -332,13 +325,8 @@ int32_t dry_lx_bochs_probe(
     dry_lx_memset(&g_fb, 0, sizeof(g_fb));
     dry_lx_memset(&g_pending_damage, 0, sizeof(g_pending_damage));
 
-    struct dry_lx_pci_bar_init bars[6];
-    dry_lx_memset(bars, 0, sizeof(bars));
-    bars[0].size_bytes = bar0_size;
-    bars[0].flags = bar0_flags;
-    bars[2].size_bytes = bar2_size;
-    bars[2].flags = bar2_flags;
-    dry_lx_pci_init_device(&g_drm_pdev, vendor_id, device_id, subvendor, subdevice, bdf, 2U, 0U, bars);
+    dry_lx_pci_init_device(
+        &g_drm_pdev, vendor_id, device_id, subvendor, subdevice, bdf, revision, dev_flags, bars);
 
     const struct pci_device_id *matched = dry_lx_match_pci_id_table(drv->id_table, &g_drm_pdev);
     if (!matched) {
@@ -364,7 +352,7 @@ int32_t dry_lx_bochs_probe(
     return 0;
 }
 
-int32_t dry_lx_bochs_modeset(uint32_t w, uint32_t h) {
+int32_t dry_lx_drm_modeset(uint32_t w, uint32_t h) {
     if (!g_drm_dev || !g_drm_dev->crtc || !g_drm_dev->crtc->helper_private) {
         return -ENODEV;
     }
@@ -395,7 +383,7 @@ int32_t dry_lx_bochs_modeset(uint32_t w, uint32_t h) {
     return 0;
 }
 
-int32_t dry_lx_bochs_commit_dmabuf(
+int32_t dry_lx_drm_commit_dmabuf(
     const void *src_ptr, uint32_t w, uint32_t h, uint32_t pitch,
     int32_t x, int32_t y, int32_t dw, int32_t dh) {
     if (!g_drm_dev || !g_drm_dev->primary_plane || !g_drm_dev->primary_plane->helper_private || !src_ptr) {
@@ -456,7 +444,7 @@ int32_t dry_lx_bochs_commit_dmabuf(
     return rc;
 }
 
-void dry_lx_bochs_shutdown(void) {
+void dry_lx_drm_shutdown(void) {
     const struct pci_driver *drv = dry_lx_registered_pci_driver();
     if (drv && drv->shutdown && g_drm_dev) {
         drv->shutdown(&g_drm_pdev);

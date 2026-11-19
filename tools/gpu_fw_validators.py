@@ -11,6 +11,7 @@ or efivars. Includes deterministic synthetic positive and negative test vectors 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import pathlib
@@ -382,6 +383,10 @@ def audit_nvidia_os_interface_coverage() -> dict[str, Any]:
             buckets["platform_cgroup_other"].append(fn)
 
     impl_set = set(impl_funcs)
+    cls_entries = re.findall(r'\{\s*"(os_[a-z0-9_]+)"\s*,\s*(NV_SHIM_[A-Z0-9_]+)\s*\}', shim_txt)
+    cls_counts: dict[str, int] = {}
+    for _, cls in cls_entries:
+        cls_counts[cls] = cls_counts.get(cls, 0) + 1
     matrix = {
         k: {
             "total": len(v),
@@ -391,14 +396,53 @@ def audit_nvidia_os_interface_coverage() -> dict[str, Any]:
         for k, v in buckets.items()
     }
     return {
-        "valid": len(impl_funcs) == 22 and (not host_present or len(all_funcs) == 162),
+        "valid": len(impl_funcs) == 22 and len(cls_entries) == 22 and (not host_present or len(all_funcs) == 162),
         "host_header_present": host_present,
         "total_os_apis": len(all_funcs),
         "implemented_in_shim": len(impl_funcs),
         "remaining_unimplemented": len(all_funcs) - len(impl_funcs),
         "coverage_pct": round((len(impl_funcs) / max(1, len(all_funcs))) * 100.0, 2),
+        "shim_classification_counts": cls_counts,
         "buckets": matrix,
     }
+
+
+def validate_amd_ucode_header(blob: bytes) -> dict[str, Any]:
+    """Validate synthetic AMD `common_firmware_header` (`256 B`) + ucode bounds & CRC32."""
+    errors: list[str] = []
+    if len(blob) < 256:
+        return {"valid": False, "errors": [f"amd_ucode_truncated:{len(blob)}"]}
+    sz_bytes, ver_major, ver_minor, crc, ucode_ver, ucode_sz, ucode_off = struct.unpack_from("<IHHI24xII4xI", blob, 0)
+    if sz_bytes < 256 or ver_major < 1 or ucode_off < 256:
+        errors.append("bad_amd_common_header")
+    if sz_bytes > len(blob) or ucode_off + ucode_sz > len(blob) or ucode_sz == 0:
+        errors.append("amd_ucode_bounds_overflow")
+    else:
+        actual_crc = zlib.crc32(blob[ucode_off : ucode_off + ucode_sz]) & 0xFFFFFFFF
+        if actual_crc != crc:
+            errors.append(f"amd_ucode_crc_mismatch:{hex(actual_crc)}!={hex(crc)}")
+    return {
+        "valid": not errors,
+        "header_version": f"{ver_major}.{ver_minor}",
+        "ucode_version": hex(ucode_ver),
+        "ucode_bytes": ucode_sz,
+        "errors": errors,
+    }
+
+
+def validate_fw_store_sha256_contract() -> dict[str, Any]:
+    """Verify `userspace/src/fw_store.rs` SHA-256 verification and tamper-rejection contract."""
+    fw_rs = ROOT / "userspace" / "src" / "fw_store.rs"
+    src_ok = fw_rs.is_file() and all(
+        tok in fw_rs.read_text(encoding="utf-8")
+        for tok in ("DigestMismatch", "EmptyBlob", "NotFound", "ct_eq_32", "Sha256")
+    )
+    payload = b"DRYOS-INTEL-GUC-70.1.1-CSS-SYNTH-PAYLOAD-VALID"
+    digest = hashlib.sha256(payload).hexdigest()
+    tampered = bytearray(payload)
+    tampered[-1] ^= 0xFF
+    tamper_rejected = hashlib.sha256(bytes(tampered)).hexdigest() != digest
+    return {"valid": src_ok and tamper_rejected, "sha256_prefix": digest[:16], "tamper_rejected": tamper_rejected}
 
 
 def validate_muxless_prime_handoff() -> dict[str, Any]:
@@ -544,6 +588,15 @@ def run_self_test() -> dict[str, Any]:
     bad_wpr = bytearray(syn_wpr)
     struct.pack_into("<Q", bad_wpr, 88 + 16, 0xFA000100)  # unaligned wprStart
 
+    amd_payload = b"\x5a\xa5\x10\x02" * 64
+    amd_hdr = bytearray(256)
+    struct.pack_into(
+        "<IHHI24xII4xI", amd_hdr, 0, 256, 1, 0, zlib.crc32(amd_payload) & 0xFFFFFFFF, 0x01020304, len(amd_payload), 256
+    )
+    syn_amd = bytes(amd_hdr) + amd_payload
+    bad_amd = bytearray(syn_amd)
+    bad_amd[-1] ^= 0x01
+
     results: dict[str, Any] = {
         "intel_synthetic_dmc_valid": validate_intel_css_firmware(syn_dmc, "dmc"),
         "intel_synthetic_guc_valid": validate_intel_css_firmware(syn_guc, "guc"),
@@ -554,6 +607,9 @@ def run_self_test() -> dict[str, Any]:
         "intel_synthetic_edid_valid": validate_edid_128(syn_edid),
         "intel_synthetic_edid_bad_cksum_rejected": not validate_edid_128(bytes(bad_edid))["valid"],
         "intel_gen12_gop_preservation": validate_gen12_gop_preservation(),
+        "amd_synthetic_ucode_valid": validate_amd_ucode_header(syn_amd),
+        "amd_synthetic_ucode_corrupt_rejected": not validate_amd_ucode_header(bytes(bad_amd))["valid"],
+        "dry_fw_store_sha256_contract": validate_fw_store_sha256_contract(),
         "nvidia_synthetic_gsp_wpr2": validate_gsp_elf64_and_wpr2(syn_gsp, syn_wpr),
         "nvidia_synthetic_wpr2_unaligned_rejected": not validate_gsp_elf64_and_wpr2(syn_gsp, bytes(bad_wpr))["valid"],
         "nvidia_os_interface_audit": audit_nvidia_os_interface_coverage(),
@@ -617,6 +673,8 @@ def main() -> None:
         f"gsp_wpr2={res['nvidia_synthetic_gsp_wpr2']['valid']} "
         f"os_iface={cov['implemented_in_shim']}/{cov['total_os_apis']} "
         f"prime_ro_fence={res['muxless_prime_handoff']['valid']} "
+        f"amd_ucode={res['amd_synthetic_ucode_valid']['valid']} "
+        f"fw_store_sha256={res['dry_fw_store_sha256_contract']['valid']} "
         f"host_real_blobs={host_n}"
     )
     if not res["all_passed"]:

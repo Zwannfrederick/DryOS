@@ -23,5 +23,6 @@ int dma_mapping_error(struct device *dev, dma_addr_t dma_addr);
 
 void *dry_lx_dma_alloc_skbuf(size_t size, dma_addr_t *dma_out);
 void dry_lx_dma_free_skbuf(void *ptr);
+int dry_lx_dma_alloc_sg(u32 n_pages, u32 dir_flags, u64 *va_out, u64 *iova_out);
 
 #endif /* _DRY_LINUX_DMA_MAPPING_H */

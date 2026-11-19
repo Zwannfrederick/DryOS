@@ -376,6 +376,7 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
         if lx_mode { DriverBackendKind::LxCompatIsland } else { DriverBackendKind::NativeDriverIsland },
         if lx_mode { COMP_ID_LX_RNG_ISLAND } else { COMP_ID_MOCK_ISLAND },
     );
+    dry_userspace::fw_store::log_fw_and_lifecycle_selftest();
 
     let mut island = if lx_mode {
         let mut lb = LineBuilder::new();

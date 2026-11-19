@@ -174,6 +174,35 @@ class TestLxDriverManager(unittest.TestCase):
             r3 = mgr.rollback_version("drm_bochs", pins_file)
             self.assertEqual(r3["current"], "v6.18")
 
+    def test_11_stage_onboarding_and_bochs_glue_isolation(self) -> None:
+        self.assertEqual(len(mgr.ONBOARDING_STAGES), 11)
+        for name in ("drm_bochs", "virtio_gpu_native", "synthetic_gpu"):
+            res = mgr.run_onboarding_pipeline(name)
+            self.assertEqual(res["stages_total"], 11)
+            self.assertEqual(res["stages_passed"], 11)
+            self.assertTrue(res["fully_onboarded"])
+
+        for prof in ("intel_i915_tgl", "amdgpu_generic", "nvidia_open_ga107"):
+            res = mgr.run_onboarding_pipeline(prof)
+            self.assertEqual(res["stages_total"], 11)
+            self.assertFalse(res["fully_onboarded"])
+            self.assertFalse(res["hardware_present_assumed"])
+
+        amd = mgr.match_pci("1002:73df")
+        self.assertTrue(amd["matched"])
+        self.assertEqual(amd["matches"][0]["driver"], "amdgpu_generic")
+        self.assertEqual(amd["matches"][0]["backend"], "linux-microvm")
+
+        with tempfile.TemporaryDirectory() as td:
+            meta = mgr.build_cache("drm_bochs", cache_dir=pathlib.Path(td))
+            self.assertIn("bochs_island_glue.o", meta["objects"])
+            libdry_dir = mgr.DEFAULT_LIBDRY_DIR
+            hits = [
+                p for p in libdry_dir.rglob("*")
+                if p.is_file() and "bochs" in p.read_text(encoding="utf-8", errors="ignore").lower()
+            ]
+            self.assertEqual(hits, [])
+
 
 if __name__ == "__main__":
     unittest.main()

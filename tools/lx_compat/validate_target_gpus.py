@@ -18,7 +18,8 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "lx_compat"))
-from lx_driver_manager import CATALOG_PATH, match_pci  # noqa: E402
+from lx_driver_manager import CATALOG_PATH, match_pci, run_onboarding_pipeline  # noqa: E402
+import re  # noqa: E402
 
 SYS_PCI_DIR = pathlib.Path("/sys/bus/pci/devices")
 SHIM_C_PATH = ROOT / "drivers" / "lx-nv-open-shim" / "nv_os_shim_check.c"
@@ -144,6 +145,17 @@ def compile_check_nvidia_shim(out_dir: pathlib.Path) -> dict[str, Any]:
         )
         results["nvidia_header_dir"] = str(inc_dir)
         results["nvidia_header_build_ok"] = hdr_obj.exists()
+
+    txt = SHIM_C_PATH.read_text(encoding="utf-8")
+    table_entries = re.findall(r'\{\s*"(os_[a-z0-9_]+)"\s*,\s*(NV_SHIM_[A-Z0-9_]+)\s*\}', txt)
+    counts: dict[str, int] = {}
+    for _, cls in table_entries:
+        counts[cls] = counts.get(cls, 0) + 1
+    results["classifications"] = {
+        "total_classified": len(table_entries),
+        "counts": counts,
+        "symbols": {sym: cls for sym, cls in table_entries},
+    }
     return results
 
 
@@ -159,6 +171,7 @@ def main() -> None:
         "audit_mode": "strictly_read_only_host_and_shim_compile",
         "intel_iris_xe_8086_9a49": {
             "pci": xe_info or {"found": False},
+            "onboarding": run_onboarding_pipeline("intel_i915_tgl"),
             "tgl_firmware_count": len(i915_fw),
             "tgl_firmware_sample": i915_fw[:8],
             "execution_status": "read_only_host_inventory_and_bar_vt_d_alignment_verified",
@@ -169,8 +182,16 @@ def main() -> None:
                 "Hardware Iris Xe Display Engine MMIO bring-up on bare metal",
             ],
         },
+        "amdgpu_portability_profile": {
+            "pci_match": match_pci("1002:73df", CATALOG_PATH),
+            "onboarding": run_onboarding_pipeline("amdgpu_generic"),
+            "hardware_present_assumed": False,
+            "execution_status": "architecture_portability_profile_only",
+            "live_modeset_verified_on_dryos": False,
+        },
         "nvidia_rtx_3050_ti_10de_25a0": {
             "pci": nv_info or {"found": False},
+            "onboarding": run_onboarding_pipeline("nvidia_open_ga107"),
             "firmware_615": nv_fw_615,
             "firmware_ga107_gsp": nv_fw_ga107,
             "os_interface_shim": shim_res,

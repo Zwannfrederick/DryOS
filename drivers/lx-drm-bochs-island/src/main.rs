@@ -16,7 +16,8 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use dry_userspace::abi_ext::{
-    sys_dev_map_window, sys_dev_query_bars, UserFbInfo, UserPciDeviceInfo,
+    sys_dev_cfg_read, sys_dev_cfg_write, sys_dev_map_window, sys_dev_query_bars, UserFbInfo,
+    UserPciDeviceInfo,
 };
 use dry_userspace::init_legacy::log_line;
 use dry_userspace::ioring::{IoCqe, IoRingSharedPage, IoSqe};
@@ -51,7 +52,7 @@ static ACTIVE_PCI_CAP: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct DryLxBochsProbeInfo {
+struct DryLxDrmProbeInfo {
     edid_ok: u32,
     pref_w: u32,
     pref_h: u32,
@@ -80,10 +81,10 @@ extern "C" {
         bar0_flags: u8,
         bar2_size: u64,
         bar2_flags: u8,
-        out: *mut DryLxBochsProbeInfo,
+        out: *mut DryLxDrmProbeInfo,
     ) -> i32;
-    fn dry_lx_bochs_modeset(w: u32, h: u32) -> i32;
-    fn dry_lx_bochs_commit_dmabuf(
+    fn dry_lx_drm_modeset(w: u32, h: u32) -> i32;
+    fn dry_lx_drm_commit_dmabuf(
         src_ptr: *const u8,
         w: u32,
         h: u32,
@@ -93,7 +94,7 @@ extern "C" {
         dw: i32,
         dh: i32,
     ) -> i32;
-    fn dry_lx_bochs_shutdown();
+    fn dry_lx_drm_shutdown();
 }
 
 /// Bridge called by `libdry-lx-compat` `devm_ioremap[_wc]()` into capability-gated `SYS_DEV_MAP`.
@@ -122,6 +123,40 @@ pub extern "C" fn dry_lx_rust_ioremap_bar(bar_idx: u32, cache_mode: u32, size_by
         page_off += chunk as u32;
     }
     base_va as *mut u8
+}
+
+/// Capability-backed PCI configuration space bridge (`DEV_MAP_OP_CFG_RW`) for `libdry-lx-compat`.
+///
+/// # Safety
+/// `val` must point to readable/writable initialized `u32` storage.
+#[no_mangle]
+pub unsafe extern "C" fn dry_lx_rust_pci_cfg_rw(
+    off: u16,
+    width: u8,
+    is_write: u8,
+    val: *mut u32,
+) -> i32 {
+    let pci_cap = ACTIVE_PCI_CAP.load(Ordering::Acquire);
+    if pci_cap == 0 || val.is_null() {
+        return EINVAL as i32;
+    }
+    if is_write == 0 {
+        match sys_dev_cfg_read(pci_cap, off, width) {
+            Ok(v) => {
+                // SAFETY: Caller guarantees `val` is valid writable `u32` storage.
+                unsafe { *val = v };
+                0
+            }
+            Err(e) => e as i32,
+        }
+    } else {
+        // SAFETY: Caller guarantees `val` is valid readable `u32` storage.
+        let v = unsafe { *val };
+        match sys_dev_cfg_write(pci_cap, off, width, v) {
+            Ok(()) => 0,
+            Err(e) => e as i32,
+        }
+    }
 }
 
 /// Bounded diagnostic logger invoked by `libdry-lx-compat` (`dev_err`/`dev_info`).
@@ -195,7 +230,7 @@ fn execute_drm_sqe(sqe: IoSqe, generation: u64, pci_bound: bool, db: DmabufState
     let dh = (sqe.lba as i32).max(1);
     // SAFETY: `ISLAND_DMABUF_VADDR` is mapped `USER_RO` for `db.w x db.h` and bounds-checked in C.
     let rc = unsafe {
-        dry_lx_bochs_commit_dmabuf(
+        dry_lx_drm_commit_dmabuf(
             ISLAND_DMABUF_VADDR as *const u8,
             db.w,
             db.h,
@@ -241,7 +276,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
     let mut cq_notif = 0u64;
     let mut pci_cap = 0u64;
     let mut pci_bound = false;
-    let mut probe_info = DryLxBochsProbeInfo::default();
+    let mut probe_info = DryLxDrmProbeInfo::default();
     let mut cur_w = 0u64;
     let mut cur_h = 0u64;
     let mut db = DmabufState::default();
@@ -454,7 +489,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 let w = (mrs[0] as u32).clamp(320, 1920);
                 let h = (mrs[1] as u32).clamp(240, 1200);
                 // SAFETY: `pci_bound` confirms `g_drm_dev` is probed cleanly in `bochs.c`.
-                let rc = unsafe { dry_lx_bochs_modeset(w, h) };
+                let rc = unsafe { dry_lx_drm_modeset(w, h) };
                 if rc != 0 {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, rc as isize);
                     continue;
@@ -543,7 +578,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 let dh = if raw_h > 0 { raw_h } else { db.h as i32 };
                 // SAFETY: `ISLAND_DMABUF_VADDR` is mapped `USER_RO` and `dw`/`dh` are clamped in C.
                 let rc = unsafe {
-                    dry_lx_bochs_commit_dmabuf(
+                    dry_lx_drm_commit_dmabuf(
                         ISLAND_DMABUF_VADDR as *const u8,
                         db.w,
                         db.h,
@@ -586,7 +621,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                 if pci_bound {
                     // SAFETY: Calls `bochs.c` `bochs_pci_shutdown()` while BARs are still mapped.
                     unsafe {
-                        dry_lx_bochs_shutdown();
+                        dry_lx_drm_shutdown();
                     }
                 }
                 if db.bound && db.cap != 0 {
