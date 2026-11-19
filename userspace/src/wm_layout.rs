@@ -18,8 +18,7 @@ impl WindowManager {
     /// Collect allocated, visible `WindowRole::Normal` slot indices in deterministic slot/id order.
     pub fn collect_normal_slots(&self, out: &mut [usize; MAX_WINDOWS]) -> usize {
         let mut n = 0usize;
-        for slot_i in 0..MAX_WINDOWS {
-            let w = &self.windows[slot_i];
+        for (slot_i, w) in self.windows.iter().enumerate() {
             if w.allocated && w.visible && w.role == WindowRole::Normal {
                 out[n] = slot_i;
                 n += 1;

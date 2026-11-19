@@ -568,8 +568,8 @@ impl PendingReclaim {
         } else {
             map_ref_dec_data_pfn_after_shootdown(self.data_pfn, self.order)
         };
-        for i in 0..self.pt_len {
-            let pt_h = pt_frame_unpin_for_reclaim(self.pt_pfns[i]);
+        for &pt_pfn in self.pt_pfns.iter().take(self.pt_len) {
+            let pt_h = pt_frame_unpin_for_reclaim(pt_pfn);
             free_pages(pt_h, PageOrder::Order4KiB, KERNEL_PT_LABEL);
         }
         data_h

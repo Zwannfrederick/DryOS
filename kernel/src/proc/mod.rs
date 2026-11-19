@@ -255,8 +255,7 @@ fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_
     let cnode = &CSPACE_TABLE[cspace_id as usize];
     let guard = cnode.guard.load(Ordering::Relaxed);
     let radix = cnode.radix_bits.load(Ordering::Relaxed);
-    for idx in 1..CNODE_SLOTS {
-        let slot = &cnode.slots[idx];
+    for (idx, slot) in cnode.slots.iter().enumerate().take(CNODE_SLOTS).skip(1) {
         let (st, kind, _, sgen) = unpack_state_gen(slot.state_gen.load(Ordering::Acquire));
         if st == SlotState::Live
             && slot.cdt_parent.load(Ordering::Acquire) == CDT_NONE

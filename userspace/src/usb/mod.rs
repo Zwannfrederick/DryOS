@@ -406,9 +406,9 @@ pub struct BarPageMapper {
 
 impl BarPageMapper {
     pub fn map_page(&mut self, page_idx: u32) -> Result<u64, isize> {
-        for i in 0..self.count {
-            if self.entries[i].0 == page_idx {
-                return Ok(self.entries[i].1);
+        for &(ent_page, ent_va) in self.entries.iter().take(self.count) {
+            if ent_page == page_idx {
+                return Ok(ent_va);
             }
         }
         if self.count >= self.entries.len() {

@@ -235,8 +235,7 @@ pub fn on_process_terminating(pid: u32, cspace_id: CSpaceId) {
         return;
     }
     let srv_mask = CapRights::RECV.0 | CapRights::REPLY.0;
-    for idx in 1..CNODE_SLOTS {
-        let slot = &cnode.slots[idx];
+    for (idx, slot) in cnode.slots.iter().enumerate().take(CNODE_SLOTS).skip(1) {
         let (st, kind, rights, _) = unpack_state_gen(slot.state_gen.load(Ordering::Acquire));
         if st == SlotState::Live
             && kind == CapObjectKind::Endpoint

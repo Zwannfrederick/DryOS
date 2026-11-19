@@ -502,13 +502,13 @@ impl VirtioGpu2d {
             let ent_sz = size_of::<VirtioGpuMemEntry>();
             write_volatile(GPU_CMD_VADDR as *mut VirtioGpuResourceAttachBacking, attach);
             let mut rem = total_bytes;
-            for i in 0..need_2m {
+            for (i, &addr) in self.scanout_pas.iter().enumerate().take(need_2m) {
                 let seg_len = rem.min(TWO_MIB) as u32;
                 rem = rem.saturating_sub(TWO_MIB);
                 write_volatile(
                     (GPU_CMD_VADDR + (hdr_sz + i * ent_sz) as u64) as *mut VirtioGpuMemEntry,
                     VirtioGpuMemEntry {
-                        addr: self.scanout_pas[i],
+                        addr,
                         length: seg_len,
                         padding: 0,
                     },

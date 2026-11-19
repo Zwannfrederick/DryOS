@@ -157,8 +157,8 @@ impl DirtyRegion {
     #[inline]
     pub fn drain_into(&mut self, fb_w: usize, fb_h: usize, out: &mut [Rect; MAX_DIRTY_RECTS]) -> usize {
         let mut n = 0usize;
-        for i in 0..self.count {
-            let c = self.rects[i].clamp_to(fb_w, fb_h);
+        for rect in self.rects.iter().take(self.count) {
+            let c = rect.clamp_to(fb_w, fb_h);
             if !c.is_empty() {
                 out[n] = c;
                 n += 1;
