@@ -1,0 +1,228 @@
+{
+  "profile_id": "lenovo_ideapad_gaming3_82k1_passive_ro",
+  "read_only_host_probe": true,
+  "hardware_verified": false,
+  "verification_note": "Passive Linux sysfs inventory on host + DRY OS boot-contract cross-check. Bare-metal DRY OS boot requires manual operator USB flash & execution.",
+  "dmi": {
+    "sys_vendor": "LENOVO",
+    "product_name": "82K1",
+    "product_version": "IdeaPad Gaming 3 15IHU6",
+    "bios_version": "H4CN22WW(V1.07)"
+  },
+  "host_cmdline_iommu_hint": false,
+  "acpi_tables": {
+    "DMAR": {
+      "present": true,
+      "readable": false,
+      "bytes": null,
+      "note": "[Errno 13] Permission denied: '/sys/firmware/acpi/tables/DMAR'"
+    },
+    "MCFG": {
+      "present": true,
+      "readable": false,
+      "bytes": null,
+      "note": "[Errno 13] Permission denied: '/sys/firmware/acpi/tables/MCFG'"
+    },
+    "APIC": {
+      "present": true,
+      "readable": false,
+      "bytes": null,
+      "note": "[Errno 13] Permission denied: '/sys/firmware/acpi/tables/APIC'"
+    },
+    "FACP": {
+      "present": true,
+      "readable": false,
+      "bytes": null,
+      "note": "[Errno 13] Permission denied: '/sys/firmware/acpi/tables/FACP'"
+    },
+    "HPET": {
+      "present": true,
+      "readable": false,
+      "bytes": null,
+      "note": "[Errno 13] Permission denied: '/sys/firmware/acpi/tables/HPET'"
+    },
+    "VFCT": {
+      "present": false,
+      "readable": false,
+      "bytes": null
+    },
+    "IVRS": {
+      "present": false,
+      "readable": false,
+      "bytes": null
+    }
+  },
+  "pci_targets": {
+    "total_pci_functions": 24,
+    "intel_iris_xe_8086_9a49": {
+      "bdf": "0000:00:02.0",
+      "vendor": "0x8086",
+      "device": "0x9a49",
+      "class": "0x030000",
+      "irq": "153",
+      "power_control": "auto",
+      "runtime_status": "active",
+      "non_zero_bars": [
+        [
+          "0x0000006104000000",
+          "0x0000006104ffffff",
+          "0x0000000000140204"
+        ],
+        [
+          "0x0000004000000000",
+          "0x000000400fffffff",
+          "0x000000000014220c"
+        ],
+        [
+          "0x0000000000005000",
+          "0x000000000000503f",
+          "0x0000000000040101"
+        ],
+        [
+          "0x00000000000c0000",
+          "0x00000000000dffff",
+          "0x0000000000000212"
+        ]
+      ]
+    },
+    "nvidia_rtx3050ti_10de_25a0": {
+      "bdf": "0000:01:00.0",
+      "vendor": "0x10de",
+      "device": "0x25a0",
+      "class": "0x030200",
+      "irq": "130",
+      "power_control": "on",
+      "runtime_status": "active",
+      "non_zero_bars": [
+        [
+          "0x0000000054000000",
+          "0x0000000054ffffff",
+          "0x0000000000040200"
+        ],
+        [
+          "0x0000006000000000",
+          "0x00000060ffffffff",
+          "0x000000000014220c"
+        ],
+        [
+          "0x0000006100000000",
+          "0x0000006101ffffff",
+          "0x000000000014220c"
+        ],
+        [
+          "0x0000000000004000",
+          "0x000000000000407f",
+          "0x0000000000040101"
+        ]
+      ]
+    },
+    "intel_vmd_0104": {
+      "bdf": "0000:00:0e.0",
+      "vendor": "0x8086",
+      "device": "0x9a0b",
+      "class": "0x010400",
+      "irq": "0",
+      "power_control": "on",
+      "runtime_status": "active",
+      "non_zero_bars": [
+        [
+          "0x0000006102000000",
+          "0x0000006103ffffff",
+          "0x0000000000140204"
+        ],
+        [
+          "0x0000000052000000",
+          "0x0000000053ffffff",
+          "0x0000000000040200"
+        ],
+        [
+          "0x0000006105100000",
+          "0x00000061051fffff",
+          "0x0000000000140204"
+        ]
+      ]
+    },
+    "nvme_controllers": [
+      {
+        "bdf": "10000:e1:00.0",
+        "vendor": "0x1344",
+        "device": "0x5404",
+        "class": "0x010802",
+        "irq": "2147483648",
+        "power_control": "on",
+        "runtime_status": "active",
+        "non_zero_bars": [
+          [
+            "0x0000000052000000",
+            "0x0000000052003fff",
+            "0x0000000000140204"
+          ]
+        ]
+      }
+    ],
+    "xhci_controllers": [
+      {
+        "bdf": "0000:00:14.0",
+        "vendor": "0x8086",
+        "device": "0xa0ed",
+        "class": "0x0c0330",
+        "irq": "122",
+        "power_control": "auto",
+        "runtime_status": "active",
+        "non_zero_bars": [
+          [
+            "0x0000000055180000",
+            "0x000000005518ffff",
+            "0x0000000000140204"
+          ]
+        ]
+      }
+    ]
+  },
+  "drm_connected_or_edp": [
+    {
+      "connector": "card2-eDP-1",
+      "status": "connected",
+      "enabled": "enabled",
+      "top_modes": [
+        "1920x1080"
+      ],
+      "edid_bytes": 128
+    }
+  ],
+  "edp_1920x1080_present": true,
+  "firmware_blobs": {
+    "/lib/firmware/i915/tgl_dmc_ver2_12.bin.zst": {
+      "present": true,
+      "bytes": 5141,
+      "sha256_16": "cf8d44b8b879ffd6"
+    },
+    "/lib/firmware/i915/tgl_guc_70.1.1.bin.zst": {
+      "present": true,
+      "bytes": 102651,
+      "sha256_16": "283a9eada519b870"
+    },
+    "/lib/firmware/i915/tgl_huc_7.9.3.bin.zst": {
+      "present": true,
+      "bytes": 154252,
+      "sha256_16": "0450a7390c8d6c2d"
+    },
+    "/lib/firmware/nvidia/620.70.06/ucodes_ga10x.bin": {
+      "present": true,
+      "bytes": 56128512,
+      "sha256_16": "b8f3d94d33cc284d"
+    }
+  },
+  "dryos_boot_contracts": {
+    "max_fb_pages_4k": 4096,
+    "fhd_1080p_pages_required": 2025,
+    "fhd_fits_max_fb_pages": true,
+    "target_refresh_hz": 165,
+    "frame_budget_us": 6060.61,
+    "mcfg_before_dmar": true,
+    "vtd_dynamic_did_min_nd_supported": 16,
+    "dgpu_03_02_kept_passive": true,
+    "vmd_01_04_kept_passive": true,
+    "iommu_fail_closed_preserved": true
+  }
+}

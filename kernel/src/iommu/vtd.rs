@@ -364,6 +364,16 @@ fn init_single_unit(
     }
 
     unit.translation_enabled = true;
+    serial_println!(
+        "[DRY-IOMMU] UNIT idx={} seg={} inc_all={} sagaw={} nd={} coh={} cm={} gop_def=0",
+        unit_idx,
+        src.segment,
+        src.include_all as u8,
+        if levels_4 { 48 } else { 39 },
+        nd,
+        coherent as u8,
+        unit.caching_mode as u8
+    );
     poll_and_clear_unit_faults(unit);
     true
 }

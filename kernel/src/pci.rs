@@ -318,6 +318,18 @@ pub fn init_pci_devices() -> bool {
         }
     }
     publish_boot_pci_count(rec_cnt);
+    let (dgpu_pk, vmd_pk, lpss_cnt) = pci_topology_summary();
+    serial_println!(
+        "[DRY-PCI-TOPO] funcs={} managed={} igpu_gop={} dgpu_3d_passive={} vmd_passive={} lpss_i2c={} nvme={} xhci={}",
+        rec_cnt,
+        found,
+        active_gop_bdf().is_some() as u8,
+        (dgpu_pk != 0) as u8,
+        (vmd_pk != 0) as u8,
+        lpss_cnt,
+        PCI_DEVS[PCI_OBJ_NVME].present.load(Ordering::Acquire) as u8,
+        PCI_DEVS[PCI_OBJ_XHCI].present.load(Ordering::Acquire) as u8,
+    );
     if found == 0 {
         serial_println!("[DRY-PCI] No managed PCI controllers attached");
     }
