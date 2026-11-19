@@ -627,6 +627,9 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_cap: u64) -> ! {
 
         let op = msg_tag_label(tag);
         let authorized = ext.sender_badge == BADGE_SUPERVISOR || ext.sender_badge == BADGE_BLK_VFS;
+        if !matches!(op, BLK_OP_SETUP_RING | BLK_OP_ATTACH_DATA) {
+            dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
+        }
 
         match op {
             BLK_OP_QUERY_INFO => {

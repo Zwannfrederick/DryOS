@@ -77,6 +77,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_nvme_cap: u64) -> ! {
         let Ok((tag, tok, _mrs)) = sys_ipc_recv_ext(srv_ep_cap, 0, 0, &mut ext) else {
             break;
         };
+        dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
         let label = msg_tag_label(tag);
         if ext.sender_badge != BADGE_SUPERVISOR {
             if tok != 0 {

@@ -7,17 +7,17 @@
   "mmio_2m_wc_ok": true,
   "sg_iova_ok": true,
   "surf_pool_ok": true,
-  "wc_64k_cyc": 29114,
-  "uc_64k_cyc": 12507,
+  "wc_64k_cyc": 25209,
+  "uc_64k_cyc": 10755,
   "msi_vec": "0x40",
   "msi_irqs": 32,
-  "msi_bound_p50_cyc": 72522,
-  "msi_bound_p50_us": 23.28,
-  "dma_rt_cyc": 620773059,
+  "msi_bound_p50_cyc": 72892,
+  "msi_bound_p50_us": 23.4,
+  "dma_rt_cyc": 623638799,
   "vtd_rogue_faults": 1,
   "kernel_pci_quiesces": 5,
   "kernel_msi_irqs": 33,
   "kernel_msi_acks": 33,
   "leaked_frames": 0,
-  "wall_time_sec": 6.107
+  "wall_time_sec": 4.275
 }

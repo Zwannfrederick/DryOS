@@ -198,3 +198,84 @@ pub fn run_p4_security_and_fault_audit(
     log_line(&lb);
     Ok(())
 }
+
+/// Ascension 8.0 M2 Security Hardening Probe (`dry_test_sec_probe=1`):
+/// verifies non-supervisor `#UD` rejection and unclaimed IPC capability slot reclamation on `dry-usb`.
+#[inline(never)]
+pub fn run_asc8_m2_security_probe(hw: &crate::sup_hw_services::HwServicesState) {
+    if hw.usb_ep == 0 || hw.usb_sup_cap == 0 {
+        let mut lb = LineBuilder::new();
+        lb.push_bytes(b"[DRY-SEC-M2] FAIL: usb_ep_missing=1");
+        log_line(&lb);
+        return;
+    }
+
+    let rogue_rights = crate::RIGHT_READ | crate::RIGHT_SEND | crate::RIGHT_CALL;
+    let usb_unauth_ud2_eperm = if let Ok(rogue_usb) =
+        crate::sys_cap_derive(hw.usb_ep, rogue_rights, 0, crate::BADGE_SUP_ROGUE)
+    {
+        let res = crate::sys_ipc_call_inline(
+            rogue_usb,
+            crate::pack_msg_tag(crate::IPC_OP_CRASH_UD2, 0, 1, 0),
+            [0; 4],
+            0,
+        );
+        let _ = crate::sys_cap_revoke(rogue_usb, 1);
+        matches!(
+            res,
+            Ok((tag, _, mrs))
+                if crate::msg_tag_label(tag) == crate::IPC_OP_ERR_PERM
+                    && (mrs[0] as isize) == crate::EPERM
+        )
+    } else {
+        false
+    };
+
+    let mut flood_ok = 0u32;
+    for _ in 0..16 {
+        let Ok(fcap) = crate::sys_frame_alloc(0) else {
+            flood_ok = 0;
+            break;
+        };
+        let call_res = crate::sys_ipc_call_with_grant(
+            hw.usb_sup_cap,
+            crate::abi_ext::BLK_OP_QUERY_INFO,
+            [0; 4],
+            fcap,
+            crate::RIGHT_READ,
+            0,
+            0,
+        );
+        let _ = crate::sys_cap_revoke(fcap, 1);
+        if matches!(call_res, Ok((tag, _, _)) if crate::msg_tag_label(tag) == crate::IPC_OP_PONG) {
+            flood_ok += 1;
+        }
+    }
+    let cap_flood_reclaimed = flood_ok == 16;
+
+    let mut rx = [0u8; crate::MAX_IPC_EXTRA_BYTES];
+    let usb_alive = matches!(
+        crate::vfs_proto::sys_ipc_call_extra(
+            hw.usb_sup_cap,
+            crate::USB_OP_QUERY_SUMMARY,
+            [0; 4],
+            &[],
+            &mut rx,
+            0,
+        ),
+        Ok((tag, _, _)) if crate::msg_tag_label(tag) == crate::IPC_OP_PONG
+    );
+
+    let mut lb = LineBuilder::new();
+    if usb_unauth_ud2_eperm && usb_alive && cap_flood_reclaimed {
+        lb.push_bytes(b"[DRY-SEC-M2] PASS: usb_unauth_ud2_eperm=1 usb_alive=1 cap_flood_reclaimed=1");
+    } else {
+        lb.push_bytes(b"[DRY-SEC-M2] FAIL: usb_unauth_ud2_eperm=");
+        lb.push_u64(u64::from(usb_unauth_ud2_eperm));
+        lb.push_bytes(b" usb_alive=");
+        lb.push_u64(u64::from(usb_alive));
+        lb.push_bytes(b" cap_flood_reclaimed=");
+        lb.push_u64(u64::from(cap_flood_reclaimed));
+    }
+    log_line(&lb);
+}

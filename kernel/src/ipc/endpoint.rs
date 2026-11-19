@@ -159,12 +159,29 @@ pub fn ep_send_or_call(
                 let (_, _, rcv_gen26) = tcb(rcv_slot).sched.snapshot();
                 let dst_cs = slots[rcv_slot].receiver_cspace;
 
+                if is_call && donate_on_call(cur_slot, rcv_slot) == Err(DonateError::CycleDetected) {
+                    let rs = rcv_slot as u16;
+                    slots[rcv_slot].prev_waiter = NO_SLOT;
+                    slots[rcv_slot].next_waiter = inner.recv_head;
+                    if inner.recv_head != NO_SLOT {
+                        slots[inner.recv_head as usize].prev_waiter = rs;
+                    } else {
+                        inner.recv_tail = rs;
+                    }
+                    inner.recv_head = rs;
+                    op_err = Some(SysError::Deadlock);
+                    return;
+                }
+
                 let xfer_cap = if let Some((g_cap, g_rights, g_lease, g_badge)) = grant_req {
                     match cspace_transfer(
                         cspace_id, subj_label, g_cap, dst_cs, g_rights, g_lease, g_badge, now_epoch,
                     ) {
                         Ok(rcpt) => rcpt.dst_cap,
                         Err(ce) => {
+                            if is_call {
+                                revert_donation_for_caller(cur_slot);
+                            }
                             let rs = rcv_slot as u16;
                             slots[rcv_slot].prev_waiter = NO_SLOT;
                             slots[rcv_slot].next_waiter = inner.recv_head;
@@ -183,19 +200,6 @@ pub fn ep_send_or_call(
                 };
 
                 let reply_tok = if is_call {
-                    if let Err(DonateError::CycleDetected) = donate_on_call(cur_slot, rcv_slot) {
-                        let rs = rcv_slot as u16;
-                        slots[rcv_slot].prev_waiter = NO_SLOT;
-                        slots[rcv_slot].next_waiter = inner.recv_head;
-                        if inner.recv_head != NO_SLOT {
-                            slots[inner.recv_head as usize].prev_waiter = rs;
-                        } else {
-                            inner.recv_tail = rs;
-                        }
-                        inner.recv_head = rs;
-                        op_err = Some(SysError::Deadlock);
-                        return;
-                    }
                     let seq = next_seq16(slots[cur_slot].call_seq);
                     slots[cur_slot].call_seq = seq;
                     slots[cur_slot].wait_phase = WaitPhase::WaitingReply;

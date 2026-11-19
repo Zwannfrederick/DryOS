@@ -214,8 +214,12 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
         };
         let from_sup = ext.sender_badge == BADGE_GPU_SUP;
         let from_disp = ext.sender_badge == BADGE_GPU_DISPLAY;
+        let op = msg_tag_label(tag);
+        if !matches!(op, GPU_OP_BIND_PCI | GPU_OP_ATTACH_BACKBUF) {
+            dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
+        }
 
-        match msg_tag_label(tag) {
+        match op {
             GPU_OP_BIND_PCI => {
                 if !from_sup {
                     if ext.transferred_cap != 0 {
@@ -329,7 +333,15 @@ pub extern "C" fn _start(gpu_ep_cap: u64, pci_gpu_arg1: u64) -> ! {
                 };
                 let w = g.width as usize;
                 let h = g.height as usize;
-                let need_pages = (w * h * 4).div_ceil(TWO_MIB as usize).clamp(1, MAX_GPU_SCANOUT_2M);
+                let Some(byte_len) = w.checked_mul(h).and_then(|v| v.checked_mul(4)) else {
+                    reply_err(gpu_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                };
+                if byte_len == 0 {
+                    reply_err(gpu_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                }
+                let need_pages = byte_len.div_ceil(TWO_MIB as usize).clamp(1, MAX_GPU_SCANOUT_2M);
                 if attached_caps.iter().take(need_pages).any(|&c| c == 0) {
                     reply_err(gpu_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
                     continue;

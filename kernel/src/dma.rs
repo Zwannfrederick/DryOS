@@ -368,6 +368,11 @@ pub fn sys_dma_alloc(
             release_claimed_pci_slot(dev_idx, claimed_new);
             return Err(SysError::NoMem);
         }
+        if crate::iommu::overlaps_rmrr(dma_paddr, len_bytes) {
+            let _ = adjust_frame_iommu_pin(fh, -1);
+            release_claimed_pci_slot(dev_idx, claimed_new);
+            return Err(SysError::Perm);
+        }
         if map_dma_range(dev_idx, dma_paddr, len_bytes).is_err() {
             let _ = adjust_frame_iommu_pin(fh, -1);
             release_claimed_pci_slot(dev_idx, claimed_new);
@@ -614,6 +619,23 @@ fn dma_op_alloc_sg(
                 release_claimed_pci_slot(dev_idx, claimed_new);
                 return Err(SysError::NoMem);
             }
+            if crate::iommu::overlaps_rmrr(hpa, PAGE_SIZE as u64) {
+                let _ = adjust_frame_iommu_pin(fh, -1);
+                for (rb_i, rb_item) in frames.iter().take(mapped_cnt).enumerate() {
+                    if let Some(rfh) = *rb_item {
+                        if hw {
+                            unmap_dma_range(
+                                dev_idx,
+                                iova_base + (rb_i as u64) * (PAGE_SIZE as u64),
+                                PAGE_SIZE as u64,
+                            );
+                        }
+                        let _ = adjust_frame_iommu_pin(rfh, -1);
+                    }
+                }
+                release_claimed_pci_slot(dev_idx, claimed_new);
+                return Err(SysError::Perm);
+            }
             if hw && map_dma_range_iova(dev_idx, seg_iova, hpa, PAGE_SIZE as u64, perms).is_err() {
                 let _ = adjust_frame_iommu_pin(fh, -1);
                 for (rb_i, rb_item) in frames.iter().take(mapped_cnt).enumerate() {
@@ -775,38 +797,38 @@ fn dma_op_sync(cspace_id: CSpaceId, dev_idx: usize, buf_id: u64, direction: u8) 
     if buf_id == 0 || direction > DMA_DIR_FROM_DEV {
         return Err(SysError::Inval);
     }
-    let (pages, handles) = with_dma_slot_lock(dev_idx, |st| {
-        if let Some(sg) = st.sg_bufs.iter().find(|s| {
+    let coherent = is_device_coherent(dev_idx);
+    let found = with_dma_slot_lock(dev_idx, |st| {
+        let Some(sg) = st.sg_bufs.iter().find(|s| {
             s.active
                 && s.buf_id == buf_id
                 && s.owner_cspace == cspace_id
                 && (s.direction == DMA_DIR_BIDIR || s.direction == direction)
-        }) {
-            (sg.page_count as usize, Some(sg.frames))
-        } else {
-            (0usize, None)
-        }
-    });
-    let Some(frames) = handles else {
-        return Err(SysError::Inval);
-    };
-    if !is_device_coherent(dev_idx) {
-        for item in frames.iter().take(pages) {
-            if let Some(fh) = *item {
-                let va = phys_to_hhdm(fh.phys_addr());
-                for off in (0..PAGE_SIZE).step_by(64) {
-                    // SAFETY: Flush DMA buffer cachelines via kernel HHDM mapping for non-snooping DMARs.
-                    unsafe {
-                        asm!("clflush [{p}]", p = in(reg) (va as usize + off), options(nostack, preserves_flags));
+        }) else {
+            return false;
+        };
+        if !coherent {
+            for item in sg.frames.iter().take(sg.page_count as usize) {
+                if let Some(fh) = *item {
+                    let va = phys_to_hhdm(fh.phys_addr());
+                    for off in (0..PAGE_SIZE).step_by(64) {
+                        // SAFETY: Flush DMA buffer cachelines under slot lock so frames stay pinned/valid.
+                        unsafe {
+                            asm!("clflush [{p}]", p = in(reg) (va as usize + off), options(nostack, preserves_flags));
+                        }
                     }
                 }
             }
         }
-    }
-    fence(Ordering::SeqCst);
-    // SAFETY: Serializing fence on x86-64 ensuring store/flush visibility prior to device doorbell / CPU read.
-    unsafe {
-        asm!("mfence", options(nostack, preserves_flags));
+        fence(Ordering::SeqCst);
+        // SAFETY: Serializing fence on x86-64 ensuring flush visibility prior to doorbell / CPU read.
+        unsafe {
+            asm!("mfence", options(nostack, preserves_flags));
+        }
+        true
+    });
+    if !found {
+        return Err(SysError::Inval);
     }
     Ok((0, 0))
 }

@@ -729,6 +729,7 @@ pub const HWVAL_FLAG_TEST_NV_VM_CRASH: u32 = 1 << 11;
 pub const HWVAL_FLAG_TEST_NV_TIMEOUT: u32 = 1 << 12;
 pub const HWVAL_FLAG_TEST_NV_CORRUPT_IPC: u32 = 1 << 13;
 pub const HWVAL_FLAG_TEST_NV_UNAUTH_CAP: u32 = 1 << 14;
+pub const HWVAL_FLAG_TEST_SEC_PROBE: u32 = 1 << 15;
 
 pub const ACPI_AUDIT_RSDP_OK: u32 = 1 << 0;
 pub const ACPI_AUDIT_XSDT_OK: u32 = 1 << 1;
@@ -818,3 +819,12 @@ pub fn sys_dmesg_read(info: &mut UserSysInfo, out: &mut [u8]) -> Result<usize, i
         Ok(r0 as usize)
     }
 }
+
+/// Revoke a transferred capability slot received over IPC when the opcode does not consume it.
+#[inline]
+pub fn revoke_unused_cap(cap: u64) {
+    if cap != 0 {
+        let _ = crate::sys_cap_revoke(cap, 1);
+    }
+}
+

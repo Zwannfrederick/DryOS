@@ -398,6 +398,50 @@ def _run_p18c_negative_fault_matrix(
     return len(cases)
 
 
+def _run_p18d_security_hardening(
+    build_dir: pathlib.Path,
+    ovmf_code: pathlib.Path,
+    ovmf_vars: pathlib.Path,
+) -> dict[str, Any]:
+    from build_live_usb_image import build_hwval_usb_image
+
+    t0 = time.monotonic()
+    nvme_img = build_dir / "p18d_canary_nvme.img"
+    nvme_pre = _create_canary_disk(nvme_img, b"DRYOS_SEC_M2_")
+    nvme_args = [
+        "-drive",
+        f"if=none,id=nvmedisk,format=raw,file={nvme_img}",
+        "-device",
+        "nvme,serial=DRYP18SEC,drive=nvmedisk",
+    ]
+    img = build_dir / "p18d_security.img"
+    build_hwval_usb_image(img, force_build=False, limine_extra="dry_test_sec_probe=1")
+    sess = _HwvalSession(
+        "p18d_security",
+        img,
+        ovmf_code,
+        ovmf_vars,
+        build_dir,
+        iommu=True,
+        usb_hid=True,
+        extra_args=nvme_args,
+    )
+    try:
+        sess.wait_for("[DRY-SEC-M2] PASS: usb_unauth_ud2_eperm=1 usb_alive=1 cap_flood_reclaimed=1")
+        sess.wait_for("[DRY-SHELL] Interactive shell ready")
+        sess.shutdown_clean()
+    finally:
+        sess.close()
+        img.unlink(missing_ok=True)
+    if _sha256_file(nvme_img) != nvme_pre:
+        nvme_img.unlink(missing_ok=True)
+        raise RuntimeError("[p18d] Canary NVMe modified during security probe!")
+    nvme_img.unlink(missing_ok=True)
+    elapsed = round(time.monotonic() - t0, 2)
+    print(f"[PASS] p18d_security_hardening: M2 IPC/cap hardening + leaked_frames=0 + NVMe untouched ({elapsed}s).")
+    return {"elapsed_s": elapsed}
+
+
 def run_p18_hwval_suite(
     _kernel_elf: pathlib.Path,
     build_dir: pathlib.Path,
@@ -412,9 +456,10 @@ def run_p18_hwval_suite(
     res_a = _run_p18a_safe_auto_and_canary(build_dir, ovmf_code, ovmf_vars, persisted)
     res_b = _run_p18b_recovery_and_multisession(build_dir, ovmf_code, ovmf_vars, persisted, res_a["meta"])
     n_neg = _run_p18c_negative_fault_matrix(build_dir, ovmf_code, ovmf_vars)
+    res_d = _run_p18d_security_hardening(build_dir, ovmf_code, ovmf_vars)
     persisted.unlink(missing_ok=True)
     out = root / "tools" / "compat_bench" / "results_p18_hwval.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     import json
-    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg}, indent=2) + "\n", encoding="utf-8")
-    return 2 + n_neg
+    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg, "p18d": res_d}, indent=2) + "\n", encoding="utf-8")
+    return 3 + n_neg

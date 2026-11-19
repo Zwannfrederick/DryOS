@@ -473,6 +473,9 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
         let label = msg_tag_label(tag);
         let from_sup = ext.sender_badge == BADGE_SUPERVISOR;
         let from_blk_auth = from_sup || ext.sender_badge == BADGE_BLK_VFS;
+        if !matches!(label, USB_OP_SET_WM_SINK | BLK_OP_SETUP_RING | BLK_OP_ATTACH_DATA) {
+            dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
+        }
         let exposed_secs = if st.msc.ready && st.msc.dryfs_verified {
             st.msc.part2_sectors
         } else {
@@ -655,9 +658,16 @@ pub extern "C" fn _start(srv_ep_cap: u64, pci_xhci_cap: u64) -> ! {
                 }
                 sys_exit(0);
             }
-            IPC_OP_CRASH_UD2 => unsafe {
-                asm!("ud2", options(nomem, nostack));
-            },
+            IPC_OP_CRASH_UD2 => {
+                if !from_sup {
+                    reply_err(srv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                // SAFETY: Supervisor-authorized `#UD` test (`R-03`).
+                unsafe {
+                    asm!("ud2", options(nomem, nostack));
+                }
+            }
             _ => {
                 // SAFETY: Single-threaded event loop owns `LOG_STAGE_BUF`.
                 let stage_buf = unsafe { &mut *core::ptr::addr_of_mut!(LOG_STAGE_BUF) };

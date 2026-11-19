@@ -45,8 +45,9 @@ use dry_userspace::{
     sys_notify_signal, sys_proc_kill, sys_proc_spawn, sys_proc_spawn_with_fault_ep,
     sys_proc_wait, sys_sysinfo, UserCapInfo, UserIpcRecvExt, UserSysInfo, BADGE_SUPERVISOR,
     EBADCAP, EINVAL, EPERM, EPIPE, EREVOKED, FAULT_MSG_LABEL, FAULT_REPLY_KILL, IPC_OP_CRASH_UD2,
-    IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, RIGHT_CALL, RIGHT_MAP,
-    RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL, RIGHT_WAIT, RIGHT_WRITE,
+    IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, MSG_FLAG_NON_BLOCKING,
+    RIGHT_CALL, RIGHT_MAP, RIGHT_READ, RIGHT_RECV, RIGHT_REPLY, RIGHT_SEND, RIGHT_SIGNAL,
+    RIGHT_WAIT, RIGHT_WRITE,
 };
 
 #[derive(Copy, Clone)]
@@ -317,6 +318,25 @@ impl IslandInstance {
         if self.state != ISLAND_STATE_RUNNING || self.proc_handle == 0 {
             return Ok(());
         }
+        if let Some(cfg) = pci_cfg {
+            if cfg.fault_ep != 0 && self.fault_send_cap != 0 {
+                let mut fext = UserIpcRecvExt::default();
+                if let Ok((_ftag, ftok, _fmrs)) =
+                    sys_ipc_recv_ext(cfg.fault_ep, MSG_FLAG_NON_BLOCKING as u64, 0, &mut fext)
+                {
+                    dry_userspace::abi_ext::revoke_unused_cap(fext.transferred_cap);
+                    if ftok != 0 {
+                        let _ = sys_ipc_reply_inline(
+                            cfg.fault_ep,
+                            ftok,
+                            pack_msg_tag(FAULT_REPLY_KILL, 0, 1, 0),
+                            [0; 4],
+                        );
+                    }
+                    self.state = ISLAND_STATE_FAULTED;
+                }
+            }
+        }
         if let Ok((_w_kind, _w_detail)) = sys_proc_wait(self.proc_handle, 1, 0) {
             self.proc_handle = 0;
             self.state = ISLAND_STATE_FAULTED;
@@ -418,6 +438,9 @@ pub extern "C" fn _start(broker_ep: u64, mock_drv_mod_cap: u64) -> ! {
         let op = msg_tag_label(tag);
         let is_admin = ext.sender_badge == BADGE_BROKER_ADMIN;
         let is_client = is_admin || ext.sender_badge == BADGE_BROKER_CLIENT;
+        if op != BROKER_OP_BIND_PCI_DEV {
+            dry_userspace::abi_ext::revoke_unused_cap(ext.transferred_cap);
+        }
 
         if !is_client {
             if ext.transferred_cap != 0 {

@@ -638,7 +638,7 @@ pub fn sys_dev_map(
     let req = CapRights(CapRights::READ.0 | CapRights::WRITE.0 | CapRights::MAP.0);
     let now_epoch = current_lease_epoch();
     let ptr = CapPtr(pci_cap_raw);
-    let mut mapped_info: Option<(usize, u32, ValidatedVirtioPci)> = None;
+    let mut mapped_info: Option<(usize, u32, ValidatedVirtioPci, bool)> = None;
     let mut inval_range = false;
 
     let map_res = with_pinned_cap(cspace_id, subj_label, ptr, req, now_epoch, |res| {
@@ -703,7 +703,7 @@ pub fn sys_dev_map(
         }
 
         enable_pci_bme(&vdev);
-        mapped_info = Some((dev_idx, res.global_slot, vdev));
+        mapped_info = Some((dev_idx, res.global_slot, vdev, claimed_new));
         Ok(())
     });
     if let Err(e) = map_res {
@@ -715,7 +715,7 @@ pub fn sys_dev_map(
         });
     }
 
-    let (dev_idx, global_slot, vdev) = mapped_info.ok_or(SysError::NoSys)?;
+    let (dev_idx, global_slot, vdev, claimed_new) = mapped_info.ok_or(SysError::NoSys)?;
     // SAFETY: `UserVirtioPciInfo` is `#[repr(C)]` POD (`32` bytes) with `_pad = 0`.
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -729,7 +729,9 @@ pub fn sys_dev_map(
             vs_h.id,
             user_vaddr,
         );
-        quiesce_slot_for_cspace(dev_idx, cspace_id);
+        if claimed_new {
+            quiesce_slot_for_cspace(dev_idx, cspace_id);
+        }
         for rb in 0..(vdev.num_pages as usize) {
             let _ = unmap_4k(vs_h, user_vaddr + (rb as u64) * (PAGE_SIZE as u64));
         }

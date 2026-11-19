@@ -140,6 +140,9 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         sys.online_cpus,
         diag_scratch,
     );
+    if (diag_mgr.ctx.ext.hwval_flags & crate::abi_ext::HWVAL_FLAG_TEST_SEC_PROBE) != 0 {
+        crate::sup_audit::run_asc8_m2_security_probe(&hw_state);
+    }
     let (vault_handle, vault_ep, vault_sup_cap) =
         match spawn_vault_service(boot, vfs_ep, disp_sup_cap) {
             Ok(v) => v,

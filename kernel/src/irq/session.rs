@@ -125,6 +125,7 @@ const HWVAL_FLAG_TEST_NV_VM_CRASH: u32 = 1 << 11;
 const HWVAL_FLAG_TEST_NV_TIMEOUT: u32 = 1 << 12;
 const HWVAL_FLAG_TEST_NV_CORRUPT_IPC: u32 = 1 << 13;
 const HWVAL_FLAG_TEST_NV_UNAUTH_CAP: u32 = 1 << 14;
+const HWVAL_FLAG_TEST_SEC_PROBE: u32 = 1 << 15;
 
 const IOMMU_AUDIT_DMAR_PRESENT: u32 = 1 << 0;
 const IOMMU_AUDIT_HW_ENFORCING: u32 = 1 << 1;
@@ -511,6 +512,7 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
             if cmdline.contains("dry_test_nv_timeout=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_TIMEOUT; }
             if cmdline.contains("dry_test_nv_corrupt_ipc=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_CORRUPT_IPC; }
             if cmdline.contains("dry_test_nv_unauth_cap=1") { hwval_flags |= HWVAL_FLAG_TEST_NV_UNAUTH_CAP; }
+            if cmdline.contains("dry_test_sec_probe=1") { hwval_flags |= HWVAL_FLAG_TEST_SEC_PROBE; }
 
             let acpi_sum = crate::acpi::acpi_madt_summary();
             let iommu_caps = crate::iommu::caps();
