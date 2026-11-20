@@ -398,7 +398,7 @@ pub fn stage_and_commit_file(usb_sup_cap: u64, data: &[u8], rel_path: &[u8], exp
     Ok(())
 }
 
-fn read_usb_file(usb_sup_cap: u64, rel_path: &[u8], out: &mut [u8]) -> usize {
+pub fn read_usb_file(usb_sup_cap: u64, rel_path: &[u8], out: &mut [u8]) -> usize {
     let mut rx = [0u8; MAX_IPC_EXTRA_BYTES];
     let mut off = 0usize;
     while let Ok((tag, clen, mrs)) =

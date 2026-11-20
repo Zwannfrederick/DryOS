@@ -91,6 +91,7 @@ USERSPACE_MODS = (
     ("dry-nvme", "dry-nvme.elf"),
     ("dry-lx-net", "dry-lx-net.elf"),
     ("dry-sdk-demo", "dry-sdk-demo.elf"),
+    ("dry-nv-island", "dry-nv-island.elf"),
 )
 
 

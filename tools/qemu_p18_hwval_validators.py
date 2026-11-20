@@ -491,9 +491,11 @@ def run_p18_hwval_suite(
     n_neg = _run_p18c_negative_fault_matrix(build_dir, ovmf_code, ovmf_vars)
     res_d = _run_p18d_security_hardening(build_dir, ovmf_code, ovmf_vars)
     res_e = _run_p18e_driver_sdk_lifecycle(build_dir, ovmf_code, ovmf_vars)
+    from qemu_p18_nvidia_validators import run_p18_nvidia_suite
+    n_nv, res_nv = run_p18_nvidia_suite(build_dir, ovmf_code, ovmf_vars)
     persisted.unlink(missing_ok=True)
     out = root / "tools" / "compat_bench" / "results_p18_hwval.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     import json
-    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg, "p18d": res_d, "p18e": res_e}, indent=2) + "\n", encoding="utf-8")
-    return 4 + n_neg
+    out.write_text(json.dumps({"p18a": res_a, "p18b": res_b, "p18c_cases": n_neg, "p18d": res_d, "p18e": res_e, "p18_nv": res_nv}, indent=2) + "\n", encoding="utf-8")
+    return 4 + n_neg + n_nv

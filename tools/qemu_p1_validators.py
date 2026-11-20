@@ -20,6 +20,7 @@ EXIT_CODE_SUCCESS = (0x10 << 1) | 1  # 33
 
 CHAR_TO_QCODE: dict[str, list[str]] = {
     **{chr(c): [chr(c)] for c in range(ord("a"), ord("z") + 1)},
+    **{chr(c): ["shift", chr(c).lower()] for c in range(ord("A"), ord("Z") + 1)},
     **{chr(c): [chr(c)] for c in range(ord("0"), ord("9") + 1)},
     " ": ["spc"],
     "-": ["minus"],

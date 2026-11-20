@@ -101,6 +101,10 @@ path = "src/bin/dry_usb.rs"
 name = "dry-nvme"
 path = "src/bin/dry_nvme.rs"
 
+[[bin]]
+name = "dry-nv-island"
+path = "src/bin/dry_nv_island.rs"
+
 [profile.dev]
 panic = "abort"
 

@@ -457,6 +457,13 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                     debug_line,
                 ) {
                     // Handled by shared `hwdiag` diagnostic command dispatcher.
+                } else if dry_userspace::shell_gpu_cmds::try_exec_gpu_cmd(
+                    cmd_slice,
+                    sup_ep_cap,
+                    engine,
+                    debug_line,
+                ) {
+                    // Handled by Mandatory NVIDIA / GPU CLI bridge.
                 } else {
                 match parse_command(cmd_slice) {
                     ShellCommand::Empty => {}

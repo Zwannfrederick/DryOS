@@ -25,6 +25,9 @@ use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_aud
 pub use crate::sup_ctx::AppState;
 use crate::sup_ctx::SupervisorCtx;
 use crate::sup_hw_services::{handle_hw_query_ipc, init_hw_services_and_persist, HwInitCaps};
+use crate::sup_nv_island::{
+    handle_nv_supervisor_ipc, init_nvidia_island_service, teardown_nvidia_island_service,
+};
 use crate::sup_services::{
     apply_input_prefs, spawn_and_bind_p3_display, spawn_and_bind_power_service,
     spawn_and_seed_vfs, spawn_blk_service, spawn_vault_service, sync_live_layout_pref,
@@ -145,6 +148,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     if (diag_mgr.ctx.ext.hwval_flags & crate::abi_ext::HWVAL_FLAG_TEST_SEC_PROBE) != 0 {
         crate::sup_audit::run_asc8_m2_security_probe(&hw_state);
     }
+    init_nvidia_island_service(diag_mgr, sys.tsc_mhz);
     let (vault_handle, vault_ep, vault_sup_cap) =
         match spawn_vault_service(boot, vfs_ep, disp_sup_cap) {
             Ok(v) => v,
@@ -720,6 +724,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     || ext.sender_badge == BADGE_SUPERVISOR;
                 if !diag_mgr.handle_ipc(sup_ep, reply_tok, op, mrs, auth, diag_scratch)
                     && !handle_hw_query_ipc(sup_ep, reply_tok, op, mrs, auth, &hw_state)
+                    && !handle_nv_supervisor_ipc(sup_ep, reply_tok, op, mrs, auth, diag_mgr)
                     && reply_tok != 0
                 {
                     let _ = sys_ipc_reply_inline(
@@ -764,6 +769,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
     if let Some(live) = gpu_live.take() {
         teardown_live_gpu(live, disp_sup_cap);
     }
+    teardown_nvidia_island_service();
 
     if let Err(code) = teardown_p3_core_services_with_hw(
         ctx.input_sup_cap,

@@ -264,11 +264,22 @@ impl UsbLogServerState {
                 let mut chunk_len = 0usize;
                 let mut out_chunk = [0u8; MAX_IPC_EXTRA_BYTES];
                 let mut parts = extra_rx.split(|&b| b == b'/');
-                if let (Some(sess), Some(fname), None) = (parts.next(), parts.next(), parts.next()) {
+                if let (Some(sess), Some(second), third, None) = (parts.next(), parts.next(), parts.next(), parts.next()) {
                     let mut dev = MscLogDev { hc, msc };
                     if let Ok(Some((hw_c, _, _))) = self.fat_logs.find_entry(&mut dev, self.fat_logs.root_clus, b"hardware-tests") {
                         if let Ok(Some((sc, _, _))) = self.fat_logs.find_entry(&mut dev, hw_c, sess) {
-                            if let Ok(Some((fc, fsz, _))) = self.fat_logs.find_entry(&mut dev, sc, fname) {
+                            let target = match third {
+                                Some(f3) if !f3.is_empty() => {
+                                    if let Ok(Some((sub_c, _, _))) = self.fat_logs.find_entry(&mut dev, sc, second) {
+                                        self.fat_logs.find_entry(&mut dev, sub_c, f3)
+                                    } else {
+                                        Ok(None)
+                                    }
+                                }
+                                None if !second.is_empty() => self.fat_logs.find_entry(&mut dev, sc, second),
+                                _ => Ok(None),
+                            };
+                            if let Ok(Some((fc, fsz, _))) = target {
                                 if let Ok(n) = self.fat_logs.read_file_bytes(&mut dev, fc, fsz, stage_buf) {
                                     total_sz = n;
                                     if offset < n {

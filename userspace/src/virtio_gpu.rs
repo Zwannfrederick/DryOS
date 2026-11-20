@@ -380,6 +380,18 @@ impl VirtioGpu2d {
             mmio_w64_split(common + 0x28, vq_pa + VQ_AVAIL_OFF);
             mmio_w64_split(common + 0x30, vq_pa + VQ_USED_OFF);
             let q_notify_off = mmio_r16(common + 0x1e) as u64;
+            let bar_bytes = (info.mapped_pages as u64).saturating_mul(4096);
+            let Some(notify_total) = q_notify_off
+                .checked_mul(info.notify_mult as u64)
+                .and_then(|v| v.checked_add(info.notify_off as u64))
+            else {
+                cleanup_init_dma();
+                return Err(195);
+            };
+            if notify_total.checked_add(2).is_none_or(|end| end > bar_bytes) {
+                cleanup_init_dma();
+                return Err(195);
+            }
 
             let mut irq_notif = 0u64;
             let mut msix_vec = 0u8;
@@ -412,9 +424,7 @@ impl VirtioGpu2d {
 
             let mut dev = Self {
                 common_base: common,
-                notify_q0_addr: GPU_BAR_VADDR
-                    + info.notify_off as u64
-                    + q_notify_off * info.notify_mult as u64,
+                notify_q0_addr: GPU_BAR_VADDR + notify_total,
                 isr_addr: GPU_BAR_VADDR + info.isr_off as u64,
                 device_base: if info.device_off != 0 {
                     GPU_BAR_VADDR + info.device_off as u64
@@ -554,7 +564,9 @@ impl VirtioGpu2d {
     }
 
     pub(crate) unsafe fn submit_raw_cmd(&mut self, req_bytes: &[u8], resp_len: u32) -> Result<u32, i32> {
-        if req_bytes.len() > CMD_RESP_OFF as usize {
+        if req_bytes.len() > CMD_RESP_OFF as usize
+            || (resp_len as usize) > (4096 - CMD_RESP_OFF as usize)
+        {
             return Err(197);
         }
         // SAFETY: Caller ensures valid command bytes fitting in `[+0x000..+0x400)` of `GPU_CMD_VADDR`.
@@ -622,8 +634,10 @@ impl VirtioGpu2d {
                 if disp.pmodes[0].enabled != 0
                     && disp.pmodes[0].r.width >= 320
                     && disp.pmodes[0].r.height >= 240
-                    && (disp.pmodes[0].r.width as usize) * (disp.pmodes[0].r.height as usize) * 4
-                        <= TWO_MIB * MAX_GPU_SCANOUT_2M
+                    && (disp.pmodes[0].r.width as usize)
+                        .checked_mul(disp.pmodes[0].r.height as usize)
+                        .and_then(|px| px.checked_mul(4))
+                        .is_some_and(|bytes| bytes <= TWO_MIB * MAX_GPU_SCANOUT_2M)
                 {
                     self.width = disp.pmodes[0].r.width;
                     self.height = disp.pmodes[0].r.height;

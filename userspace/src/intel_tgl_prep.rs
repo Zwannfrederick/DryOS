@@ -19,6 +19,7 @@ pub const INTEL_VENDOR_ID: u16 = 0x8086;
 pub const INTEL_TGL_IRIS_XE_DEV_ID: u16 = 0x9a49;
 pub const TGL_BAR0_MIN_BYTES: u64 = 16 * 1024 * 1024;
 pub const TGL_BAR2_MIN_BYTES: u64 = 256 * 1024 * 1024;
+pub const ALLOW_PHYSICAL_GPU_WRITES: bool = false;
 
 pub const GEN12_GGTT_BASE_OFF: u32 = 0x0080_0000;
 pub const GEN12_GGTT_SIZE_BYTES: u32 = 8 * 1024 * 1024;
@@ -298,7 +299,8 @@ pub fn verify_intel_tgl_prep_invariants() -> Option<IntelPrepSummary> {
 
     let irq_c = tgl_default_irq_contract();
     let svc_c = tgl_gpu_svc_contract();
-    if irq_c.irq_bind_flags != IRQF_ONESHOT
+    if ALLOW_PHYSICAL_GPU_WRITES
+        || irq_c.irq_bind_flags != IRQF_ONESHOT
         || !irq_c.msi_required
         || svc_c.target_w != 1920
         || svc_c.refresh_hz != 165
