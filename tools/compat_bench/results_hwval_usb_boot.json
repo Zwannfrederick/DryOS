@@ -1,8 +1,8 @@
 {
-  "image_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/kernel/build/dryos-ascension8-hardware-validation.img",
-  "image_sha256": "49cd42afe57e5dfd650d85bb9a874219e22cb0b69ffeb093644d37f92d4949ac",
+  "image_path": "kernel/build/dryos-ascension8-hardware-validation.img",
+  "image_sha256": "c267a74e7c0620f15018651134dfe2ae82518cc7d866515488b2fce1056e0a8f",
   "image_size_mib": 256,
-  "module_count": 27,
+  "module_count": 29,
   "part1_range": [
     2048,
     198655
@@ -23,5 +23,5 @@
   "leaked_frames": 0,
   "retrieved_session": "sess-0001",
   "files_verified": 13,
-  "boot_to_shutdown_sec": 6.011
+  "boot_to_shutdown_sec": 7.316
 }

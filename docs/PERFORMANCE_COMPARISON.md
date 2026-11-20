@@ -56,3 +56,35 @@ All tiers were measured back-to-back on the **same Linux host**, **same `1920x10
    - **Native DRY Ring-3 IPC (`dry-display` <-> `dry-gpu`):** Uses capability-mapped shared 2 MiB frames (`back_caps` `USER_RO`), eliminating duplicate userland staging inside native DRY services.
    - **Host-Process POSIX SHM Zero-Copy (`T5`):** Demonstrates `64 B` lock-free slot descriptor handoff (`0.24 us` p50, `34.56 MiB` RSS) between two host processes mapping the same `MAP_SHARED` pool (`VERIFIED` in host prototype).
    - **Cross-VM Guest `DMA-BUF` / Physical GPU Page-Flip:** **Remains `PROTOTYPE` / `UNSUPPORTED`** until a guest MicroVM shares KVM `ivshmem`/`vhost-user-gpu` `memfd` backing directly into DRY OS's display compositor without an intermediate host `memcpy`.
+
+---
+
+## 4. Project Ascension 8.0 System & Hardware-Validation Benchmarks (`VERIFIED_QEMU`)
+
+> [!IMPORTANT]
+> **Measurement Scope Boundary (`hardware_verified = false`):** All timings and counts in this section were measured on **QEMU/KVM + OVMF** (and Mesa software `llvmpipe` for `p17d` Virgl). Physical bare-metal benchmarks on the target **Lenovo IdeaPad Gaming 3 15IHU6 (`82K1`)** remain **`IMPLEMENTED_UNTESTED`** until executed manually by the operator.
+
+### 4.1 HWVAL Live USB Persistence, Driver Island SDK & NVIDIA Level-1 Gate Timings
+
+| Workload / Suite (`ascension-8.0`) | Observed Duration | Key Measured Throughput / Invariants | Source |
+| :--- | :---: | :--- | :--- |
+| **HWVAL 256 MiB Live USB `--verify-boot`** | **`7.316 s`** | xHCI + VT-d boot, passive check (`pass=20 fail=0 skip=2 blocked=2`), 13-file FAT32+LFN write + read-back SHA-256 + `fsck.fat -n`, `esp_and_persist_untouched=true`, `leaked_frames=0` | [results_hwval_usb_boot.json](../tools/compat_bench/results_hwval_usb_boot.json) |
+| **`p18a` Safe Auto Diagnostics & Canaries** | **`12.84 s`** | `15` `dry` CLI commands, `2` persisted sessions (`sess-0001..0002`, `13` files each), `2` canary disks (`NVMe` & `VirtIO-Blk`) byte-identical | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18b` Recovery Mode & Multi-Session** | **`12.79 s`** | `RECOVERY` RO inspection (`DRYOS_LOGS` SHA-256 unchanged) + `sess-0003` clean append | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18c` Negative Persistence/HW Fault Matrix (`9/9`)** | **`61.33 s`** | Missing P3, write-fail, wrong GPT GUID, corrupt BPB, full FAT32, USB disconnect, bad ACPI, bad PCI BAR, no-IOMMU fail-closed (`9/9 PASS`) | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18d` M2 IPC/Capability Security Probe** | **`10.02 s`** | Post-hardening IPC donation/quiesce/DMA checks, `leaked_frames=0`, NVMe untouched | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18e` Driver Island ABI v1 SDK Lifecycle** | **`7.41 s`** | `dry-sdk-demo.elf` (`#28/32`): `ISLAND_ABI_VERSION_V1 = 0x0001_0000` handshake, mismatch reject, `#UD` `crash_rec_gen=2`, `QUIESCE_UNLOAD` | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18f` NVIDIA Level-1 (`nvidia_exp`) E2E** | **`10.18 s`** | `7` GPU/NVIDIA CLI commands, `14` prereqs (`met=4`, honest `BLOCKED` / `N/A`), `7+1` `nvidia_exp/` FAT32 files + `fsck.fat -n` clean | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`p18nv` Safe Gate + `p18g` (`6/6`) NVIDIA Faults** | **`60.87 s`** | `dry-nv-island.elf` unspawned in safe mode + `6/6` fault tests (`nv1_no_gpu .. nv6_unauth_cap`) | [results_p18_hwval.json](../tools/compat_bench/results_p18_hwval.json) |
+| **`dry-driver-sdk` Host Unit Suite (`5/5`)** | **`< 0.01 s`** | `abi_hello`, `lifecycle_transitions`, `mmio_window_bounds`, `dma_region_bounds`, `ring_validation` (`5/5 PASS`) | `cargo test` |
+
+### 4.2 Core Microkernel, SMP Scalability & Island Regressions (Ascension 8.0 Final Validation)
+
+| Gate / Benchmark | Result | Measured Numbers | Target / Limit |
+| :--- | :---: | :--- | :---: |
+| **Syscall Hot-Path Stack Frame (`dry-kernel`)** | **PASS** | `rust_syscall_dispatch`: `sub $0xf8,%rsp` = **`248 B`** | `<= 256 B` |
+| **Driver Island `2C-0` IPC & Recovery (`results_poc_2c0_island.json`)** | **PASS** | Direct leased EP `d_p50 = 5,769 cyc` vs Broker `b_p50 = 11,354 cyc` (`1.97x`), `b32_p50 = 843 cyc/op`, `#UD` recovery `p50 = 1,416 us`, `pmm_leak = 0` | `leaked_frames = 0` |
+| **HW Foundations `2C-2` (`p8_hw_foundations_latest.json`)** | **PASS** | `6.324 s`, `msi_bound_p50 = 70,857 cyc` (`22.75 us`), `wc_64k_cyc = 48,167`, `uc_64k_cyc = 16,664`, `vtd_rogue_faults = 1`, `kernel_pci_quiesces = 5`, `leaked_frames = 0` | `leaked_frames = 0` |
+| **SMP / RAM Scaling Matrix (`--p3-matrix`)** | **`5 / 5 PASS`** | `1cpu/256M` **`5.09 s`** (`hlt=567`) · `2cpu/256M` **`4.17 s`** (`hlt=1,249`) · `4cpu/512M` **`5.17 s`** (`hlt=2,578`) · `8cpu/1G` **`5.26 s`** (`hlt=5,260`) · `20cpu/2G` **`6.63 s`** (`hlt=13,447`), all `leaked_frames = 0` | Linear scaling, `0` leaks |
+| **Reliability & Virgl 3D Suite (`--p17-only`)** | **`4 / 4 PASS`** | `p17a` **`5.212 s`** (`gen=1->2->3`, `quiesce=4`) · `p17b` **`5.043 s`** (`persist=0`) · `p17c` **`4.358 s`** (`smp=4`, `vtd_faults=2`, `quiesces=5`) · `p17d` **`15.521 s`** (`Virgl` `llvmpipe`, `px=0xffff0000`, `neg_err=0x1205`) | `leaked_frames = 0` |
+| **Full Unified QEMU Regression** | **`164 / 164 PASS`** | `58` Legacy + `9` P1 + `14` P2 + `6` P3 + `3` P4 + `2` 2C-0 + `1` 2C-1 + `1` GPU + `1` 2C-2 + `9` Glass/2.0/2.1 + `1` LxDRM + `25` USB/NVMe + `1` LxNet + `4` Brand + `4` Ascension 6.0 + `4` Ascension 7.0 + `21` Ascension 8.0 | Zero failures, `29/32` slots |

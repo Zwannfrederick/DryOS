@@ -12,7 +12,7 @@
     "host_kernels_listed": 3,
     "host_kernels_readable": 3,
     "host_mem_total_mib": 31868,
-    "host_mem_available_mib": 21787,
+    "host_mem_available_mib": 27897,
     "estimated_microvm_ram_mib": 128,
     "estimated_cold_boot_ms_range": "250-900 (with minimal initramfs; host full kernel often requires dedicated microvm image)",
     "physical_igpu_passthrough_assumed": false,
@@ -21,39 +21,39 @@
   "benchmarks": {
     "dirty_tile_256x256_xrgb": {
       "payload_bytes": 262144,
-      "iterations": 40,
+      "iterations": 60,
       "crc_and_ack_ok": true,
       "ack_failures": 0,
-      "min_us": 207.85,
-      "p50_us": 225.84,
-      "p95_us": 286.69,
-      "p99_us": 288.01,
-      "mean_us": 238.45,
-      "throughput_mib_s": 1048.42
+      "min_us": 208.63,
+      "p50_us": 249.86,
+      "p95_us": 365.43,
+      "p99_us": 396.56,
+      "mean_us": 273.07,
+      "throughput_mib_s": 915.5
     },
     "frame_720p_xrgb": {
       "payload_bytes": 3686400,
-      "iterations": 40,
+      "iterations": 60,
       "crc_and_ack_ok": true,
       "ack_failures": 0,
-      "min_us": 3520.18,
-      "p50_us": 3728.75,
-      "p95_us": 4048.56,
-      "p99_us": 4134.03,
-      "mean_us": 3753.21,
-      "throughput_mib_s": 936.7
+      "min_us": 3450.66,
+      "p50_us": 3674.3,
+      "p95_us": 4204.22,
+      "p99_us": 5052.4,
+      "mean_us": 3778.46,
+      "throughput_mib_s": 930.44
     },
     "frame_1080p_xrgb": {
       "payload_bytes": 8294400,
-      "iterations": 40,
+      "iterations": 60,
       "crc_and_ack_ok": true,
       "ack_failures": 0,
-      "min_us": 7951.83,
-      "p50_us": 8250.75,
-      "p95_us": 8691.71,
-      "p99_us": 8788.09,
-      "mean_us": 8315.79,
-      "throughput_mib_s": 951.22
+      "min_us": 7893.49,
+      "p50_us": 8220.23,
+      "p95_us": 9392.88,
+      "p99_us": 9713.63,
+      "mean_us": 8352.91,
+      "throughput_mib_s": 946.99
     }
   }
 }

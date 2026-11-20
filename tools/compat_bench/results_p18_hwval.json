@@ -2,7 +2,7 @@
   "p18a": {
     "meta": {
       "image_path": "/home/zwannfrederick/Masa\u00fcst\u00fc/Sektor/Coding/dryos/kernel/build/p18a_hwval.img",
-      "image_sha256": "8cd7384ccd37c6411173afa11910b4674fda69caeabce4d41aea27f6169d0e26",
+      "image_sha256": "dcf4d0350b18363f55af56db3eefdcf351006a83a657db4459251b4c75949a67",
       "image_size_mib": 256,
       "module_count": 29,
       "part1_range": [
@@ -24,7 +24,7 @@
       "sess-0001",
       "sess-0002"
     ],
-    "elapsed_s": 12.64
+    "elapsed_s": 12.84
   },
   "p18b": {
     "sessions": [
@@ -32,22 +32,22 @@
       "sess-0002",
       "sess-0003"
     ],
-    "elapsed_s": 12.77
+    "elapsed_s": 12.79
   },
   "p18c_cases": 9,
   "p18d": {
-    "elapsed_s": 6.32
+    "elapsed_s": 10.02
   },
   "p18e": {
-    "elapsed_s": 6.54
+    "elapsed_s": 7.41
   },
   "p18_nv": {
     "p18nv_e2e": {
       "session_id": "sess-0001",
       "met": 4,
-      "elapsed_s": 9.91
+      "elapsed_s": 10.18
     },
     "p18nv_neg_cases": 6,
-    "elapsed_s": 61.22
+    "elapsed_s": 60.87
   }
 }
