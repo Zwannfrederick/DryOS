@@ -12,7 +12,7 @@
 
 use core::cell::UnsafeCell;
 
-use dry_userspace::action::{AppId, DesktopAction, APP_COUNT};
+use dry_userspace::action::{DesktopAction, APP_COUNT};
 use dry_userspace::apps::shell_ui::{
     render_shell_pixel, viewport_rows, ShellBackend, SHELL_PIXEL_VADDR, SHELL_WIN_H, SHELL_WIN_W,
 };
@@ -23,7 +23,7 @@ use dry_userspace::keymap::{
     KEY_PAGEUP, KEY_RIGHT, KEY_UP,
 };
 use dry_userspace::shell::{parse_command, LineBuilder, ShellCommand, ShellEngine, MAX_INPUT_LEN};
-use dry_userspace::shell_ext::{exec_storage_vault_command, run_live_p3_sec_probes};
+use dry_userspace::shell_fs_cmds::{call_sup_action, debug_line, try_exec_ext_cmd};
 use dry_userspace::surface::{
     SharedWindowSurface, STYLE_DEFAULT, STYLE_MUTED, STYLE_OK, STYLE_WARN, TERM_COLS, TERM_ROWS,
 };
@@ -32,12 +32,11 @@ use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_frame_alloc,
     sys_ipc_call_inline, sys_ipc_call_with_grant, sys_ipc_send_inline, sys_power_query,
     sys_proc_list, sys_sysinfo, sys_vspace_map, sys_write_debug, UserPowerInfo, UserProcInfo,
-    UserSysInfo, EBADCAP, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
-    IPC_OP_INPUT_EVENT, IPC_OP_INPUT_OVERFLOW_TEST, IPC_OP_INPUT_WAIT, IPC_OP_PONG,
-    IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO, IPC_OP_SUP_QUERY_APPS,
-    IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE,
-    IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE, IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT,
-    IPC_OP_WM_TOGGLE_TILING, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW,
+    UserSysInfo, EBADCAP, EPIPE, EREVOKED, IPC_OP_CRASH_UD2, IPC_OP_INPUT_EVENT,
+    IPC_OP_INPUT_WAIT, IPC_OP_PONG, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_HELLO,
+    IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN,
+    IPC_OP_SURFACE_ATTACH, IPC_OP_SURFACE_MOVE, IPC_OP_SURFACE_PRESENT, IPC_OP_WIN_CLOSE,
+    IPC_OP_WIN_CLOSED, IPC_OP_WIN_WAIT_EVENT, RIGHT_MAP, RIGHT_READ, VSPACE_MAP_OP_4K_RW,
     VSPACE_MAP_OP_UNMAP_2M, VSPACE_MAP_OP_UNMAP_4K,
 };
 
@@ -52,15 +51,6 @@ struct SingleThreadCell(UnsafeCell<ShellEngine>);
 unsafe impl Sync for SingleThreadCell {}
 
 static ENGINE: SingleThreadCell = SingleThreadCell(UnsafeCell::new(ShellEngine::new()));
-
-fn debug_line(lb: &LineBuilder) {
-    let mut out = [0u8; 160];
-    let s = lb.as_bytes();
-    let n = s.len().min(out.len() - 1);
-    out[..n].copy_from_slice(&s[..n]);
-    out[n] = b'\n';
-    let _ = sys_write_debug(&out[..=n]);
-}
 
 fn move_floating_window(disp_ep_cap: u64, win_id: u32, dx: i64, dy: i64) {
     if disp_ep_cap == 0 {
@@ -80,23 +70,6 @@ fn move_floating_window(disp_ep_cap: u64, win_id: u32, dx: i64, dy: i64) {
         lb.push_bytes(b" blit_cyc=");
         lb.push_u64(mrs[2]);
         debug_line(&lb);
-    }
-}
-
-fn call_sup_action(sup_ep_cap: u64, act: DesktopAction) -> Result<[u64; 4], u32> {
-    let words = act.to_words();
-    let (rtag, _, rmrs) = sys_ipc_call_inline(
-        sup_ep_cap,
-        pack_msg_tag(IPC_OP_SUP_ACTION, 0, 2, 0),
-        [words[0], words[1], 0, 0],
-        0,
-    )
-    .map_err(|_| IPC_OP_ERR_INVAL)?;
-    let lbl = msg_tag_label(rtag);
-    if lbl == IPC_OP_PONG {
-        Ok(rmrs)
-    } else {
-        Err(lbl)
     }
 }
 
@@ -572,171 +545,6 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                             }
                         }
                     }
-                    ShellCommand::OpenApp(arg) => match AppId::from_name(arg) {
-                        Some(app) => match call_sup_action(sup_ep_cap, DesktopAction::LaunchOrFocusApp(app)) {
-                            Ok(rmrs) => {
-                                let mut lb = LineBuilder::new();
-                                lb.push_bytes(if rmrs[1] != 0 {
-                                    b"Launched app '"
-                                } else {
-                                    b"Focused running app '"
-                                });
-                                lb.push_bytes(app.slug());
-                                lb.push_bytes(b"' (pid=");
-                                lb.push_u64(rmrs[0]);
-                                lb.push_byte(b')');
-                                engine.push_line(lb.as_bytes(), STYLE_OK);
-
-                                let mut slb = LineBuilder::new();
-                                slb.push_bytes(b"[DRY-SHELL] CMD=open app=");
-                                slb.push_bytes(app.slug());
-                                slb.push_bytes(b" pid=");
-                                slb.push_u64(rmrs[0]);
-                                slb.push_bytes(b" spawned=");
-                                slb.push_u64(rmrs[1]);
-                                debug_line(&slb);
-                            }
-                            Err(IPC_OP_ERR_NOSYS) => {
-                                engine.push_line(
-                                    b"App module not loaded in current boot image (-ENOSYS).",
-                                    STYLE_WARN,
-                                );
-                            }
-                            Err(_) => {
-                                engine.push_line(b"Failed to launch/focus app.", STYLE_WARN);
-                            }
-                        },
-                        None => engine.push_line(
-                            b"Usage: open <terminal|lifestation|files|settings|editor|calc>",
-                            STYLE_WARN,
-                        ),
-                    },
-                    ShellCommand::CloseApp(arg) => match AppId::from_name(arg) {
-                        Some(app) => {
-                            if app == AppId::Terminal {
-                                wants_self_exit = true;
-                            } else {
-                                match call_sup_action(sup_ep_cap, DesktopAction::CloseApp(app)) {
-                                    Ok(rmrs) => {
-                                        let mut lb = LineBuilder::new();
-                                        lb.push_bytes(b"Closed app '");
-                                        lb.push_bytes(app.slug());
-                                        lb.push_bytes(b"' (reaped_pid=");
-                                        lb.push_u64(rmrs[0]);
-                                        lb.push_byte(b')');
-                                        engine.push_line(lb.as_bytes(), STYLE_OK);
-
-                                        let mut slb = LineBuilder::new();
-                                        slb.push_bytes(b"[DRY-SHELL] CMD=close app=");
-                                        slb.push_bytes(app.slug());
-                                        slb.push_bytes(b" pid=");
-                                        slb.push_u64(rmrs[0]);
-                                        debug_line(&slb);
-                                    }
-                                    Err(_) => {
-                                        engine.push_line(b"Failed to close app.", STYLE_WARN);
-                                    }
-                                }
-                            }
-                        }
-                        None => engine.push_line(
-                            b"Usage: close <terminal|lifestation|files|settings|editor|calc>",
-                            STYLE_WARN,
-                        ),
-                    },
-                    ShellCommand::RestartApp(arg) => match AppId::from_name(arg) {
-                        Some(app) => match call_sup_action(sup_ep_cap, DesktopAction::RestartApp(app)) {
-                            Ok(rmrs) => {
-                                let mut lb = LineBuilder::new();
-                                lb.push_bytes(b"Restarted app '");
-                                lb.push_bytes(app.slug());
-                                lb.push_bytes(b"' -> pid=");
-                                lb.push_u64(rmrs[0]);
-                                lb.push_bytes(b" launches=");
-                                lb.push_u64(rmrs[1]);
-                                engine.push_line(lb.as_bytes(), STYLE_OK);
-
-                                let mut slb = LineBuilder::new();
-                                slb.push_bytes(b"[DRY-SHELL] CMD=restart app=");
-                                slb.push_bytes(app.slug());
-                                slb.push_bytes(b" pid=");
-                                slb.push_u64(rmrs[0]);
-                                debug_line(&slb);
-                            }
-                            Err(_) => engine.push_line(b"Failed to restart app.", STYLE_WARN),
-                        },
-                        None => engine.push_line(
-                            b"Usage: restart <terminal|lifestation|files|settings|editor|calc>",
-                            STYLE_WARN,
-                        ),
-                    },
-                    ShellCommand::Tile => {
-                        if disp_ep_cap != 0 {
-                            if let Ok((_, _, rmrs)) = sys_ipc_call_inline(
-                                disp_ep_cap,
-                                pack_msg_tag(IPC_OP_WM_TOGGLE_TILING, 0, 1, 0),
-                                [0; 4],
-                                0,
-                            ) {
-                                engine.push_line(
-                                    if rmrs[0] != 0 {
-                                        b"Window layout -> TILED"
-                                    } else {
-                                        b"Window layout -> FLOATING"
-                                    },
-                                    STYLE_OK,
-                                );
-                                let mut slb = LineBuilder::new();
-                                slb.push_bytes(b"[DRY-SHELL] CMD=tile mode=");
-                                slb.push_u64(rmrs[0]);
-                                debug_line(&slb);
-                            }
-                        }
-                    }
-                    ShellCommand::Blank => {
-                        engine.push_line(b"Display blank requested (any input wakes).", STYLE_OK);
-                        post_present_action = Some(DesktopAction::BlankDisplayNow);
-                        let _ = sys_write_debug(b"[DRY-SHELL] CMD=blank ok=true\n");
-                    }
-                    ShellCommand::Lock => {
-                        engine.push_line(
-                            if session_mode >= 20 {
-                                b"DRY Vault authenticated session lock engaged (leases revoked)."
-                            } else {
-                                b"Session lock engaged (unauthenticated until DRY Vault auth)."
-                            },
-                            STYLE_OK,
-                        );
-                        post_present_action = Some(DesktopAction::LockSession);
-                        let _ = sys_write_debug(b"[DRY-SHELL] CMD=lock ok=true\n");
-                    }
-                    ShellCommand::Reboot => {
-                        engine.push_line(b"Requesting controlled system reboot...", STYLE_WARN);
-                        let _ = sys_write_debug(b"[DRY-SHELL] CMD=reboot ok=true\n");
-                        let _ = call_sup_action(sup_ep_cap, DesktopAction::RequestReboot);
-                        break;
-                    }
-                    ShellCommand::Poweroff => {
-                        engine.push_line(
-                            b"Requesting controlled ACPI S5 hardware poweroff...",
-                            STYLE_WARN,
-                        );
-                        let _ = sys_write_debug(b"[DRY-SHELL] CMD=poweroff ok=true\n");
-                        let _ = call_sup_action(sup_ep_cap, DesktopAction::RequestPoweroffHw);
-                        break;
-                    }
-                    ShellCommand::Suspend => {
-                        match call_sup_action(sup_ep_cap, DesktopAction::RequestSuspendS3) {
-                            Err(IPC_OP_ERR_NOSYS) => {
-                                engine.push_line(
-                                    b"Suspend-to-RAM (S3) unsupported: -ENOSYS (UEFI wake vector planned).",
-                                    STYLE_WARN,
-                                );
-                                let _ = sys_write_debug(b"[DRY-SHELL] CMD=suspend res=ENOSYS\n");
-                            }
-                            _ => engine.push_line(b"Suspend requested.", STYLE_OK),
-                        }
-                    }
                     ShellCommand::Echo(text) => {
                         engine.push_line(text, STYLE_DEFAULT);
                         let mut lb = LineBuilder::new();
@@ -744,81 +552,6 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         lb.push_bytes(text);
                         lb.push_bytes(b"\"");
                         debug_line(&lb);
-                    }
-                    ShellCommand::OverflowTest => {
-                        if let Ok((_, _, omrs)) = sys_ipc_call_inline(
-                            input_ep_cap,
-                            pack_msg_tag(IPC_OP_INPUT_OVERFLOW_TEST, 0, 1, 0),
-                            [0; 4],
-                            0,
-                        ) {
-                            let mut lb = LineBuilder::new();
-                            lb.push_bytes(b"Input queue guard: retained=");
-                            lb.push_u64(omrs[0]);
-                            lb.push_bytes(b" dropped=");
-                            lb.push_u64(omrs[1]);
-                            lb.push_bytes(b" total_ovf=");
-                            lb.push_u64(omrs[2]);
-                            engine.push_line(lb.as_bytes(), STYLE_OK);
-
-                            let mut slb = LineBuilder::new();
-                            slb.push_bytes(b"[DRY-SHELL] CMD=overflow-test retained=");
-                            slb.push_u64(omrs[0]);
-                            slb.push_bytes(b" dropped=");
-                            slb.push_u64(omrs[1]);
-                            debug_line(&slb);
-                        }
-                    }
-                    ShellCommand::CrashInput => {
-                        engine.push_line(
-                            b"Injecting #UD fault into dry-input service...",
-                            STYLE_WARN,
-                        );
-                        trigger_crash_after_present = true;
-                    }
-                    ShellCommand::SecAudit => {
-                        run_live_p3_sec_probes(sup_ep_cap, engine);
-                    }
-                    ShellCommand::GpuFault => {
-                        match call_sup_action(sup_ep_cap, DesktopAction::TriggerGpuFaultTest) {
-                            Ok(rmrs) => {
-                                let mut lb = LineBuilder::new();
-                                lb.push_bytes(b"GPU fault & recovery OK: gen=");
-                                lb.push_u64(rmrs[0]);
-                                lb.push_bytes(b" vec=");
-                                lb.push_u64(rmrs[1]);
-                                lb.push_byte(b' ');
-                                lb.push_u64(rmrs[2]);
-                                lb.push_byte(b'x');
-                                lb.push_u64(rmrs[3]);
-                                engine.push_line(lb.as_bytes(), STYLE_OK);
-
-                                let mut slb = LineBuilder::new();
-                                slb.push_bytes(b"[DRY-SHELL] CMD=gpufault gen=");
-                                slb.push_u64(rmrs[0]);
-                                slb.push_bytes(b" vec=");
-                                slb.push_u64(rmrs[1]);
-                                debug_line(&slb);
-                            }
-                            Err(_) => {
-                                engine.push_line(
-                                    b"GPU driver island unavailable or recovery failed.",
-                                    STYLE_WARN,
-                                );
-                            }
-                        }
-                    }
-                    ShellCommand::StorageVault(verb, rest) => {
-                        if let Some(act) = exec_storage_vault_command(
-                            verb,
-                            rest,
-                            sup_ep_cap,
-                            &mut cached_vfs_cap,
-                            &mut cached_vault_cap,
-                            engine,
-                        ) {
-                            post_present_action = Some(act);
-                        }
                     }
                     ShellCommand::Shutdown => {
                         engine.push_line(b"Shutting down DRY OS session...", STYLE_OK);
@@ -839,6 +572,29 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                         lb.push_bytes(verb);
                         lb.push_bytes(b"\"");
                         debug_line(&lb);
+                    }
+                    other => {
+                        if let Some(out) = try_exec_ext_cmd(
+                            &other,
+                            sup_ep_cap,
+                            disp_ep_cap,
+                            input_ep_cap,
+                            session_mode,
+                            &mut cached_vfs_cap,
+                            &mut cached_vault_cap,
+                            engine,
+                        ) {
+                            post_present_action = out.post_present_action;
+                            if out.wants_self_exit {
+                                wants_self_exit = true;
+                            }
+                            if out.trigger_crash_after_present {
+                                trigger_crash_after_present = true;
+                            }
+                            if out.wants_break {
+                                break;
+                            }
+                        }
                     }
                 }
                 }

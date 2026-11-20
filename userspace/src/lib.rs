@@ -37,6 +37,7 @@ pub mod nvidia_island;
 pub mod shell;
 pub mod shell_diag_cmds;
 pub mod shell_ext;
+pub mod shell_fs_cmds;
 pub mod shell_gpu_cmds;
 pub mod shell_sys_cmds;
 pub mod sup_audit;
@@ -58,6 +59,7 @@ pub mod wm;
 pub mod wm_events;
 pub mod wm_ipc;
 pub mod wm_layout;
+pub mod wm_ops;
 pub mod wm_types;
 
 pub use abi_ext::*;

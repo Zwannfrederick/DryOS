@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import zlib
 
@@ -210,12 +211,13 @@ def capture_and_verify_gop_screendump(
 ) -> str:
     """Boot QEMU UEFI GOP (`-vga std`), wait for `[DRY-FB-READY]`, capture QMP `screendump`,
     convert `.ppm -> .png`, and verify non-blank Ring 3 pixel output."""
-    vars_copy = build_dir / "OVMF_VARS_screendump.4m.fd"
+    uid = f"{png_out.stem}_{os.getpid()}_{threading.get_ident()}"
+    vars_copy = build_dir / f"OVMF_VARS_screendump_{uid}.4m.fd"
     shutil.copyfile(ovmf_vars, vars_copy)
-    qmp_sock = pathlib.Path(f"/tmp/dryos_qmp_{os.getpid()}.sock")
+    qmp_sock = pathlib.Path(f"/tmp/dryos_qmp_{uid}.sock")
     if qmp_sock.exists():
         qmp_sock.unlink()
-    ppm_path = build_dir / "dry_os_first_screen.ppm"
+    ppm_path = build_dir / f"dry_os_{uid}.ppm"
     if ppm_path.exists():
         ppm_path.unlink()
 
@@ -307,6 +309,7 @@ def capture_and_verify_gop_screendump(
             proc.kill()
         if qmp_sock.exists():
             qmp_sock.unlink()
+        vars_copy.unlink(missing_ok=True)
 
     if not ppm_path.exists():
         raise RuntimeError(f"QMP screendump did not produce {ppm_path}")

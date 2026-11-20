@@ -10,20 +10,11 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 
-from qemu_log_validators import (
-    expected_sched_metrics,
-    verify_apic_and_irq_lines,
-    verify_cspace_and_tlb_debt_lines,
-    verify_pmm_and_untyped_lines,
-    verify_preempt_line,
-    verify_sched_line,
-    verify_vspace_lines,
-)
-from qemu_ipc_validators import capture_and_verify_gop_screendump, verify_ipc_and_display_lines
 from qemu_neg_validators import run_legacy_negative_matrix
-from qemu_p1_validators import run_p1_suite, verify_p1_irq_lines
+from qemu_p1_validators import run_p1_suite
 from qemu_p2_validators import run_p2_suite
 from qemu_p3_validators import run_p3_suite
 from qemu_p3c_validators import run_p3_hardware_matrix
@@ -42,7 +33,14 @@ from qemu_p15_brand_icons_validators import run_p15_brand_icons_suite
 from qemu_p16_ascension6_validators import run_p16_ascension6_suite
 from qemu_p17_ascension7_validators import run_p17_ascension7_suite
 from qemu_p18_hwval_validators import run_p18_hwval_suite
-from qemu_user_validators import verify_userspace_lines
+from qemu_p19_ascension9_validators import run_p19_ascension9_suite
+from qemu_parallel_runner import (
+    assert_boot_case,
+    assert_positive_smp_boot,
+    bind_esp_writer,
+    run_full_regression,
+    run_qemu,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL_DIR = ROOT / "kernel"
@@ -481,7 +479,7 @@ def write_mbr_esp_image(
     u_out_dir = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release"
     mods = USERSPACE_MODS
 
-    conf_path = BUILD_DIR / "limine.conf"
+    conf_path = BUILD_DIR / f"limine_{img_path.stem}_{os.getpid()}_{threading.get_ident()}.conf"
     mod_lines = "".join(f"    module_path: boot():/boot/{dst}\n" for _, dst in mods)
     conf_text = (
         "timeout: 0\n"
@@ -495,236 +493,23 @@ def write_mbr_esp_image(
         f"{mod_lines}"
     )
     conf_path.write_text(conf_text, encoding="utf-8")
-
-    subprocess.check_call(["mcopy", "-i", part_spec, str(LIMINE_EFI), "::/EFI/BOOT/BOOTX64.EFI"], env=mtools_env)
-    subprocess.check_call(["mcopy", "-i", part_spec, str(conf_path), "::/boot/limine/limine.conf"], env=mtools_env)
-    subprocess.check_call(["mcopy", "-i", part_spec, str(kernel_elf), "::/boot/dry-kernel"], env=mtools_env)
-    for src_name, dst_name in mods:
-        subprocess.check_call(
-            ["mcopy", "-i", part_spec, str(u_out_dir / src_name), f"::/boot/{dst_name}"],
-            env=mtools_env,
-        )
-
-
-def run_qemu(
-    name: str,
-    img_path: pathlib.Path,
-    smp: int,
-    timeout_sec: int = 25,
-    extra_args: list[str] | None = None,
-    mem: str = "512M",
-) -> tuple[int, str, float]:
-    vars_copy = BUILD_DIR / f"OVMF_VARS_{name}.4m.fd"
-    shutil.copyfile(OVMF_VARS, vars_copy)
-
-    accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
-    cpu_arg = "host" if accel == "kvm" else "qemu64"
-
-    cmd = [
-        "qemu-system-x86_64",
-        "-machine",
-        f"q35,accel={accel}",
-        "-cpu",
-        cpu_arg,
-        "-smp",
-        str(smp),
-        "-m",
-        mem,
-        "-drive",
-        f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
-        "-drive",
-        f"if=pflash,format=raw,file={vars_copy}",
-        "-drive",
-        f"format=raw,file={img_path}",
-        "-device",
-        "isa-debug-exit,iobase=0xf4,iosize=0x04",
-        "-serial",
-        "stdio",
-        "-display",
-        "none",
-        "-no-reboot",
-    ]
-    if extra_args:
-        cmd.extend(extra_args)
-    t0 = time.monotonic()
     try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            timeout=timeout_sec,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        out_str = (
-            exc.stdout.decode("utf-8", errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        print(
-            f"\n[QEMU-TIMEOUT] {name} (smp={smp}) timed out after {timeout_sec}s! Partial serial output:\n{out_str}",
-            file=sys.stderr,
-        )
-        raise
-    elapsed = time.monotonic() - t0
-    return proc.returncode, proc.stdout, elapsed
-
-
-def assert_boot_case(
-    name: str,
-    kernel_elf: pathlib.Path,
-    cmdline: str,
-    smp: int,
-    expected_rc: int,
-    must_contain: list[str],
-    must_not_contain: list[str],
-) -> None:
-    img_path = BUILD_DIR / f"esp_{name}.img"
-    write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out, elapsed = run_qemu(name, img_path, smp=smp)
-
-    print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {expected_rc}) elapsed={elapsed:.3f}s ---")
-    for line in serial_out.splitlines():
-        if "[DRY-" in line or "Hello from DRY OS!" in line or "Limine" in line or "PANIC" in line:
-            print(f"  {line}")
-
-    if rc != expected_rc:
-        print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-        raise RuntimeError(f"[{name}] Unexpected QEMU exit code {rc} != {expected_rc}")
-    for token in must_contain:
-        if token not in serial_out:
-            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-            raise RuntimeError(f"[{name}] Missing required serial marker: {token!r}")
-    for token in must_not_contain:
-        if token in serial_out:
-            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-            raise RuntimeError(f"[{name}] Forbidden serial marker found: {token!r}")
-    print(f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions verified in {elapsed:.3f}s).")
-
-
-def assert_positive_smp_boot(
-    name: str,
-    kernel_elf: pathlib.Path,
-    smp: int,
-    cmdline: str = "console=com1",
-    irq_only: bool = False,
-    expected_apic_mode: str | None = None,
-    expect_fb: bool = True,
-    extra_qemu_args: list[str] | None = None,
-    mem: str = "512M",
-) -> None:
-    expected_mask = hex((1 << smp) - 1)
-    expected_ops = smp * 4096
-    spawned, park_rounds, work_units = expected_sched_metrics(smp)
-    img_path = BUILD_DIR / f"esp_{name}.img"
-    write_mbr_esp_image(img_path, kernel_elf, cmdline)
-    rc, serial_out, elapsed = run_qemu(
-        name,
-        img_path,
-        smp=smp,
-        timeout_sec=75 if smp > 8 else 50,
-        extra_args=extra_qemu_args,
-        mem=mem,
-    )
-
-    print(f"\n--- [{name}] smp={smp} QEMU exit={rc} (expected {EXIT_CODE_SUCCESS}) elapsed={elapsed:.3f}s ---")
-    for line in serial_out.splitlines():
-        if "[DRY-" in line or "Hello from DRY OS!" in line or "Limine" in line or "PANIC" in line:
-            print(f"  {line}")
-
-    must_contain = [
-        "[DRY-BOOT] DRY Kernel v0.1.0",
-        "Firmware: EFI64",
-        "[DRY-CPU] PASS: BSP(cpu=0,",
-        "GDT(CS=0x08,TR=0x28,Busy=0x8b)",
-        "#BP(hits=1,",
-        "[DRY-HHDM] PASS:",
-        "[DRY-MEMMAP] PASS:",
-        "[DRY-SEC] PASS:",
-        f"[DRY-SMP] PASS: cpus_online={smp} mask={expected_mask} total_bp_traps={smp} symmetric_ops={expected_ops} stacks_disjoint=true",
-        f"[DRY-SCHED] PASS: cpus={smp} spawned={spawned} exited={spawned}",
-        f"park_rounds={park_rounds} work_units={work_units} stale_wakes_rejected=48 orphan_ready=0",
-        "[DRY-APIC] PASS:",
-        f"[DRY-IRQ-ONLY] PASS: cpus={smp}",
-    ]
-    if not irq_only:
-        must_contain.extend(
-            [
-                f"[DRY-PREEMPT] PASS: cpus={smp}",
-                "[DRY-PMM] PASS:",
-                "[DRY-UNTYPED] PASS:",
-                f"[DRY-PMM-BENCH] PASS: cpus={smp}",
-                f"[DRY-LIVENESS-REG] PASS: cpus={smp}",
-                "[DRY-VSPACE] PASS:",
-                "[DRY-HUGEPAGE] PASS:",
-                f"[DRY-VSPACE-BENCH] PASS: cpus={smp}",
-                f"[DRY-VSPACE-SMP] PASS: cpus={smp}",
-                f"[DRY-TLB-DEBT] PASS: cpus={smp}",
-                f"[DRY-CSPACE] PASS: cpus={smp}",
-                f"[DRY-CSPACE-BENCH] PASS: cpus={smp}",
-                f"[DRY-CSPACE-SMP] PASS: cpus={smp}",
-                "Hello from DRY OS!",
-                f"[DRY-USER-SEC] PASS: cpus={smp}",
-                f"[DRY-USER-BENCH] PASS: cpus={smp}",
-                f"[DRY-FPU] PASS: cpus={smp}",
-                f"[DRY-AUDIT-REG] PASS: cpus={smp} cases=9/9",
-                f"[DRY-FAULT-EP] PASS: cpus={smp} delivered=20 resumed=17",
-                f"[DRY-SERVICES] PASS: cpus={smp}",
-                f"[DRY-IPC-SEC] PASS: cpus={smp}",
-                f"[DRY-IPC-BENCH] PASS: cpus={smp}",
-                f"[DRY-IRQ] PASS: cpus={smp}",
-                f"[DRY-IRQ-BENCH] PASS: cpus={smp}",
-                f"[DRY-BOOT-OK] Milestone 1C UEFI boot + {smp}-vCPU SMP + H1 scheduler + PMM + VSpace + CSpace + Ring 3 Services, IPC & GOP Display verified cleanly.",
-            ]
-        )
-    must_not_contain = [
-        "[DRY-PANIC]",
-        "[DRY-EXCEPTION]",
-        "[DRY-SMP-FAIL]",
-        "[DRY-SCHED-FAIL]",
-        "[DRY-PREEMPT-FAIL]",
-        "[DRY-PMM-FAIL]",
-        "[DRY-VSPACE-FAIL]",
-        "[DRY-TLB-FAIL]",
-        "[DRY-CSPACE-FAIL]",
-        "[DRY-USER-FAIL]",
-        "[DRY-IPC-FAIL]",
-        "[DRY-IRQ-FAIL]",
-        "[DRY-APIC-FAIL]",
-        "[DRY-DF-IST1] FAIL",
-    ]
-
-    if rc != EXIT_CODE_SUCCESS:
-        print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-        raise RuntimeError(f"[{name}] Unexpected QEMU exit code {rc} != {EXIT_CODE_SUCCESS}")
-    for token in must_contain:
-        if token not in serial_out:
-            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-            raise RuntimeError(f"[{name}] Missing required serial marker: {token!r}")
-    for token in must_not_contain:
-        if token in serial_out:
-            print("FULL SERIAL OUTPUT:\n" + serial_out, file=sys.stderr)
-            raise RuntimeError(f"[{name}] Forbidden serial marker found: {token!r}")
-    verify_sched_line(name, serial_out, smp)
-    verify_apic_and_irq_lines(name, serial_out, smp, expected_mode=expected_apic_mode)
-    if not irq_only:
-        verify_preempt_line(name, serial_out, smp)
-        verify_pmm_and_untyped_lines(name, serial_out, smp)
-        verify_vspace_lines(name, serial_out, smp)
-        verify_cspace_and_tlb_debt_lines(name, serial_out, smp)
-        verify_userspace_lines(name, serial_out, smp)
-        verify_ipc_and_display_lines(name, serial_out, smp, expect_fb=expect_fb)
-        verify_p1_irq_lines(name, serial_out, smp)
-    print(
-        f"[PASS] {name}: smp={smp} exit={rc} ({len(must_contain)} assertions + numeric sched/preempt/pmm/vspace/cspace/user/ipc/irq/display invariants verified in {elapsed:.3f}s)."
-    )
+        subprocess.check_call(["mcopy", "-i", part_spec, str(LIMINE_EFI), "::/EFI/BOOT/BOOTX64.EFI"], env=mtools_env)
+        subprocess.check_call(["mcopy", "-i", part_spec, str(conf_path), "::/boot/limine/limine.conf"], env=mtools_env)
+        subprocess.check_call(["mcopy", "-i", part_spec, str(kernel_elf), "::/boot/dry-kernel"], env=mtools_env)
+        for src_name, dst_name in mods:
+            subprocess.check_call(
+                ["mcopy", "-i", part_spec, str(u_out_dir / src_name), f"::/boot/{dst_name}"],
+                env=mtools_env,
+            )
+    finally:
+        conf_path.unlink(missing_ok=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-only", action="store_true", help="Run clippy + release build without QEMU")
+    parser.add_argument("-j", "--jobs", type=int, default=1, help="Parallel QEMU worker count for full regression")
     parser.add_argument("--smp-only", type=int, default=0, help="Run only a single positive N-vCPU boot test")
     parser.add_argument("--irq-only", action="store_true", help="Sub-Stage A: verify only APIC timer IRQ + EOI + TrapFrame")
     parser.add_argument("--p1-only", action="store_true", help="Run only Milestone 2A-1 (P1) interactive & negative security suite")
@@ -745,10 +530,12 @@ def main() -> None:
     parser.add_argument("--p16-only", action="store_true", help="Run only Ascension 6.0 Universal GPU & Hardening suite")
     parser.add_argument("--p17-only", action="store_true", help="Run only Ascension 7.0 Reliability, Daily-Use & Virgl 3D suite")
     parser.add_argument("--p18-only", action="store_true", help="Run only Ascension 8.0 Hardware Validation & Persistence suite")
+    parser.add_argument("--p19-only", action="store_true", help="Run only Ascension 9.0 Stabilization, VFS Exec, Net/Linux-ABI & Ergonomics suite")
     parser.add_argument("--mem", default="512M", help="QEMU guest RAM size passed to positive SMP/boot runs (e.g. 512M, 4G)")
     args = parser.parse_args()
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    bind_esp_writer(write_mbr_esp_image)
     kernel_elf = build_kernel()
     if args.build_only:
         print(f"[QEMU-TEST] Build-only check succeeded: {kernel_elf}")
@@ -841,6 +628,11 @@ def main() -> None:
         print(f"\n[QEMU-TEST] ALL {n_p18} ASCENSION 8.0 HARDWARE VALIDATION & PERSISTENCE CHECKS PASSED.")
         return
 
+    if args.p19_only:
+        n_p19 = run_p19_ascension9_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
+        print(f"\n[QEMU-TEST] ALL {n_p19} ASCENSION 9.0 STABILIZATION & MATURITY CHECKS PASSED.")
+        return
+
     if args.p3_matrix:
         esp_p3_std = BUILD_DIR / "esp_p3_desktop_std.img"
         write_mbr_esp_image(esp_p3_std, kernel_elf, "console=com1 desktop3=1")
@@ -860,89 +652,33 @@ def main() -> None:
         )
         return
 
-    # Progressive SMP bring-up order (ADR-006 / Milestone 1A-E..1B-C): 1 -> 2 -> 4 -> 8 -> 20 vCPUs.
-    assert_positive_smp_boot("boot_1cpu_ok", kernel_elf, smp=1, mem=args.mem)
-    assert_positive_smp_boot("boot_2cpu_ok", kernel_elf, smp=2, mem=args.mem)
-    assert_positive_smp_boot("boot_4cpu_ok", kernel_elf, smp=4, mem=args.mem)
-    assert_positive_smp_boot("boot_8cpu_ok", kernel_elf, smp=8, mem=args.mem)
-    assert_positive_smp_boot("boot_20cpu_ok", kernel_elf, smp=20, mem=args.mem)
-
-    # Explicit hardware fallback verification: force xAPIC MMIO fallback (`0xFEE0_0000` UC via HHDM) on 2 vCPUs.
-    assert_positive_smp_boot(
-        "boot_2cpu_xapic_fallback",
-        kernel_elf,
-        smp=2,
-        cmdline="console=com1 apic_mode=xapic",
-        expected_apic_mode="xapic-mmio",
-        mem=args.mem,
-    )
-
-    # FPU fallback verification (`Milestone 2A-4a`): force `FXSAVE64` (no `XSAVE`/AVX) on 2 vCPUs.
-    assert_boot_case(
-        name="boot_2cpu_fpu_fxsave_fallback",
+    run_full_regression(
+        jobs=max(1, args.jobs),
         kernel_elf=kernel_elf,
-        cmdline="console=com1 fpu_mode=fxsave",
-        smp=2,
-        expected_rc=EXIT_CODE_SUCCESS,
-        must_contain=["[DRY-FPU] PASS: cpus=2 mode=fxsave xcr0=0x3 area_bytes=512", "[DRY-BOOT-OK]"],
-        must_not_contain=["[DRY-PANIC]", "[DRY-EXCEPTION]"],
-    )
-
-    # Headless fallback verification (`Stage E.4`): boot without GOP (`-vga none`) and confirm graceful serial-only boot.
-    assert_positive_smp_boot(
-        "boot_2cpu_headless_nofb",
-        kernel_elf,
-        smp=2,
-        cmdline="console=com1",
-        expect_fb=False,
-        extra_qemu_args=["-vga", "none"],
         mem=args.mem,
-    )
-
-    # Ring 3 GOP visual proof (`Stage E.2 & E.3`): QMP screendump -> PNG + pixel-level contrast verification.
-    screendump_esp = BUILD_DIR / "esp_boot_display_screendump.img"
-    write_mbr_esp_image(screendump_esp, kernel_elf, "console=com1 screendump_hold=1")
-    capture_and_verify_gop_screendump(
-        img_path=screendump_esp,
-        ovmf_code=OVMF_CODE,
-        ovmf_vars=OVMF_VARS,
-        build_dir=BUILD_DIR,
-        png_out=BUILD_DIR / "dry_os_first_screen.png",
-    )
-
-    n_neg = run_legacy_negative_matrix(kernel_elf, assert_boot_case, EXIT_CODE_PANIC)
-
-    run_p1_suite(
-        kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
-    )
-    run_p2_suite(
-        kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC
-    )
-    n_p3 = run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p4 = run_p4_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p5 = run_p5_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p6 = run_p6_lx_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p7 = run_p7_gpu_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p8 = run_p8_hw_suite(kernel_elf, BUILD_DIR, ROOT, write_mbr_esp_image, run_qemu)
-    n_p9 = run_p9_glass_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p10 = run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p11 = run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p12 = run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p13 = run_p13_usb_persist_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p14 = run_p14_lx_net_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p15 = run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-    n_p16 = run_p16_ascension6_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu)
-    n_p17 = run_p17_ascension7_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu)
-    n_p18 = run_p18_hwval_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image)
-
-    print(
-        f"\n[QEMU-TEST] ALL {33 + n_neg + n_p3 + n_p4 + n_p5 + n_p6 + n_p7 + n_p8 + n_p9 + n_p10 + n_p11 + n_p12 + n_p13 + n_p14 + n_p15 + n_p16 + n_p17 + n_p18} DETERMINISTIC QEMU CHECKS "
-        f"({10 + n_neg} LEGACY MILESTONE 0-1C+2A-4a + 9 MILESTONE 2A-1 P1 + 14 MILESTONE 2A-2 + "
-        f"{n_p3} MILESTONE 2A-3 + {n_p4} MILESTONE 2B + {n_p5} MILESTONE 2C-0 + "
-        f"{n_p6} MILESTONE 2C-1 + {n_p7} PRIORITY-C GPU + {n_p8} MILESTONE 2C-2 HW + "
-        f"{n_p9} DRY GLASS + {n_p10} DRY GLASS 2.0 + {n_p11} DRY GLASS 2.1 + {n_p12} LX DRM + "
-        f"{n_p13} M2 USB/NVME + {n_p14} M3 LX NET + {n_p15} BRAND/ICONS + {n_p16} ASCENSION 6.0 + "
-        f"{n_p17} ASCENSION 7.0 + {n_p18} ASCENSION 8.0) PASSED."
+        write_esp_fn=write_mbr_esp_image,
+        suites={
+            "neg": lambda: run_legacy_negative_matrix(kernel_elf, assert_boot_case, EXIT_CODE_PANIC),
+            "p1": lambda: (run_p1_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC), 9)[1],
+            "p2": lambda: (run_p2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, assert_boot_case, EXIT_CODE_PANIC), 14)[1],
+            "p3": lambda: run_p3_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p4": lambda: run_p4_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p5": lambda: run_p5_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p6": lambda: run_p6_lx_island_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p7": lambda: run_p7_gpu_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p8": lambda: run_p8_hw_suite(kernel_elf, BUILD_DIR, ROOT, write_mbr_esp_image, run_qemu),
+            "p9": lambda: run_p9_glass_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p10": lambda: run_p10_glass2_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p11": lambda: run_p11_glass21_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p12": lambda: run_p12_lx_compat_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p13": lambda: run_p13_usb_persist_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p14": lambda: run_p14_lx_net_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p15": lambda: run_p15_brand_icons_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p16": lambda: run_p16_ascension6_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu),
+            "p17": lambda: run_p17_ascension7_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image, run_qemu),
+            "p18": lambda: run_p18_hwval_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+            "p19": lambda: run_p19_ascension9_suite(kernel_elf, BUILD_DIR, ROOT, OVMF_CODE, OVMF_VARS, write_mbr_esp_image),
+        },
     )
 
 
