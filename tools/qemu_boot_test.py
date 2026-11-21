@@ -10,6 +10,8 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 
@@ -90,6 +92,7 @@ USERSPACE_MODS = (
     ("dry-lx-net", "dry-lx-net.elf"),
     ("dry-sdk-demo", "dry-sdk-demo.elf"),
     ("dry-nv-island", "dry-nv-island.elf"),
+    ("dry-bin.tar", "dry-bin.tar"),
 )
 
 
@@ -350,6 +353,26 @@ def build_sdk_demo_island() -> pathlib.Path:
     return dst_bin
 
 
+def _pack_bin_tar(out_dir: pathlib.Path, entries: tuple[tuple[str, pathlib.Path], ...]) -> pathlib.Path:
+    """Pack stripped `/bin` tools into a single <=2 MiB POSIX USTAR archive (`dry-bin.tar`)."""
+    tar_path = out_dir / "dry-bin.tar"
+    strip_bin = shutil.which("llvm-strip") or shutil.which("strip")
+    with tempfile.TemporaryDirectory(prefix="dry_bintar_") as td:
+        td_path = pathlib.Path(td)
+        with tarfile.open(tar_path, "w", format=tarfile.USTAR_FORMAT) as tf:
+            for arc_name, src_path in entries:
+                staged = td_path / arc_name
+                shutil.copyfile(src_path, staged)
+                if strip_bin:
+                    subprocess.call([strip_bin, "--strip-unneeded", str(staged)])
+                tf.add(staged, arcname=arc_name, recursive=False)
+    sz = tar_path.stat().st_size
+    if sz == 0 or sz > 2 * 1024 * 1024:
+        raise RuntimeError(f"dry-bin.tar size {sz} out of (0, 2 MiB] bounds")
+    print(f"[QEMU-TEST] Packed {tar_path.name}: {len(entries)} entries ({sz} bytes, USTAR).")
+    return tar_path
+
+
 def build_userspace() -> list[pathlib.Path]:
     env = userspace_cargo_env()
     print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-userspace...")
@@ -394,6 +417,7 @@ def build_userspace() -> list[pathlib.Path]:
     build_lx_compat_island(LX_DRM_ISLAND_DIR, "drm_bochs", "dry-lx-drm-bochs")
     build_lx_compat_island(LX_NET_ISLAND_DIR, "net_8139cp", "dry-lx-net")
     build_sdk_demo_island()
+    _pack_bin_tar(out_dir, (("dry-probe.elf", out_dir / "dry-probe"),))
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():

@@ -232,9 +232,11 @@ struct RootInitBootExtInfo {
     mem_total_entries: u8,
     sdk_demo_mod_cap: u64,
     nv_island_mod_cap: u64,
+    bin_tar_frame_cap: u64,
+    bin_tar_bytes: u64,
 }
 
-const _: () = assert!(size_of::<RootInitBootExtInfo>() == 192);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 208);
 const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
 
 const _: () = assert!(
@@ -379,6 +381,25 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mint_boot_module_cap(cs, lbl, "dry-sdk-demo.elf").unwrap_or(CapPtr::NULL);
             let nv_island_mod_cap =
                 mint_boot_module_cap(cs, lbl, "dry-nv-island.elf").unwrap_or(CapPtr::NULL);
+            let (bin_tar_frame_cap, bin_tar_bytes) = if session_mode >= 10 && vfs_cap != CapPtr::NULL {
+                if let Some(tar) = get_boot_module("dry-bin.tar") {
+                    if !tar.is_empty() && tar.len() <= 2 * 1024 * 1024 {
+                        let (cap, fh) =
+                            cspace_alloc_frame(cs, lbl, lbl, PageOrder::Order2MiB, false, 0)?;
+                        // SAFETY: `fh` is a freshly allocated, zeroed 2 MiB PMM frame mapped via HHDM.
+                        unsafe {
+                            copy_nonoverlapping(tar.as_ptr(), fh.hhdm_ptr(), tar.len());
+                        }
+                        (cap.0, tar.len() as u64)
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
             let safe_gop = cmdline.contains("safe_gop=1");
             let fb_cap = if is_framebuffer_available() {
                 mint_root_framebuffer_cap(cs, lbl)?
@@ -580,6 +601,8 @@ pub fn maybe_run_p1_interactive_session(cmdline: &str, online_cpus: usize) {
                 mem_total_entries: mem_entries.min(255) as u8,
                 sdk_demo_mod_cap: sdk_demo_mod_cap.0,
                 nv_island_mod_cap: nv_island_mod_cap.0,
+                bin_tar_frame_cap,
+                bin_tar_bytes,
             };
             let vault_ctrl_cap = if session_mode >= 20 {
                 crate::vault_ctrl::mint_root_vault_cap(cs, lbl)?

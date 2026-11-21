@@ -4,16 +4,17 @@
 //!
 //! Keeps `dry-vfs` IPC server dispatch cleanly separated from the `/boot` + `/ram` inode models.
 
+use crate::abi_ext::ENOTEMPTY;
 use crate::shell::LineBuilder;
 use crate::vfs_proto::{
-    VfsDirEntry, VFS_DIRENTS_PER_CALL, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY, VFS_FLAG_VOLATILE,
-    VFS_MAX_NAME_LEN,
+    VfsDirEntry, VFS_DIRENTS_PER_CALL, VFS_FLAG_DIR, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY,
+    VFS_FLAG_VOLATILE, VFS_MAX_NAME_LEN,
 };
 use crate::{BADGE_SUPERVISOR, EEXIST, EINVAL, ENOENT, ENOSPC, EPERM};
 
 pub const MAX_BOOT_ENTRIES: usize = 36;
-pub const MAX_RAM_INODES: usize = 32;
-pub const MAX_RAM_FILE_BYTES: usize = 2048;
+pub const MAX_RAM_INODES: usize = 40;
+pub const MAX_RAM_FILE_BYTES: usize = 16384;
 
 pub const OS_RELEASE_TEXT: &[u8] = b"NAME=\"DRY OS\"\nVERSION=\"0.4.0-2B\"\nID=dryos\nARCH=\"x86_64\"\nKERNEL=\"dry-kernel (Rust capability microkernel)\"\nSTORAGE=\"/boot (ro initrd) + /ram (volatile) + /persist (DRYFS_v1 CoW)\"\n";
 
@@ -26,6 +27,7 @@ pub const RAM_VAULT_SECRET_TEXT: &[u8] = b"DRY_VAULT_SEAL_SEED_COMP_0001_ONLY\n"
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MountKind {
     Boot,
+    Bin,
     Ram,
     Persist,
 }
@@ -80,13 +82,126 @@ pub fn is_valid_filename(name: &[u8]) -> bool {
         .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
+pub fn is_valid_subpath(sub: &[u8]) -> bool {
+    if sub.is_empty()
+        || sub.len() > VFS_MAX_NAME_LEN
+        || sub.starts_with(b"/")
+        || sub.ends_with(b"/")
+    {
+        return false;
+    }
+    for seg in sub.split(|&b| b == b'/') {
+        if !is_valid_filename(seg) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+pub fn parent_dir_of(subpath: &[u8]) -> Option<&[u8]> {
+    subpath.iter().rposition(|&b| b == b'/').map(|pos| &subpath[..pos])
+}
+
+#[inline]
+pub fn list_direct_child<'a>(dir_prefix: &[u8], entry_name: &'a [u8]) -> Option<&'a [u8]> {
+    if dir_prefix.is_empty() {
+        return if !entry_name.contains(&b'/') {
+            Some(entry_name)
+        } else {
+            None
+        };
+    }
+    if entry_name.len() > dir_prefix.len() + 1
+        && &entry_name[..dir_prefix.len()] == dir_prefix
+        && entry_name[dir_prefix.len()] == b'/'
+    {
+        let rest = &entry_name[(dir_prefix.len() + 1)..];
+        if !rest.is_empty() && !rest.contains(&b'/') {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+#[inline]
+pub fn is_child_of(dir_prefix: &[u8], entry_name: &[u8]) -> bool {
+    entry_name.len() > dir_prefix.len()
+        && &entry_name[..dir_prefix.len()] == dir_prefix
+        && entry_name[dir_prefix.len()] == b'/'
+}
+
+pub fn normalize_path(cwd: &[u8], raw: &[u8], out: &mut [u8; 96]) -> Option<usize> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut segs: [&[u8]; 12] = [b""; 12];
+    let mut depth = 0usize;
+    if !raw.starts_with(b"/") {
+        for seg in cwd.split(|&b| b == b'/') {
+            if seg.is_empty() || seg == b"." {
+                continue;
+            }
+            if depth >= segs.len() {
+                return None;
+            }
+            segs[depth] = seg;
+            depth += 1;
+        }
+    }
+    for seg in raw.split(|&b| b == b'/') {
+        if seg.is_empty() || seg == b"." {
+            continue;
+        }
+        if seg == b".." {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if !is_valid_filename(seg) || depth >= segs.len() {
+            return None;
+        }
+        segs[depth] = seg;
+        depth += 1;
+    }
+    if depth == 0 {
+        out[0] = b'/';
+        return Some(1);
+    }
+    let mut pos = 0usize;
+    for seg in &segs[..depth] {
+        if pos + 1 + seg.len() > out.len() {
+            return None;
+        }
+        out[pos] = b'/';
+        pos += 1;
+        out[pos..(pos + seg.len())].copy_from_slice(seg);
+        pos += seg.len();
+    }
+    Some(pos)
+}
+
 pub fn parse_mount_dir(path: &[u8]) -> Option<MountKind> {
     match path {
         b"/boot" | b"/boot/" => Some(MountKind::Boot),
+        b"/bin" | b"/bin/" => Some(MountKind::Bin),
         b"/ram" | b"/ram/" => Some(MountKind::Ram),
         b"/persist" | b"/persist/" => Some(MountKind::Persist),
         _ => None,
     }
+}
+
+pub fn parse_list_target(path: &[u8]) -> Option<(MountKind, &[u8])> {
+    if let Some(mk) = parse_mount_dir(path) {
+        return Some((mk, b""));
+    }
+    let trimmed = path.strip_suffix(b"/").unwrap_or(path);
+    if let Some(sub) = trimmed.strip_prefix(b"/ram/") {
+        return is_valid_subpath(sub).then_some((MountKind::Ram, sub));
+    }
+    if let Some(sub) = trimmed.strip_prefix(b"/persist/") {
+        return is_valid_subpath(sub).then_some((MountKind::Persist, sub));
+    }
+    None
 }
 
 pub fn parse_file_path(path: &[u8]) -> Result<(MountKind, &[u8]), isize> {
@@ -97,15 +212,22 @@ pub fn parse_file_path(path: &[u8]) -> Result<(MountKind, &[u8]), isize> {
             Err(EINVAL)
         };
     }
-    if let Some(rest) = path.strip_prefix(b"/ram/") {
+    if let Some(rest) = path.strip_prefix(b"/bin/") {
         return if is_valid_filename(rest) {
+            Ok((MountKind::Bin, rest))
+        } else {
+            Err(EINVAL)
+        };
+    }
+    if let Some(rest) = path.strip_prefix(b"/ram/") {
+        return if is_valid_subpath(rest) {
             Ok((MountKind::Ram, rest))
         } else {
             Err(EINVAL)
         };
     }
     if let Some(rest) = path.strip_prefix(b"/persist/") {
-        return if is_valid_filename(rest) {
+        return if is_valid_subpath(rest) {
             Ok((MountKind::Persist, rest))
         } else {
             Err(EINVAL)
@@ -208,6 +330,11 @@ impl MemMounts {
         flags: u16,
         content: &[u8],
     ) -> Result<u32, isize> {
+        if let Some(parent) = parent_dir_of(name) {
+            if !self.has_ram_dir(parent) {
+                return Err(ENOENT);
+            }
+        }
         let idx = self
             .ram_inodes
             .iter()
@@ -249,25 +376,93 @@ impl MemMounts {
     }
 
     pub fn list_ram(&self, start_idx: usize, out: &mut [VfsDirEntry; VFS_DIRENTS_PER_CALL]) -> (usize, usize) {
+        self.list_ram_sub(b"", start_idx, out).unwrap_or((0, 0))
+    }
+
+    pub fn list_ram_sub(
+        &self,
+        dir_prefix: &[u8],
+        start_idx: usize,
+        out: &mut [VfsDirEntry; VFS_DIRENTS_PER_CALL],
+    ) -> Result<(usize, usize), isize> {
+        if !dir_prefix.is_empty() {
+            let dir_node = self
+                .ram_inodes
+                .iter()
+                .find(|n| n.used && name_eq(&n.name, dir_prefix))
+                .ok_or(ENOENT)?;
+            if (dir_node.flags & VFS_FLAG_DIR) == 0 {
+                return Err(EINVAL);
+            }
+        }
         let mut batch_n = 0usize;
         let mut total_n = 0usize;
         for n in &self.ram_inodes {
             if !n.used {
                 continue;
             }
+            let nlen = n.name.iter().position(|&b| b == 0).unwrap_or(n.name.len());
+            let Some(child_name) = list_direct_child(dir_prefix, &n.name[..nlen]) else {
+                continue;
+            };
             if total_n >= start_idx && batch_n < VFS_DIRENTS_PER_CALL {
-                out[batch_n] = VfsDirEntry {
+                let mut de = VfsDirEntry {
                     inode: n.inode,
                     size_bytes: n.len as u32,
                     flags: n.flags,
                     owner_comp: n.owner_comp,
-                    name: n.name,
+                    name: [0; 36],
                 };
+                set_fixed_name(&mut de.name, child_name);
+                out[batch_n] = de;
                 batch_n += 1;
             }
             total_n += 1;
         }
-        (batch_n, total_n)
+        Ok((batch_n, total_n))
+    }
+
+    pub fn has_ram_dir(&self, dir_path: &[u8]) -> bool {
+        self.ram_inodes
+            .iter()
+            .any(|n| n.used && name_eq(&n.name, dir_path) && (n.flags & VFS_FLAG_DIR) != 0)
+    }
+
+    pub fn mkdir_ram(&mut self, path: &[u8], owner_comp: u16) -> Result<u32, isize> {
+        if self.ram_inodes.iter().any(|n| n.used && name_eq(&n.name, path)) {
+            return Err(EEXIST);
+        }
+        if let Some(parent) = parent_dir_of(path) {
+            if !self.has_ram_dir(parent) {
+                return Err(ENOENT);
+            }
+        }
+        self.seed_ram_file(path, owner_comp, VFS_FLAG_VOLATILE | VFS_FLAG_DIR, b"")
+    }
+
+    pub fn rmdir_ram(&mut self, path: &[u8], sender_badge: u64) -> Result<(), isize> {
+        let idx = self
+            .ram_inodes
+            .iter()
+            .position(|n| n.used && name_eq(&n.name, path))
+            .ok_or(ENOENT)?;
+        let node_copy = self.ram_inodes[idx];
+        if (node_copy.flags & VFS_FLAG_DIR) == 0 {
+            return Err(EINVAL);
+        }
+        Self::check_ram_write_perm(&node_copy, sender_badge)?;
+        for other in &self.ram_inodes {
+            if !other.used {
+                continue;
+            }
+            let len = other.name.iter().position(|&b| b == 0).unwrap_or(other.name.len());
+            if is_child_of(path, &other.name[..len]) {
+                return Err(ENOTEMPTY);
+            }
+        }
+        self.ram_inodes[idx] = RamInode::EMPTY;
+        self.ram_data[idx].fill(0);
+        Ok(())
     }
 
     pub fn render_boot_elf_summary(node: &BootNode, out: &mut [u8; 256]) -> usize {
@@ -315,8 +510,16 @@ impl MemMounts {
             .iter()
             .position(|n| n.used && name_eq(&n.name, old_name))
             .ok_or(ENOENT)?;
+        if (self.ram_inodes[idx].flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
         if self.ram_inodes.iter().any(|n| n.used && name_eq(&n.name, new_name)) {
             return Err(EEXIST);
+        }
+        if let Some(parent) = parent_dir_of(new_name) {
+            if !self.has_ram_dir(parent) {
+                return Err(ENOENT);
+            }
         }
         let node_copy = self.ram_inodes[idx];
         Self::check_ram_write_perm(&node_copy, sender_badge)?;
@@ -331,6 +534,9 @@ impl MemMounts {
             .position(|n| n.used && name_eq(&n.name, fname))
             .ok_or(ENOENT)?;
         let node_copy = self.ram_inodes[idx];
+        if (node_copy.flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
         Self::check_ram_write_perm(&node_copy, sender_badge)?;
         self.ram_inodes[idx] = RamInode::EMPTY;
         self.ram_data[idx].fill(0);

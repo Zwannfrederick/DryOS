@@ -105,6 +105,10 @@ path = "src/bin/dry_nvme.rs"
 name = "dry-nv-island"
 path = "src/bin/dry_nv_island.rs"
 
+[[bin]]
+name = "dry-probe"
+path = "src/bin/dry_probe.rs"
+
 [profile.dev]
 panic = "abort"
 

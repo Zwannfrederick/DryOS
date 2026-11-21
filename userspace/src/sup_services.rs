@@ -4,11 +4,13 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::abi_ext::{RootInitBootExtInfo, BOOT_EXT_INFO_OFFSET, ROOT_BOOT_EXT_MAGIC};
 use crate::init_legacy::{domain_spec, log_line};
 use crate::shell::LineBuilder;
 use crate::sup_hw_services::HwServicesState;
 use crate::vfs_proto::{
-    vfs_create_file, vfs_mount_blk, vfs_read_file, vfs_seed_boot_entry, vfs_sync, vfs_write_small,
+    vfs_create_file, vfs_mount_bin_tar, vfs_mount_blk, vfs_read_file, vfs_seed_boot_entry,
+    vfs_sync, vfs_write_small,
 };
 use crate::wm::SessionVisualState;
 use crate::{
@@ -187,6 +189,24 @@ pub fn spawn_and_seed_vfs(
             {
                 seeded += 1;
             }
+        }
+    }
+
+    if boot_info_addr != 0 {
+        // SAFETY: Kernel mapped `0x0070_0000..0x0070_1000` (`4 KiB`) `USER_RO` and wrote `RootInitBootExtInfo`.
+        let boot_ext = unsafe {
+            core::ptr::read_unaligned((boot_info_addr + BOOT_EXT_INFO_OFFSET) as *const RootInitBootExtInfo)
+        };
+        if boot_ext.magic == ROOT_BOOT_EXT_MAGIC
+            && boot_ext.bin_tar_frame_cap != 0
+            && boot_ext.bin_tar_bytes > 0
+            && vfs_mount_bin_tar(vfs_sup_cap, boot_ext.bin_tar_frame_cap, boot_ext.bin_tar_bytes)
+                .is_ok()
+        {
+            let mut blb = LineBuilder::new();
+            blb.push_bytes(b"[DRY-INIT] Mounted /bin USTAR bytes=");
+            blb.push_u64(boot_ext.bin_tar_bytes);
+            log_line(&blb);
         }
     }
 

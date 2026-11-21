@@ -102,9 +102,10 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"sec-audit" => ShellCommand::SecAudit,
         b"gpufault" => ShellCommand::GpuFault,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
-        b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"dmesg" | b"lspci" | b"lsusb"
-        | b"lsblk" | b"nvme" | b"drvctl" | b"uname" | b"free" | b"mounts"
-        | b"vault-status" | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
+        b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"pwd" | b"cd" | b"mkdir"
+        | b"rmdir" | b"cp" | b"mv" | b"exec" | b"dmesg" | b"lspci" | b"lsusb" | b"lsblk"
+        | b"nvme" | b"drvctl" | b"uname" | b"free" | b"mounts" | b"vault-status"
+        | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
         | b"corrupt-sb0-test" => {
             ShellCommand::StorageVault(verb, rest)
         }
@@ -344,6 +345,12 @@ impl Default for InputEditor {
     }
 }
 
+const fn default_cwd() -> [u8; 96] {
+    let mut b = [0u8; 96];
+    b[0] = b'/';
+    b
+}
+
 /// Bounded 128-line scrollback buffer + 16-entry command history + shell session state.
 pub struct ShellEngine {
     lines: [[SurfaceCell; TERM_COLS]; SCROLLBACK_CAP],
@@ -357,6 +364,8 @@ pub struct ShellEngine {
     hist_nav: usize,
     draft_buf: [u8; MAX_INPUT_LEN],
     draft_len: usize,
+    cwd: [u8; 96],
+    cwd_len: usize,
     pub editor: InputEditor,
     pub cmd_count: u32,
     full_dirty: bool,
@@ -376,9 +385,28 @@ impl ShellEngine {
             hist_nav: 0,
             draft_buf: [0; MAX_INPUT_LEN],
             draft_len: 0,
+            cwd: default_cwd(),
+            cwd_len: 1,
             editor: InputEditor::new(),
             cmd_count: 0,
             full_dirty: true,
+        }
+    }
+
+    #[inline]
+    pub fn cwd_bytes(&self) -> &[u8] {
+        &self.cwd[..self.cwd_len.clamp(1, self.cwd.len())]
+    }
+
+    pub fn set_cwd(&mut self, path: &[u8]) {
+        self.cwd.fill(0);
+        if path.is_empty() {
+            self.cwd[0] = b'/';
+            self.cwd_len = 1;
+        } else {
+            let n = path.len().min(self.cwd.len());
+            self.cwd[..n].copy_from_slice(&path[..n]);
+            self.cwd_len = n;
         }
     }
 
@@ -548,7 +576,10 @@ impl ShellEngine {
         self.push_line(b"  apps              Registered native apps & supervisor state", STYLE_DEFAULT);
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings|editor|calc>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
-        self.push_line(b"  ls|cat|write|rm|ln|sync  VFS (/persist, /ram, /boot) ops", STYLE_DEFAULT);
+        self.push_line(
+            b"  ls|cd|pwd|mkdir|rmdir|cat|write|cp|mv|rm|ln|sync|exec  VFS ops",
+            STYLE_DEFAULT,
+        );
         self.push_line(b"  dmesg|lspci|lsusb|lsblk|nvme|drvctl|uname|free|mounts  Sys", STYLE_DEFAULT);
         self.push_line(b"  vault-status|vault-unlock|vault-lock|vault-passwd  DRY Vault", STYLE_DEFAULT);
         self.push_line(b"  gpufault|blank|lock|reboot|poweroff|shutdown|suspend  System", STYLE_DEFAULT);

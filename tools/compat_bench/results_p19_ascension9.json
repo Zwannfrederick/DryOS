@@ -4,6 +4,12 @@
     "app_cycles": 5,
     "crash_cycles": 2,
     "leaked_frames": 0,
-    "wall_time_sec": 11.067
+    "wall_time_sec": 14.947
+  },
+  "p19b": {
+    "probe_bytes": 12792,
+    "persist_exec_ok": true,
+    "leaked_frames": 0,
+    "wall_time_sec": 10.604
   }
 }

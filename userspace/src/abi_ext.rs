@@ -137,6 +137,36 @@ pub const SYS_DMA_ALLOC: u64 = 30;
 pub const SYS_VAULT_CTL: u64 = 31;
 
 pub const EXDEV: isize = -18;
+pub const ENOTEMPTY: isize = -39;
+pub const IPC_OP_SUP_EXEC_VFS: u32 = 148;
+
+#[inline]
+pub fn sys_proc_spawn_with_len(
+    mod_or_frame_cap: u64,
+    domain_code: u8,
+    compartment_id: u16,
+    grant0: (u64, u16, u64),
+    grant1: (u64, u16),
+    elf_len: usize,
+) -> Result<(u64, u64), isize> {
+    let dom_comp = (domain_code as u64) | ((compartment_id as u64) << 16) | (0xffffu64 << 32);
+    let g0_rb = (grant0.1 as u64) | (grant0.2 << 16);
+    let g1_len = (grant1.1 as u64) | ((elf_len as u64) << 32);
+    let (r0, pid) = raw_syscall6(
+        SYS_PROC_SPAWN,
+        mod_or_frame_cap,
+        dom_comp,
+        grant0.0,
+        g0_rb,
+        grant1.0,
+        g1_len,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok((r0 as u64, pid))
+    }
+}
 
 // `SecFlags` bitmask constants (`kernel/src/security.rs`)
 pub const SEC_FLAG_READ_ONLY_EXPORT: u8 = 1 << 0;
@@ -782,9 +812,11 @@ pub struct RootInitBootExtInfo {
     pub mem_total_entries: u8,
     pub sdk_demo_mod_cap: u64,
     pub nv_island_mod_cap: u64,
+    pub bin_tar_frame_cap: u64,
+    pub bin_tar_bytes: u64,
 }
 
-const _: () = assert!(size_of::<RootInitBootExtInfo>() == 192);
+const _: () = assert!(size_of::<RootInitBootExtInfo>() == 208);
 const _: () = assert!(size_of::<RootInitBootExtInfo>() <= 256);
 
 impl RootInitBootExtInfo {
@@ -798,7 +830,7 @@ impl RootInitBootExtInfo {
             fb_phys_base: 0, cpuid_features: 0, boot_disk_guid: [0; 16],
             tsc_khz: 0, secure_boot_state: 0, acpi_oem_id: [0; 6],
             pci_passive_mode: 0, mem_total_entries: 0, sdk_demo_mod_cap: 0,
-            nv_island_mod_cap: 0,
+            nv_island_mod_cap: 0, bin_tar_frame_cap: 0, bin_tar_bytes: 0,
         }
     }
 }

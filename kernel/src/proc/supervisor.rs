@@ -125,29 +125,18 @@ pub fn sys_proc_spawn(
     };
 
     let now_epoch = current_lease_epoch();
-    let req_mod = CapRights(CapRights::READ.0 | CapRights::SPAWN.0);
-    let mod_idx = with_pinned_cap(
-        parent_cspace,
-        parent_subj,
-        CapPtr(boot_mod_cap_raw),
-        req_mod,
-        now_epoch,
-        |res| {
-            if res.obj_kind != CapObjectKind::BootModule {
-                return Err(CapError::WrongObjectKind);
-            }
-            Ok(res.obj_id as usize)
-        },
-    )
-    .map_err(map_cap_err_to_sys)?;
-
-    let elf_bytes = get_boot_module_by_index(mod_idx).ok_or(SysError::BadCap)?;
     let online = ONLINE_SCHED_CPUS.load(Ordering::Acquire).max(1);
     let target_cpu = if cpu_hint == 0xffff {
         (current_cpu_idx() + 1) % online
     } else {
         cpu_hint % online
     };
+
+    enum InnerSpawn {
+        Ok(crate::proc::SpawnedProcessInfo),
+        Proc(ProcError),
+        BadMod,
+    }
 
     // Reserve an active scheduler epoch thread ticket BEFORE publishing the child's TCB so AP
     // service loops never observe `PHASE_PENDING_THREADS == 0` prematurely on child exit.
@@ -157,54 +146,117 @@ pub fn sys_proc_spawn(
         })
         .is_ok();
 
-    let spawn_res = spawn_elf_process_with(
-        elf_bytes,
-        SpawnOptions {
-            subj_label: child_label,
-            arg0: 0,
-            arg1: 0,
-            target_cpu,
-            trace_lifecycle: false,
-            user_fs_base: 0,
-            user_gs_base: 0,
-        },
-        |child_cs, _, _, _| {
-            let arg0 = if grant_cap0_raw != 0 {
-                let rights0 = CapRights((grant0_rights_badge & 0xffff) as u16);
-                let badge0 = grant0_rights_badge >> 16;
-                let rcpt0 = cspace_transfer(
-                    parent_cspace,
-                    parent_subj,
-                    CapPtr(grant_cap0_raw),
-                    child_cs,
-                    rights0,
-                    0,
-                    badge0,
-                    now_epoch,
-                )?;
-                rcpt0.dst_cap.0
-            } else {
-                0
+    let inner = with_pinned_cap(
+        parent_cspace,
+        parent_subj,
+        CapPtr(boot_mod_cap_raw),
+        CapRights::READ,
+        now_epoch,
+        |res| {
+            let elf_bytes: &[u8] = match res.obj_kind {
+                CapObjectKind::BootModule => {
+                    if !res.rights.contains(CapRights::SPAWN) {
+                        return Err(CapError::InsufficientRights);
+                    }
+                    match get_boot_module_by_index(res.obj_id as usize) {
+                        Some(s) => s,
+                        None => return Ok(InnerSpawn::BadMod),
+                    }
+                }
+                CapObjectKind::Frame2M => {
+                    let req_len = (grant1_rights >> 32) as usize;
+                    let slice_len = if req_len > 0 && req_len <= (2 * 1024 * 1024) {
+                        req_len
+                    } else {
+                        2 * 1024 * 1024
+                    };
+                    let ptr = crate::pmm::phys_to_hhdm(
+                        (res.obj_id as u64) * (crate::pmm::PAGE_SIZE as u64),
+                    );
+                    // SAFETY: `res.obj_id` is a valid PMM `Order2MiB` PFN pinned via
+                    // `in_flight_ops` for the full duration of ELF loading below.
+                    unsafe { core::slice::from_raw_parts(ptr.cast_const(), slice_len) }
+                }
+                _ => return Err(CapError::WrongObjectKind),
             };
-            let arg1 = if grant_cap1_raw != 0 && fault_ep.is_none() {
-                let rights1 = CapRights((grant1_rights & 0xffff) as u16);
-                let rcpt1 = cspace_transfer(
-                    parent_cspace,
-                    parent_subj,
-                    CapPtr(grant_cap1_raw),
-                    child_cs,
-                    rights1,
-                    0,
-                    0,
-                    now_epoch,
-                )?;
-                rcpt1.dst_cap.0
-            } else {
-                0
-            };
-            Ok((arg0, arg1))
+            match spawn_elf_process_with(
+                elf_bytes,
+                SpawnOptions {
+                    subj_label: child_label,
+                    arg0: 0,
+                    arg1: 0,
+                    target_cpu,
+                    trace_lifecycle: false,
+                    user_fs_base: 0,
+                    user_gs_base: 0,
+                },
+                |child_cs, _, _, _| {
+                    let arg0 = if grant_cap0_raw != 0 {
+                        let rights0 = CapRights((grant0_rights_badge & 0xffff) as u16);
+                        let badge0 = grant0_rights_badge >> 16;
+                        let rcpt0 = cspace_transfer(
+                            parent_cspace,
+                            parent_subj,
+                            CapPtr(grant_cap0_raw),
+                            child_cs,
+                            rights0,
+                            0,
+                            badge0,
+                            now_epoch,
+                        )?;
+                        rcpt0.dst_cap.0
+                    } else {
+                        0
+                    };
+                    let arg1 = if grant_cap1_raw != 0 && fault_ep.is_none() {
+                        let rights1 = CapRights((grant1_rights & 0xffff) as u16);
+                        let rcpt1 = cspace_transfer(
+                            parent_cspace,
+                            parent_subj,
+                            CapPtr(grant_cap1_raw),
+                            child_cs,
+                            rights1,
+                            0,
+                            0,
+                            now_epoch,
+                        )?;
+                        rcpt1.dst_cap.0
+                    } else {
+                        0
+                    };
+                    Ok((arg0, arg1))
+                },
+            ) {
+                Ok(info) => Ok(InnerSpawn::Ok(info)),
+                Err(pe) => Ok(InnerSpawn::Proc(pe)),
+            }
         },
-    );
+    )
+    .map_err(|ce| {
+        if tracked_in_epoch {
+            let _ = PHASE_PENDING_THREADS.try_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |v| (v > 0).then_some(v - 1),
+            );
+        }
+        map_cap_err_to_sys(ce)
+    })?;
+
+    let spawn_res = match inner {
+        InnerSpawn::Ok(info) => Ok(info),
+        InnerSpawn::Proc(pe) => Err(pe),
+        InnerSpawn::BadMod => {
+            if tracked_in_epoch {
+                let _ = PHASE_PENDING_THREADS.try_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |v| (v > 0).then_some(v - 1),
+                );
+            }
+            return Err(SysError::BadCap);
+        }
+    };
 
     match spawn_res {
         Ok(info) => {

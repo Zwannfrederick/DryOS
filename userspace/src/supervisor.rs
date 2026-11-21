@@ -6,7 +6,7 @@
 //! `p4_sec`), and dispatches supervisor IPC requests over `SupervisorCtx`.
 
 use crate::abi_ext::{
-    HWCHECK_MODE_DESKTOP_SAFE, HWCHECK_MODE_RECOVERY, HWCHECK_MODE_SAFE,
+    HWCHECK_MODE_DESKTOP_SAFE, HWCHECK_MODE_RECOVERY, HWCHECK_MODE_SAFE, IPC_OP_SUP_EXEC_VFS,
 };
 use crate::action::{AppId, DesktopAction};
 use crate::hwdiag::mgr::{DiagManager, DIAG_SCRATCH_CAP};
@@ -24,6 +24,7 @@ use crate::shell::LineBuilder;
 use crate::sup_audit::{run_p3_sup_security_checks, run_p4_security_and_fault_audit};
 pub use crate::sup_ctx::AppState;
 use crate::sup_ctx::SupervisorCtx;
+use crate::sup_exec::handle_exec_vfs_ipc;
 use crate::sup_hw_services::{handle_hw_query_ipc, init_hw_services_and_persist, HwInitCaps};
 use crate::sup_nv_island::{
     handle_nv_supervisor_ipc, init_nvidia_island_service, teardown_nvidia_island_service,
@@ -33,20 +34,20 @@ use crate::sup_services::{
     spawn_and_seed_vfs, spawn_blk_service, spawn_vault_service, sync_live_layout_pref,
     teardown_p3_core_services_with_hw, FinalPowerMode, SupervisorPrefs,
 };
-use crate::vfs_proto::vfs_corrupt_sb0_test;
+use crate::vfs_proto::{sys_ipc_recv_extra, vfs_corrupt_sb0_test};
 use crate::wm::SUP_BIT_WM_ACTION;
 use crate::{
     msg_tag_label, pack_msg_tag, rdtsc_user, sys_cap_derive, sys_cap_revoke, sys_ep_create,
-    sys_exit, sys_ipc_call_inline, sys_ipc_recv_ext, sys_ipc_reply_inline,
-    sys_ipc_reply_with_grant, sys_notify_create, sys_notify_wait, sys_proc_wait, sys_sysinfo,
-    sys_write_debug, RootInitBootInfo, UserIpcRecvExt, UserSysInfo, BADGE_SUPERVISOR,
-    BADGE_SUP_DISPLAY, BADGE_SUP_ROGUE, BADGE_SUP_SETTINGS, BADGE_SUP_SHELL, BADGE_SUP_SYSMON,
-    BADGE_VAULT_SHELL, BADGE_VAULT_SYSMON, EAGAIN, ETIMEDOUT, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS,
-    IPC_OP_ERR_PERM, IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED,
-    IPC_OP_SUP_CORRUPT_SB0_TEST, IPC_OP_SUP_GET_VAULT_CAP, IPC_OP_SUP_GET_VFS_CAP,
-    IPC_OP_SUP_HELLO, IPC_OP_SUP_MINT_ROGUE_TEST, IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_QUERY_PREFS,
+    sys_exit, sys_ipc_call_inline, sys_ipc_reply_inline, sys_ipc_reply_with_grant,
+    sys_notify_create, sys_notify_wait, sys_proc_wait, sys_sysinfo, sys_write_debug,
+    RootInitBootInfo, UserIpcRecvExt, UserSysInfo, BADGE_SUPERVISOR, BADGE_SUP_DISPLAY,
+    BADGE_SUP_ROGUE, BADGE_SUP_SETTINGS, BADGE_SUP_SHELL, BADGE_SUP_SYSMON, BADGE_VAULT_SHELL,
+    BADGE_VAULT_SYSMON, EAGAIN, ETIMEDOUT, IPC_OP_ERR_INVAL, IPC_OP_ERR_NOSYS, IPC_OP_ERR_PERM,
+    IPC_OP_PONG, IPC_OP_SUP_ACTION, IPC_OP_SUP_APP_EXITED, IPC_OP_SUP_CORRUPT_SB0_TEST,
+    IPC_OP_SUP_GET_VAULT_CAP, IPC_OP_SUP_GET_VFS_CAP, IPC_OP_SUP_HELLO,
+    IPC_OP_SUP_MINT_ROGUE_TEST, IPC_OP_SUP_QUERY_APPS, IPC_OP_SUP_QUERY_PREFS,
     IPC_OP_SUP_RECONNECT_INPUT, IPC_OP_SUP_SHUTDOWN, IPC_OP_WM_POLL_ACTION, IPC_OP_WM_QUERY_STATE,
-    MSG_FLAG_NON_BLOCKING, RIGHT_CALL, RIGHT_READ, RIGHT_SEND,
+    MAX_IPC_EXTRA_BYTES, MSG_FLAG_NON_BLOCKING, RIGHT_CALL, RIGHT_READ, RIGHT_SEND,
 };
 
 const DESKTOP_IPC_COMP_ID: u16 = 0x0100;
@@ -194,6 +195,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         };
     let mut lx_drm_live: Option<LxDrmLiveSession> = None;
     let mut restarts = 0u64;
+    let mut sup_rx = [0u8; MAX_IPC_EXTRA_BYTES];
 
     loop {
         ctx.reap_exited_apps(None);
@@ -327,11 +329,13 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         }
 
         let mut ext = UserIpcRecvExt::default();
-        let (tag, reply_tok, mrs) = match sys_ipc_recv_ext(sup_ep, 0, poll_timeout_tsc, &mut ext) {
-            Ok(v) => v,
-            Err(ETIMEDOUT | EAGAIN) => continue,
-            Err(_) => break,
-        };
+        let (tag, rx_len, mrs) =
+            match sys_ipc_recv_extra(sup_ep, 0, poll_timeout_tsc, &mut sup_rx, &mut ext) {
+                Ok(v) => v,
+                Err(ETIMEDOUT | EAGAIN) => continue,
+                Err(_) => break,
+            };
+        let reply_tok = ext.reply_token;
 
         let op = msg_tag_label(tag);
         match op {
@@ -683,6 +687,16 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                         0x54e1,
                     );
                 }
+            }
+            IPC_OP_SUP_EXEC_VFS => {
+                handle_exec_vfs_ipc(
+                    sup_ep,
+                    reply_tok,
+                    ext.sender_badge,
+                    ctx.vfs_sup_cap,
+                    &sup_rx[..rx_len],
+                    sys.tsc_mhz,
+                );
             }
             IPC_OP_SUP_SHUTDOWN => {
                 if !is_action_badge_authorized(ext.sender_badge) {

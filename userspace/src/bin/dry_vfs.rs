@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR GPL-2.0-only
 //! `dry-vfs` — Isolated Ring 3 (`CPL=3`) Capability-Badged Virtual Filesystem Service (`0x0004`).
 //!
-//! Dispatches IPC requests across `/boot` + `/ram` (`vfs_mem::MemMounts`) and `/persist`
-//! (`persist_fs::PersistMount` over lock-free `IoRingClient` to `dry-blk`).
+//! Dispatches IPC requests across `/boot` + `/ram` (`vfs_mem::MemMounts`), `/bin` (USTAR `vfs_tar`),
+//! and `/persist` (`persist_fs::PersistMount` over lock-free `IoRingClient` to `dry-blk`).
 
 #![no_std]
 #![no_main]
@@ -14,45 +14,45 @@ use dry_userspace::ioring::IoRingClient;
 use dry_userspace::persist_fs::{DryFsSuperblock, PersistMount, VfsCallerCtx, DRYFS_MAGIC};
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::vfs_mem::{
-    is_valid_filename, name_eq, parse_file_path, parse_mount_dir, parse_two_paths, MemMounts,
-    MountKind, BOOT_README_TEXT, MAX_RAM_FILE_BYTES, OS_RELEASE_TEXT,
+    is_valid_filename, name_eq, parse_file_path, parse_list_target, set_fixed_name, MemMounts,
+    MountKind, BOOT_README_TEXT, OS_RELEASE_TEXT,
 };
+use dry_userspace::vfs_ops::{reply_vfs_err, try_exec_mut_op, VfsStats};
 use dry_userspace::vfs_proto::{
-    sys_ipc_recv_extra, sys_ipc_reply_extra, VfsDirEntry, VFS_DIRENTS_PER_CALL,
-    VFS_FLAG_EXECUTABLE, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY, VFS_FLAG_VOLATILE, VFS_OP_CREATE,
-    VFS_OP_ERR, VFS_OP_LIST, VFS_OP_QUERY_STATS, VFS_OP_READ, VFS_OP_RENAME, VFS_OP_SEED_BOOT,
-    VFS_OP_STAT, VFS_OP_UNLINK, VFS_OP_WRITE,
+    sys_ipc_recv_extra, sys_ipc_reply_extra, VfsDirEntry, VFS_DIRENTS_PER_CALL, VFS_FLAG_DIR,
+    VFS_FLAG_EXECUTABLE, VFS_FLAG_PERSISTENT, VFS_FLAG_READONLY, VFS_FLAG_VOLATILE, VFS_OP_LIST,
+    VFS_OP_MOUNT_BIN_TAR, VFS_OP_QUERY_STATS, VFS_OP_READ, VFS_OP_SEED_BOOT, VFS_OP_STAT,
+    VFS_OP_WRITE_CAP,
 };
+use dry_userspace::vfs_tar::{list_entries as list_bin_tar, reply_bin_stat_or_read};
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, read_cs_ss, sys_cap_revoke, sys_exit, sys_ipc_reply_inline,
-    sys_write_debug, UserIpcRecvExt, BADGE_SUPERVISOR, EEXIST, EINVAL, ENOENT, ENOSPC, EPERM,
-    EROFS, EXDEV, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, MAX_IPC_EXTRA_BYTES, VFS_OP_CORRUPT_SB0_TEST,
-    VFS_OP_LINK, VFS_OP_MOUNT_BLK, VFS_OP_SYNC,
+    sys_vspace_map, sys_write_debug, UserIpcRecvExt, BADGE_SUPERVISOR, EINVAL, ENOENT, EPERM,
+    EROFS, IPC_OP_EXIT_CLEAN, IPC_OP_PONG, MAX_IPC_EXTRA_BYTES, VFS_OP_CORRUPT_SB0_TEST,
+    VFS_OP_MOUNT_BLK, VFS_OP_SYNC, VSPACE_MAP_OP_2M_RO, VSPACE_MAP_OP_UNMAP_2M,
 };
 
 const VFS_RING_VADDR: u64 = 0x2100_0000;
 const VFS_DATA_VADDR: u64 = 0x2100_1000;
+const VFS_BIN_TAR_VADDR: u64 = 0x2200_0000;
 
 struct VfsState {
     mem: MemMounts,
     ring: IoRingClient,
     persist: PersistMount,
     persist_ro: bool,
-    ops_ok: u64,
-    rofs_rejects: u64,
-    unauth_rejects: u64,
-    inval_rejects: u64,
+    bin_tar_cap: u64,
+    bin_tar_len: usize,
+    stats: VfsStats,
 }
 
 impl VfsState {
-    #[inline]
-    fn tally_err(&mut self, err: isize) {
-        match err {
-            EROFS => self.rofs_rejects = self.rofs_rejects.wrapping_add(1),
-            EPERM => self.unauth_rejects = self.unauth_rejects.wrapping_add(1),
-            EINVAL => self.inval_rejects = self.inval_rejects.wrapping_add(1),
-            _ => {}
+    fn bin_tar_slice(&self) -> &[u8] {
+        if self.bin_tar_cap == 0 || self.bin_tar_len == 0 {
+            return &[];
         }
+        // SAFETY: `bin_tar_cap` is mapped RO at `VFS_BIN_TAR_VADDR` (`<= 2 MiB`).
+        unsafe { core::slice::from_raw_parts(VFS_BIN_TAR_VADDR as *const u8, self.bin_tar_len) }
     }
 }
 
@@ -65,10 +65,14 @@ static VFS_STATE: SingleThreadVfs = SingleThreadVfs(UnsafeCell::new(VfsState {
     ring: IoRingClient::empty(),
     persist: PersistMount::new(),
     persist_ro: false,
-    ops_ok: 0,
-    rofs_rejects: 0,
-    unauth_rejects: 0,
-    inval_rejects: 0,
+    bin_tar_cap: 0,
+    bin_tar_len: 0,
+    stats: VfsStats {
+        ops_ok: 0,
+        rofs_rejects: 0,
+        unauth_rejects: 0,
+        inval_rejects: 0,
+    },
 }));
 
 fn log_line(lb: &LineBuilder) {
@@ -78,17 +82,6 @@ fn log_line(lb: &LineBuilder) {
     out[..n].copy_from_slice(&s[..n]);
     out[n] = b'\n';
     let _ = sys_write_debug(&out[..=n]);
-}
-
-fn reply_vfs_err(ep: u64, tok: u64, err: isize) {
-    if tok != 0 {
-        let _ = sys_ipc_reply_inline(
-            ep,
-            tok,
-            pack_msg_tag(VFS_OP_ERR, 0, 1, 0),
-            [err as u64, 0, 0, 0],
-        );
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -114,20 +107,42 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
         let op = msg_tag_label(tag);
         let caller = VfsCallerCtx::from_badge(ext.sender_badge);
 
-        if ext.transferred_cap != 0 && op != VFS_OP_MOUNT_BLK {
+        if ext.transferred_cap != 0
+            && op != VFS_OP_MOUNT_BLK
+            && op != VFS_OP_MOUNT_BIN_TAR
+            && op != VFS_OP_WRITE_CAP
+        {
             let _ = sys_cap_revoke(ext.transferred_cap, 1);
+        }
+
+        if try_exec_mut_op(
+            op,
+            srv_ep_cap,
+            reply_tok,
+            &rx[..rx_len],
+            &mrs,
+            caller,
+            ext.sender_badge,
+            ext.transferred_cap,
+            &mut st.mem,
+            &mut st.persist,
+            &mut st.ring,
+            st.persist_ro,
+            &mut st.stats,
+        ) {
+            continue;
         }
 
         match op {
             VFS_OP_SEED_BOOT => {
                 if ext.sender_badge != BADGE_SUPERVISOR {
-                    st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
+                    st.stats.unauth_rejects = st.stats.unauth_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
                     continue;
                 }
                 let name = &rx[..rx_len];
                 if !is_valid_filename(name) {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
+                    st.stats.inval_rejects = st.stats.inval_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
                     continue;
                 }
@@ -137,7 +152,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     VFS_FLAG_READONLY | VFS_FLAG_EXECUTABLE,
                     0,
                 );
-                st.ops_ok = st.ops_ok.wrapping_add(1);
+                st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                 if reply_tok != 0 {
                     let _ = sys_ipc_reply_inline(
                         srv_ep_cap,
@@ -152,7 +167,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     if ext.transferred_cap != 0 {
                         let _ = sys_cap_revoke(ext.transferred_cap, 1);
                     }
-                    st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
+                    st.stats.unauth_rejects = st.stats.unauth_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
                     continue;
                 }
@@ -187,7 +202,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     }
                     if !ok_ro {
                         st.ring.teardown();
-                        st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
+                        st.stats.rofs_rejects = st.stats.rofs_rejects.wrapping_add(1);
                         reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                         continue;
                     }
@@ -195,7 +210,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 match st.persist.mount_or_format(&mut st.ring) {
                     Ok((fresh, tx_seq)) => {
                         st.persist_ro = req_ro;
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
+                        st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                         let mut lb = LineBuilder::new();
                         lb.push_bytes(b"[DRY-VFS] PERSIST_MOUNT fresh=");
                         lb.push_bytes(if fresh { b"true" } else { b"false" });
@@ -230,6 +245,44 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     }
                 }
             }
+            VFS_OP_MOUNT_BIN_TAR => {
+                if ext.sender_badge != BADGE_SUPERVISOR || ext.transferred_cap == 0 {
+                    if ext.transferred_cap != 0 {
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                    }
+                    st.stats.unauth_rejects = st.stats.unauth_rejects.wrapping_add(1);
+                    reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
+                    continue;
+                }
+                let tlen = mrs[0] as usize;
+                if tlen == 0 || tlen > 2 * 1024 * 1024 {
+                    let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                    reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
+                    continue;
+                }
+                if st.bin_tar_cap != 0 {
+                    let _ = sys_vspace_map(st.bin_tar_cap, VFS_BIN_TAR_VADDR, VSPACE_MAP_OP_UNMAP_2M);
+                    let _ = sys_cap_revoke(st.bin_tar_cap, 1);
+                    st.bin_tar_cap = 0;
+                    st.bin_tar_len = 0;
+                }
+                if let Err(e) = sys_vspace_map(ext.transferred_cap, VFS_BIN_TAR_VADDR, VSPACE_MAP_OP_2M_RO) {
+                    let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                    reply_vfs_err(srv_ep_cap, reply_tok, e);
+                    continue;
+                }
+                st.bin_tar_cap = ext.transferred_cap;
+                st.bin_tar_len = tlen;
+                st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
+                if reply_tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        srv_ep_cap,
+                        reply_tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [tlen as u64, 0, 0, 0],
+                    );
+                }
+            }
             VFS_OP_SYNC => {
                 if !st.persist.mounted || st.persist_ro {
                     if reply_tok != 0 {
@@ -244,7 +297,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 }
                 match st.ring.flush() {
                     Ok(()) => {
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
+                        st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                         if reply_tok != 0 {
                             let _ = sys_ipc_reply_inline(
                                 srv_ep_cap,
@@ -259,7 +312,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
             }
             VFS_OP_CORRUPT_SB0_TEST => {
                 if ext.sender_badge != BADGE_SUPERVISOR {
-                    st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
+                    st.stats.unauth_rejects = st.stats.unauth_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
                     continue;
                 }
@@ -268,7 +321,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                     continue;
                 }
                 if st.persist_ro {
-                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
+                    st.stats.rofs_rejects = st.stats.rofs_rejects.wrapping_add(1);
                     reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
                     continue;
                 }
@@ -288,32 +341,73 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 }
             }
             VFS_OP_LIST => {
-                let Some(mk) = parse_mount_dir(&rx[..rx_len]) else {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                    continue;
-                };
-                if mk == MountKind::Persist && !st.persist.mounted {
-                    reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                    continue;
-                }
                 let start_idx = mrs[0] as usize;
                 let mut entries = [VfsDirEntry::EMPTY; VFS_DIRENTS_PER_CALL];
-                let (batch_n, total_n, mount_flags) = match mk {
-                    MountKind::Boot => {
-                        let (b, t) = st.mem.list_boot(start_idx, &mut entries);
-                        (b, t, VFS_FLAG_READONLY)
+                let list_res = if &rx[..rx_len] == b"/" {
+                    let mut root_defs: [(&[u8], u16); 4] = [
+                        (b"boot", VFS_FLAG_DIR | VFS_FLAG_READONLY),
+                        (b"bin", VFS_FLAG_DIR | VFS_FLAG_READONLY | VFS_FLAG_EXECUTABLE),
+                        (b"ram", VFS_FLAG_DIR | VFS_FLAG_VOLATILE),
+                        (b"persist", VFS_FLAG_DIR | VFS_FLAG_PERSISTENT),
+                    ];
+                    let total_n = if st.persist.mounted { 4 } else { 3 };
+                    let mut batch_n = 0usize;
+                    for (i, &(rname, rflags)) in root_defs.iter().take(total_n).enumerate() {
+                        if i >= start_idx && batch_n < VFS_DIRENTS_PER_CALL {
+                            let mut de = VfsDirEntry::EMPTY;
+                            de.inode = (i + 1) as u32;
+                            de.flags = rflags;
+                            set_fixed_name(&mut de.name, rname);
+                            entries[batch_n] = de;
+                            batch_n += 1;
+                        }
                     }
-                    MountKind::Ram => {
-                        let (b, t) = st.mem.list_ram(start_idx, &mut entries);
-                        (b, t, VFS_FLAG_VOLATILE)
+                    let _ = &mut root_defs;
+                    Ok((batch_n, total_n, VFS_FLAG_READONLY))
+                } else {
+                    let Some((mk, sub)) = parse_list_target(&rx[..rx_len]) else {
+                        st.stats.inval_rejects = st.stats.inval_rejects.wrapping_add(1);
+                        reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
+                        continue;
+                    };
+                    if mk == MountKind::Persist && !st.persist.mounted {
+                        reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
+                        continue;
                     }
-                    MountKind::Persist => {
-                        let (b, t) = st.persist.list(start_idx, &mut entries);
-                        (b, t, if st.persist_ro { VFS_FLAG_READONLY } else { 0 })
+                    match mk {
+                        MountKind::Boot => {
+                            let (b, t) = st.mem.list_boot(start_idx, &mut entries);
+                            Ok((b, t, VFS_FLAG_READONLY))
+                        }
+                        MountKind::Bin => {
+                            let (b, t) = list_bin_tar(st.bin_tar_slice(), start_idx, 5000, &mut entries);
+                            Ok((b, t, VFS_FLAG_READONLY | VFS_FLAG_EXECUTABLE))
+                        }
+                        MountKind::Ram => st
+                            .mem
+                            .list_ram_sub(sub, start_idx, &mut entries)
+                            .map(|(b, t)| (b, t, VFS_FLAG_VOLATILE)),
+                        MountKind::Persist => st
+                            .persist
+                            .list_sub(sub, start_idx, &mut entries)
+                            .map(|(b, t)| {
+                                (
+                                    b,
+                                    t,
+                                    VFS_FLAG_PERSISTENT | if st.persist_ro { VFS_FLAG_READONLY } else { 0 },
+                                )
+                            }),
                     }
                 };
-                st.ops_ok = st.ops_ok.wrapping_add(1);
+                let (batch_n, total_n, mount_flags) = match list_res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        st.stats.tally_err(e);
+                        reply_vfs_err(srv_ep_cap, reply_tok, e);
+                        continue;
+                    }
+                };
+                st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                 if reply_tok != 0 {
                     let byte_len = batch_n * size_of::<VfsDirEntry>();
                     // SAFETY: `entries` is a contiguous `[VfsDirEntry; 5]` POD array (`<= 240` bytes).
@@ -333,7 +427,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 let (mk, fname) = match parse_file_path(&rx[..rx_len]) {
                     Ok(v) => v,
                     Err(e) => {
-                        st.tally_err(e);
+                        st.stats.tally_err(e);
                         reply_vfs_err(srv_ep_cap, reply_tok, e);
                         continue;
                     }
@@ -360,19 +454,14 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                                 &dyn_buf[..len]
                             }
                         };
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
+                        st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                         if op == VFS_OP_STAT {
                             if reply_tok != 0 {
                                 let _ = sys_ipc_reply_inline(
                                     srv_ep_cap,
                                     reply_tok,
                                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
-                                    [
-                                        node.inode as u64,
-                                        node.size_bytes as u64,
-                                        node.flags as u64,
-                                        0,
-                                    ],
+                                    [node.inode as u64, node.size_bytes as u64, node.flags as u64, 0],
                                 );
                             }
                         } else if reply_tok != 0 {
@@ -390,6 +479,23 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                             );
                         }
                     }
+                    MountKind::Bin => {
+                        match reply_bin_stat_or_read(
+                            st.bin_tar_slice(),
+                            fname,
+                            offset,
+                            want,
+                            op == VFS_OP_STAT,
+                            srv_ep_cap,
+                            reply_tok,
+                        ) {
+                            Ok(()) => st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1),
+                            Err(e) => {
+                                st.stats.tally_err(e);
+                                reply_vfs_err(srv_ep_cap, reply_tok, e);
+                            }
+                        }
+                    }
                     MountKind::Ram => {
                         let Some(idx) = st
                             .mem
@@ -401,25 +507,24 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                             continue;
                         };
                         let node_copy = st.mem.ram_inodes[idx];
-                        if let Err(e) = MemMounts::check_ram_read_perm(&node_copy, ext.sender_badge)
-                        {
-                            st.tally_err(e);
+                        if let Err(e) = MemMounts::check_ram_read_perm(&node_copy, ext.sender_badge) {
+                            st.stats.tally_err(e);
                             reply_vfs_err(srv_ep_cap, reply_tok, e);
                             continue;
                         }
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
+                        if op == VFS_OP_READ && (node_copy.flags & VFS_FLAG_DIR) != 0 {
+                            st.stats.inval_rejects = st.stats.inval_rejects.wrapping_add(1);
+                            reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
+                            continue;
+                        }
+                        st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                         if op == VFS_OP_STAT {
                             if reply_tok != 0 {
                                 let _ = sys_ipc_reply_inline(
                                     srv_ep_cap,
                                     reply_tok,
                                     pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
-                                    [
-                                        node_copy.inode as u64,
-                                        node_copy.len as u64,
-                                        node_copy.flags as u64,
-                                        0,
-                                    ],
+                                    [node_copy.inode as u64, node_copy.len as u64, node_copy.flags as u64, 0],
                                 );
                             }
                         } else if reply_tok != 0 {
@@ -432,12 +537,7 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                                 srv_ep_cap,
                                 reply_tok,
                                 IPC_OP_PONG,
-                                [
-                                    slice.len() as u64,
-                                    node_copy.len as u64,
-                                    node_copy.flags as u64,
-                                    0,
-                                ],
+                                [slice.len() as u64, node_copy.len as u64, node_copy.flags as u64, 0],
                                 slice,
                             );
                         }
@@ -448,14 +548,10 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                             continue;
                         }
                         let mut out_buf = [0u8; MAX_IPC_EXTRA_BYTES];
-                        let dst = if op == VFS_OP_STAT {
-                            &mut out_buf[..0]
-                        } else {
-                            &mut out_buf[..want]
-                        };
+                        let dst = if op == VFS_OP_STAT { &mut out_buf[..0] } else { &mut out_buf[..want] };
                         match st.persist.read_slice(&mut st.ring, fname, caller, offset, dst) {
                             Ok((got, total, flags, ino)) => {
-                                st.ops_ok = st.ops_ok.wrapping_add(1);
+                                st.stats.ops_ok = st.stats.ops_ok.wrapping_add(1);
                                 if op == VFS_OP_STAT {
                                     if reply_tok != 0 {
                                         let _ = sys_ipc_reply_inline(
@@ -476,340 +572,10 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                                 }
                             }
                             Err(e) => {
-                                st.tally_err(e);
+                                st.stats.tally_err(e);
                                 reply_vfs_err(srv_ep_cap, reply_tok, e);
                             }
                         }
-                    }
-                }
-            }
-            VFS_OP_CREATE => {
-                let (mk, fname) = match parse_file_path(&rx[..rx_len]) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                        reply_vfs_err(srv_ep_cap, reply_tok, e);
-                        continue;
-                    }
-                };
-                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
-                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                    continue;
-                }
-                let sender_comp = (ext.sender_badge & 0xffff) as u16;
-                if sender_comp == 0 && ext.sender_badge != BADGE_SUPERVISOR {
-                    st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
-                    continue;
-                }
-                let req_priv = (mrs[0] as u16) & VFS_FLAG_PRIVATE;
-                if mk == MountKind::Persist {
-                    if !st.persist.mounted {
-                        reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                        continue;
-                    }
-                    match st.persist.create(&mut st.ring, fname, caller, req_priv) {
-                        Ok(ino) => {
-                            st.ops_ok = st.ops_ok.wrapping_add(1);
-                            if reply_tok != 0 {
-                                let _ = sys_ipc_reply_inline(
-                                    srv_ep_cap,
-                                    reply_tok,
-                                    pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                                    [ino as u64, 0, 0, 0],
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            st.tally_err(e);
-                            reply_vfs_err(srv_ep_cap, reply_tok, e);
-                        }
-                    }
-                    continue;
-                }
-                if st
-                    .mem
-                    .ram_inodes
-                    .iter()
-                    .any(|n| n.used && name_eq(&n.name, fname))
-                {
-                    reply_vfs_err(srv_ep_cap, reply_tok, EEXIST);
-                    continue;
-                }
-                match st
-                    .mem
-                    .seed_ram_file(fname, sender_comp, VFS_FLAG_VOLATILE | req_priv, b"")
-                {
-                    Ok(ino) => {
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
-                        let mut lb = LineBuilder::new();
-                        lb.push_bytes(b"[DRY-VFS] CREATE path=/ram/");
-                        lb.push_bytes(fname);
-                        lb.push_bytes(b" ino=");
-                        lb.push_u64(ino as u64);
-                        lb.push_bytes(b" comp=0x");
-                        lb.push_hex_u64(sender_comp as u64);
-                        log_line(&lb);
-                        if reply_tok != 0 {
-                            let _ = sys_ipc_reply_inline(
-                                srv_ep_cap,
-                                reply_tok,
-                                pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                                [ino as u64, 0, 0, 0],
-                            );
-                        }
-                    }
-                    Err(e) => reply_vfs_err(srv_ep_cap, reply_tok, e),
-                }
-            }
-            VFS_OP_WRITE => {
-                if rx_len < 2 {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                    continue;
-                }
-                let plen = rx[0] as usize;
-                if plen == 0 || 1 + plen > rx_len {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                    continue;
-                }
-                let path = &rx[1..(1 + plen)];
-                let payload = &rx[(1 + plen)..rx_len];
-                let (mk, fname) = match parse_file_path(path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                        reply_vfs_err(srv_ep_cap, reply_tok, e);
-                        continue;
-                    }
-                };
-                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
-                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                    continue;
-                }
-                let append = mrs[0] != 0;
-                if mk == MountKind::Persist {
-                    if !st.persist.mounted {
-                        reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                        continue;
-                    }
-                    match st.persist.write(&mut st.ring, fname, caller, payload, append) {
-                        Ok((written, total)) => {
-                            st.ops_ok = st.ops_ok.wrapping_add(1);
-                            if reply_tok != 0 {
-                                let _ = sys_ipc_reply_inline(
-                                    srv_ep_cap,
-                                    reply_tok,
-                                    pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
-                                    [written as u64, total as u64, 0, 0],
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            st.tally_err(e);
-                            reply_vfs_err(srv_ep_cap, reply_tok, e);
-                        }
-                    }
-                    continue;
-                }
-                let Some(idx) = st
-                    .mem
-                    .ram_inodes
-                    .iter()
-                    .position(|n| n.used && name_eq(&n.name, fname))
-                else {
-                    reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                    continue;
-                };
-                let node_copy = st.mem.ram_inodes[idx];
-                if let Err(e) = MemMounts::check_ram_write_perm(&node_copy, ext.sender_badge) {
-                    st.tally_err(e);
-                    reply_vfs_err(srv_ep_cap, reply_tok, e);
-                    continue;
-                }
-                let base_pos = if append { node_copy.len } else { 0 };
-                if base_pos + payload.len() > MAX_RAM_FILE_BYTES {
-                    reply_vfs_err(srv_ep_cap, reply_tok, ENOSPC);
-                    continue;
-                }
-                st.mem.ram_data[idx][base_pos..(base_pos + payload.len())].copy_from_slice(payload);
-                st.mem.ram_inodes[idx].len = base_pos + payload.len();
-                st.ops_ok = st.ops_ok.wrapping_add(1);
-                if reply_tok != 0 {
-                    let _ = sys_ipc_reply_inline(
-                        srv_ep_cap,
-                        reply_tok,
-                        pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
-                        [payload.len() as u64, st.mem.ram_inodes[idx].len as u64, 0, 0],
-                    );
-                }
-            }
-            VFS_OP_RENAME => {
-                let Ok((old_p, new_p)) = parse_two_paths(&rx[..rx_len]) else {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                    continue;
-                };
-                let ((mk_old, old_name), (mk_new, new_name)) =
-                    match (parse_file_path(old_p), parse_file_path(new_p)) {
-                        (Ok(a), Ok(b)) => (a, b),
-                        _ => {
-                            st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                            reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                            continue;
-                        }
-                    };
-                if mk_old == MountKind::Boot
-                    || mk_new == MountKind::Boot
-                    || ((mk_old == MountKind::Persist || mk_new == MountKind::Persist) && st.persist_ro)
-                {
-                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                    continue;
-                }
-                if mk_old != mk_new {
-                    reply_vfs_err(srv_ep_cap, reply_tok, EXDEV);
-                    continue;
-                }
-                let res = if mk_old == MountKind::Persist {
-                    if !st.persist.mounted {
-                        Err(ENOENT)
-                    } else {
-                        st.persist.rename(&mut st.ring, old_name, new_name, caller)
-                    }
-                } else {
-                    let r = st.mem.rename_ram(old_name, new_name, ext.sender_badge);
-                    if r.is_ok() {
-                        let mut lb = LineBuilder::new();
-                        lb.push_bytes(b"[DRY-VFS] RENAME old=");
-                        lb.push_bytes(old_name);
-                        lb.push_bytes(b" new=");
-                        lb.push_bytes(new_name);
-                        log_line(&lb);
-                    }
-                    r
-                };
-                match res {
-                    Ok(()) => {
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
-                        if reply_tok != 0 {
-                            let _ = sys_ipc_reply_inline(
-                                srv_ep_cap,
-                                reply_tok,
-                                pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                                [1, 0, 0, 0],
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        st.tally_err(e);
-                        reply_vfs_err(srv_ep_cap, reply_tok, e);
-                    }
-                }
-            }
-            VFS_OP_LINK => {
-                let Ok((src_p, dst_p)) = parse_two_paths(&rx[..rx_len]) else {
-                    st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                    continue;
-                };
-                let ((mk_src, src_name), (mk_dst, dst_name)) =
-                    match (parse_file_path(src_p), parse_file_path(dst_p)) {
-                        (Ok(a), Ok(b)) => (a, b),
-                        _ => {
-                            st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                            reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
-                            continue;
-                        }
-                    };
-                if mk_src != mk_dst {
-                    reply_vfs_err(srv_ep_cap, reply_tok, EXDEV);
-                    continue;
-                }
-                match mk_src {
-                    MountKind::Boot => {
-                        st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                        reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                    }
-                    MountKind::Persist => {
-                        if st.persist_ro {
-                            st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                            reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                            continue;
-                        }
-                        if !st.persist.mounted {
-                            reply_vfs_err(srv_ep_cap, reply_tok, ENOENT);
-                            continue;
-                        }
-                        match st.persist.link(&mut st.ring, src_name, dst_name, caller) {
-                            Ok(ino) => {
-                                st.ops_ok = st.ops_ok.wrapping_add(1);
-                                if reply_tok != 0 {
-                                    let _ = sys_ipc_reply_inline(
-                                        srv_ep_cap,
-                                        reply_tok,
-                                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                                        [ino as u64, 0, 0, 0],
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                st.tally_err(e);
-                                reply_vfs_err(srv_ep_cap, reply_tok, e);
-                            }
-                        }
-                    }
-                    MountKind::Ram => reply_vfs_err(srv_ep_cap, reply_tok, EXDEV),
-                }
-            }
-            VFS_OP_UNLINK => {
-                let (mk, fname) = match parse_file_path(&rx[..rx_len]) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        st.inval_rejects = st.inval_rejects.wrapping_add(1);
-                        reply_vfs_err(srv_ep_cap, reply_tok, e);
-                        continue;
-                    }
-                };
-                if mk == MountKind::Boot || (mk == MountKind::Persist && st.persist_ro) {
-                    st.rofs_rejects = st.rofs_rejects.wrapping_add(1);
-                    reply_vfs_err(srv_ep_cap, reply_tok, EROFS);
-                    continue;
-                }
-                let res = if mk == MountKind::Persist {
-                    if !st.persist.mounted {
-                        Err(ENOENT)
-                    } else {
-                        st.persist.unlink(&mut st.ring, fname, caller)
-                    }
-                } else {
-                    let r = st.mem.unlink_ram(fname, ext.sender_badge);
-                    if r.is_ok() {
-                        let mut lb = LineBuilder::new();
-                        lb.push_bytes(b"[DRY-VFS] UNLINK path=/ram/");
-                        lb.push_bytes(fname);
-                        log_line(&lb);
-                    }
-                    r
-                };
-                match res {
-                    Ok(()) => {
-                        st.ops_ok = st.ops_ok.wrapping_add(1);
-                        if reply_tok != 0 {
-                            let _ = sys_ipc_reply_inline(
-                                srv_ep_cap,
-                                reply_tok,
-                                pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                                [1, 0, 0, 0],
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        st.tally_err(e);
-                        reply_vfs_err(srv_ep_cap, reply_tok, e);
                     }
                 }
             }
@@ -819,16 +585,27 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         srv_ep_cap,
                         reply_tok,
                         pack_msg_tag(IPC_OP_PONG, 0, 4, 0),
-                        [st.ops_ok, st.rofs_rejects, st.unauth_rejects, st.inval_rejects],
+                        [
+                            st.stats.ops_ok,
+                            st.stats.rofs_rejects,
+                            st.stats.unauth_rejects,
+                            st.stats.inval_rejects,
+                        ],
                     );
                 }
             }
             IPC_OP_EXIT_CLEAN if ext.sender_badge != BADGE_SUPERVISOR => {
                 // `AUD-U6`: only the root supervisor may shut the VFS down.
-                st.unauth_rejects = st.unauth_rejects.wrapping_add(1);
+                st.stats.unauth_rejects = st.stats.unauth_rejects.wrapping_add(1);
                 reply_vfs_err(srv_ep_cap, reply_tok, EPERM);
             }
             IPC_OP_EXIT_CLEAN => {
+                if st.bin_tar_cap != 0 {
+                    let _ = sys_vspace_map(st.bin_tar_cap, VFS_BIN_TAR_VADDR, VSPACE_MAP_OP_UNMAP_2M);
+                    let _ = sys_cap_revoke(st.bin_tar_cap, 1);
+                    st.bin_tar_cap = 0;
+                    st.bin_tar_len = 0;
+                }
                 if st.persist.mounted {
                     let _ = st.ring.flush();
                     st.persist.mounted = false;
@@ -836,13 +613,13 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                 st.ring.teardown();
                 let mut lb = LineBuilder::new();
                 lb.push_bytes(b"[DRY-VFS-STATS] ops_ok=");
-                lb.push_u64(st.ops_ok);
+                lb.push_u64(st.stats.ops_ok);
                 lb.push_bytes(b" rofs_rej=");
-                lb.push_u64(st.rofs_rejects);
+                lb.push_u64(st.stats.rofs_rejects);
                 lb.push_bytes(b" unauth_rej=");
-                lb.push_u64(st.unauth_rejects);
+                lb.push_u64(st.stats.unauth_rejects);
                 lb.push_bytes(b" inval_rej=");
-                lb.push_u64(st.inval_rejects);
+                lb.push_u64(st.stats.inval_rejects);
                 lb.push_bytes(b" persist_commits=");
                 lb.push_u64(st.persist.commits);
                 log_line(&lb);
@@ -851,13 +628,13 @@ pub extern "C" fn _start(srv_ep_cap: u64, _arg1: u64) -> ! {
                         srv_ep_cap,
                         reply_tok,
                         pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
-                        [st.ops_ok, 0, 0, 0],
+                        [st.stats.ops_ok, 0, 0, 0],
                     );
                 }
                 sys_exit(0);
             }
             _ => {
-                st.inval_rejects = st.inval_rejects.wrapping_add(1);
+                st.stats.inval_rejects = st.stats.inval_rejects.wrapping_add(1);
                 reply_vfs_err(srv_ep_cap, reply_tok, EINVAL);
             }
         }

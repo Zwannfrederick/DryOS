@@ -17,8 +17,10 @@ use core::mem::{offset_of, size_of};
 
 use crate::ioring::IoRingClient;
 use crate::vault_crypto::{crc32_ieee, crc32_update};
+use crate::vfs_mem::parent_dir_of;
 use crate::vfs_proto::{
-    VfsDirEntry, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY, VFS_MAX_NAME_LEN,
+    VfsDirEntry, VFS_FLAG_DIR, VFS_FLAG_EXTENT, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY,
+    VFS_MAX_NAME_LEN,
 };
 use crate::{
     BADGE_SUPERVISOR, BADGE_VFS_DEV_WS, BADGE_VFS_VAULT_ROOT, EEXIST, EINVAL, ENOENT, ENOSPC,
@@ -28,7 +30,8 @@ use crate::{
 pub const DRYFS_MAGIC: [u8; 8] = *b"DRYFS_V1";
 pub const PERSIST_MAX_SLOTS: usize = 24;
 pub const PERSIST_MAX_FILE_BYTES: usize = 4096;
-const DATA_START_BLOCK: u32 = 2;
+pub const PERSIST_MAX_EXTENT_BYTES: usize = 512 * 1024;
+pub const DATA_START_BLOCK: u32 = 2;
 
 const PERSIST_README_TEXT: &[u8] = b"DRY OS /persist Crash-Safe VirtIO-Blk Filesystem (DRYFS_v1)\n-----------------------------------------------------------\nSTATUS: Persistent CoW Block Storage (Dual A/B Superblocks + CRC32)\nBARRIER: Every commit enforces VIRTIO_BLK_T_FLUSH durability.\nSECURITY: Mandatory ADR-007 SecLabel & INV-SEC-05 link rules active.\n";
 
@@ -208,6 +211,8 @@ pub struct PersistMount {
     pub staging_sb: DryFsSuperblock,
     pub scratch_4k: [u8; 4096],
     pub io_buf_4k: [u8; 4096],
+    pub idx_buf_4k: [u8; 4096],
+    pub cow_bm: [u64; 64],
     pub commits: u64,
 }
 
@@ -221,12 +226,14 @@ impl PersistMount {
             staging_sb: DryFsSuperblock::empty(),
             scratch_4k: [0u8; 4096],
             io_buf_4k: [0u8; 4096],
+            idx_buf_4k: [0u8; 4096],
+            cow_bm: [0u64; 64],
             commits: 0,
         }
     }
 
     #[inline]
-    fn stage_from_committed(&mut self) {
+    pub(crate) fn stage_from_committed(&mut self) {
         // SAFETY: `self.sb` and `self.staging_sb` are disjoint `#[repr(C)]` POD fields in `.bss`.
         unsafe {
             core::ptr::copy_nonoverlapping(&raw const self.sb, &raw mut self.staging_sb, 1);
@@ -241,7 +248,7 @@ impl PersistMount {
         }
     }
 
-    fn set_name(dst: &mut [u8; 36], name: &[u8]) {
+    pub(crate) fn set_name(dst: &mut [u8; 36], name: &[u8]) {
         *dst = [0u8; 36];
         let n = name.len().min(VFS_MAX_NAME_LEN);
         dst[..n].copy_from_slice(&name[..n]);
@@ -256,10 +263,12 @@ impl PersistMount {
         ring.read_block_4k(1, &mut self.io_buf_4k)?;
         DryFsSuperblock::decode_into(&self.io_buf_4k, &mut self.staging_sb);
 
-        let ok_a = self.sb.is_valid(max_blocks)
-            && Self::verify_data_blocks_buf(ring, &self.sb, &mut self.scratch_4k);
-        let ok_b = self.staging_sb.is_valid(max_blocks)
-            && Self::verify_data_blocks_buf(ring, &self.staging_sb, &mut self.scratch_4k);
+        let sb_a = self.sb;
+        let sb_b = self.staging_sb;
+        let ok_a = sb_a.is_valid(max_blocks)
+            && Self::verify_data_blocks_buf(ring, &sb_a, &mut self.scratch_4k, &mut self.idx_buf_4k);
+        let ok_b = sb_b.is_valid(max_blocks)
+            && Self::verify_data_blocks_buf(ring, &sb_b, &mut self.scratch_4k, &mut self.idx_buf_4k);
 
         self.recovered_fallback = false;
         match (ok_a, ok_b) {
@@ -302,9 +311,16 @@ impl PersistMount {
         ring: &mut IoRingClient,
         sb: &DryFsSuperblock,
         scratch: &mut [u8; 4096],
+        idx_buf: &mut [u8; 4096],
     ) -> bool {
         for e in &sb.entries {
             if e.used == 0 || e.size_bytes == 0 {
+                continue;
+            }
+            if (e.vfs_flags & VFS_FLAG_EXTENT) != 0 {
+                if !Self::verify_extent_entry(ring, sb, e, idx_buf, scratch) {
+                    return false;
+                }
                 continue;
             }
             if e.data_block_4k < DATA_START_BLOCK || e.data_block_4k >= sb.total_blocks_4k {
@@ -362,28 +378,7 @@ impl PersistMount {
         Ok(())
     }
 
-    fn alloc_cow_block(&self) -> Result<u32, isize> {
-        let usable = self.staging_sb.total_blocks_4k.saturating_sub(DATA_START_BLOCK);
-        if usable == 0 {
-            return Err(ENOSPC);
-        }
-        for step in 0..usable {
-            let blk = DATA_START_BLOCK
-                + ((self.staging_sb.alloc_rover.saturating_sub(DATA_START_BLOCK) + step) % usable);
-            let in_old = self.sb.entries.iter().any(|e| e.used != 0 && e.data_block_4k == blk);
-            let in_new = self
-                .staging_sb
-                .entries
-                .iter()
-                .any(|e| e.used != 0 && e.data_block_4k == blk);
-            if !in_old && !in_new {
-                return Ok(blk);
-            }
-        }
-        Err(ENOSPC)
-    }
-
-    fn commit_staged(&mut self, ring: &mut IoRingClient) -> Result<(), isize> {
+    pub(crate) fn commit_staged(&mut self, ring: &mut IoRingClient) -> Result<(), isize> {
         let mut active = 0u32;
         for e in &self.staging_sb.entries {
             if e.used != 0 {
@@ -458,25 +453,7 @@ impl PersistMount {
     }
 
     pub fn list(&self, start_idx: usize, out: &mut [VfsDirEntry]) -> (usize, usize) {
-        let mut batch_n = 0usize;
-        let mut total_n = 0usize;
-        for e in &self.sb.entries {
-            if e.used == 0 {
-                continue;
-            }
-            if total_n >= start_idx && batch_n < out.len() {
-                out[batch_n] = VfsDirEntry {
-                    inode: e.inode,
-                    size_bytes: e.size_bytes,
-                    flags: e.vfs_flags,
-                    owner_comp: e.owner_comp,
-                    name: e.name,
-                };
-                batch_n += 1;
-            }
-            total_n += 1;
-        }
-        (batch_n, total_n)
+        self.list_sub(b"", start_idx, out).unwrap_or((0, 0))
     }
 
     pub fn find_idx(&self, name: &[u8]) -> Option<usize> {
@@ -497,9 +474,16 @@ impl PersistMount {
         let idx = self.find_idx(name).ok_or(ENOENT)?;
         let entry = self.sb.entries[idx];
         self.check_read_perm(&entry, caller)?;
+        if (entry.vfs_flags & VFS_FLAG_DIR) != 0 && !dst.is_empty() {
+            return Err(EINVAL);
+        }
         let total = entry.size_bytes as usize;
         if total == 0 || offset >= total || dst.is_empty() {
             return Ok((0, total, entry.vfs_flags, entry.inode));
+        }
+        if (entry.vfs_flags & VFS_FLAG_EXTENT) != 0 {
+            let n = self.read_extent_slice(ring, &entry, offset, dst)?;
+            return Ok((n, total, entry.vfs_flags, entry.inode));
         }
         ring.read_block_4k(entry.data_block_4k, &mut self.scratch_4k)?;
         let end = (offset + dst.len()).min(total);
@@ -517,6 +501,11 @@ impl PersistMount {
     ) -> Result<u32, isize> {
         if self.find_idx(name).is_some() {
             return Err(EEXIST);
+        }
+        if let Some(parent) = parent_dir_of(name) {
+            if !self.has_dir(parent) {
+                return Err(ENOENT);
+            }
         }
         self.stage_from_committed();
         let slot_idx = self
@@ -540,7 +529,7 @@ impl PersistMount {
         entry.sec_flags = sec_flags;
         entry.nlink = 1;
         entry.inode = ino;
-        entry.vfs_flags = req_vfs_flags & VFS_FLAG_PRIVATE;
+        entry.vfs_flags = req_vfs_flags & (VFS_FLAG_PRIVATE | VFS_FLAG_DIR);
         entry.owner_comp = if caller.is_supervisor { 0 } else { caller.comp_id };
         Self::set_name(&mut entry.name, name);
         self.staging_sb.entries[slot_idx] = entry;
@@ -559,7 +548,16 @@ impl PersistMount {
     ) -> Result<(usize, usize), isize> {
         let idx = self.find_idx(name).ok_or(ENOENT)?;
         let cur = self.sb.entries[idx];
+        if (cur.vfs_flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
         self.check_write_perm(&cur, caller)?;
+
+        if (append && ((cur.vfs_flags & VFS_FLAG_EXTENT) != 0 || (cur.size_bytes as usize) + payload.len() > PERSIST_MAX_FILE_BYTES))
+            || (!append && payload.len() > PERSIST_MAX_FILE_BYTES)
+        {
+            return self.write_full(ring, name, caller, payload, append);
+        }
 
         self.io_buf_4k.fill(0);
         let base_len = if append && cur.size_bytes > 0 {
@@ -575,11 +573,12 @@ impl PersistMount {
         self.io_buf_4k[base_len..new_len].copy_from_slice(payload);
 
         self.stage_from_committed();
+        self.rebuild_cow_bitmap(ring);
+        let max_blocks = self.staging_sb.total_blocks_4k;
         let (new_blk, new_crc) = if new_len > 0 {
-            let blk = self.alloc_cow_block()?;
+            let blk = self.alloc_from_bm(max_blocks)?;
             ring.write_block_4k(blk, &self.io_buf_4k)?;
             ring.flush()?;
-            self.staging_sb.alloc_rover = blk.wrapping_add(1);
             (blk, crc32_ieee(&self.io_buf_4k[..new_len]))
         } else {
             (0, 0)
@@ -591,6 +590,7 @@ impl PersistMount {
                 e.size_bytes = new_len as u32;
                 e.data_block_4k = new_blk;
                 e.data_crc32 = new_crc;
+                e.vfs_flags &= !VFS_FLAG_EXTENT;
             }
         }
         self.commit_staged(ring)?;
@@ -605,10 +605,18 @@ impl PersistMount {
         caller: VfsCallerCtx,
     ) -> Result<(), isize> {
         let idx = self.find_idx(old_name).ok_or(ENOENT)?;
+        let cur = self.sb.entries[idx];
+        if (cur.vfs_flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
         if self.find_idx(new_name).is_some() {
             return Err(EEXIST);
         }
-        let cur = self.sb.entries[idx];
+        if let Some(parent) = parent_dir_of(new_name) {
+            if !self.has_dir(parent) {
+                return Err(ENOENT);
+            }
+        }
         self.check_write_perm(&cur, caller)?;
 
         self.stage_from_committed();
@@ -630,6 +638,14 @@ impl PersistMount {
             return Err(EEXIST);
         }
         let src = self.sb.entries[src_idx];
+        if (src.vfs_flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
+        if let Some(parent) = parent_dir_of(dst_name) {
+            if !self.has_dir(parent) {
+                return Err(ENOENT);
+            }
+        }
         self.check_write_perm(&src, caller)?;
         if (src.sec_flags & SEC_FLAG_NO_DELEGATE) != 0 && caller.comp_id != src.owner_comp {
             return Err(EPERM);
@@ -664,6 +680,9 @@ impl PersistMount {
     ) -> Result<(), isize> {
         let idx = self.find_idx(name).ok_or(ENOENT)?;
         let cur = self.sb.entries[idx];
+        if (cur.vfs_flags & VFS_FLAG_DIR) != 0 {
+            return Err(EINVAL);
+        }
         self.check_write_perm(&cur, caller)?;
 
         self.stage_from_committed();

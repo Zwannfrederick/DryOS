@@ -5,6 +5,7 @@
 use crate::action::{AppId, DesktopAction};
 use crate::shell::{LineBuilder, ShellEngine};
 use crate::shell_sys_cmds::exec_sys_diag_command;
+use crate::shell_vfs_ops::{resolve_path, try_exec_vfs_tree_cmd};
 use crate::surface::{STYLE_ACCENT, STYLE_DEFAULT, STYLE_MUTED, STYLE_OK, STYLE_WARN};
 use crate::vault_proto::{
     vault_change_passphrase, vault_get_sealed_ro_status_cap, vault_lock_and_revoke,
@@ -12,7 +13,8 @@ use crate::vault_proto::{
 };
 use crate::vfs_proto::{
     vfs_create_file, vfs_link_file, vfs_list_dir, vfs_read_file, vfs_sync, vfs_unlink_file,
-    vfs_write_small, VfsDirEntry, VFS_FLAG_PERSISTENT, VFS_FLAG_PRIVATE, VFS_FLAG_READONLY,
+    vfs_write_small, VfsDirEntry, VFS_FLAG_DIR, VFS_FLAG_EXECUTABLE, VFS_FLAG_PERSISTENT,
+    VFS_FLAG_PRIVATE, VFS_FLAG_READONLY,
 };
 use crate::{
     msg_tag_label, pack_msg_tag, sys_cap_query, sys_cap_revoke, sys_ipc_call_inline,
@@ -89,13 +91,33 @@ pub fn exec_storage_vault_command(
     vault_cap_slot: &mut u64,
     engine: &mut ShellEngine,
 ) -> Option<DesktopAction> {
+    if try_exec_vfs_tree_cmd(verb, rest, sup_ep_cap, vfs_cap_slot, engine) {
+        return None;
+    }
     match verb {
         b"ls" => {
             let Some(vcap) = ensure_vfs_cap(sup_ep_cap, vfs_cap_slot) else {
                 engine.push_line(b"ls: VFS service unavailable", STYLE_WARN);
                 return None;
             };
-            let path = if rest.is_empty() { b"/persist" } else { rest };
+            let mut norm = [0u8; 96];
+            let nlen = if rest.is_empty() {
+                let src = if engine.cwd_bytes() == b"/" {
+                    b"/persist"
+                } else {
+                    engine.cwd_bytes()
+                };
+                let n = src.len().min(norm.len());
+                norm[..n].copy_from_slice(&src[..n]);
+                n
+            } else {
+                let Some(n) = resolve_path(engine.cwd_bytes(), rest, &mut norm) else {
+                    engine.push_line(b"ls: invalid path", STYLE_WARN);
+                    return None;
+                };
+                n
+            };
+            let path = &norm[..nlen];
             let mut entries = [VfsDirEntry::EMPTY; 24];
             match vfs_list_dir(vcap, path, &mut entries) {
                 Ok((count, mflags)) => {
@@ -104,6 +126,8 @@ pub fn exec_storage_vault_command(
                     hdr.push_bytes(path);
                     hdr.push_bytes(if (mflags & VFS_FLAG_PERSISTENT) != 0 {
                         b" [DRYFS_v1 PERSISTENT CoW]"
+                    } else if (mflags & VFS_FLAG_EXECUTABLE) != 0 {
+                        b" [BIN RO]"
                     } else if (mflags & VFS_FLAG_READONLY) != 0 {
                         b" [BOOT RO]"
                     } else {
@@ -118,10 +142,16 @@ pub fn exec_storage_vault_command(
                         lb.push_padded(e.name_bytes(), 24);
                         lb.push_u64(e.size_bytes as u64);
                         lb.push_bytes(b" B");
+                        if (e.flags & VFS_FLAG_DIR) != 0 {
+                            lb.push_bytes(b" [DIR]");
+                        }
                         if (e.flags & VFS_FLAG_PRIVATE) != 0 {
                             lb.push_bytes(b" [PRIV]");
                         } else if (e.flags & VFS_FLAG_READONLY) != 0 {
                             lb.push_bytes(b" [RO]");
+                        }
+                        if (e.flags & VFS_FLAG_EXECUTABLE) != 0 {
+                            lb.push_bytes(b" [EXEC]");
                         }
                         engine.push_line(lb.as_bytes(), STYLE_DEFAULT);
                     }
@@ -150,8 +180,14 @@ pub fn exec_storage_vault_command(
                 engine.push_line(b"cat: VFS unavailable", STYLE_WARN);
                 return None;
             };
+            let mut norm = [0u8; 96];
+            let Some(nlen) = resolve_path(engine.cwd_bytes(), rest, &mut norm) else {
+                engine.push_line(b"cat: invalid path", STYLE_WARN);
+                return None;
+            };
+            let path = &norm[..nlen];
             let mut buf = [0u8; 2048];
-            match vfs_read_file(vcap, rest, 0, &mut buf) {
+            match vfs_read_file(vcap, path, 0, &mut buf) {
                 Ok((got, total)) => {
                     let slice = &buf[..got];
                     let mut start = 0usize;
@@ -169,7 +205,7 @@ pub fn exec_storage_vault_command(
                     }
                     let mut slb = LineBuilder::new();
                     slb.push_bytes(b"[DRY-SHELL] CMD=cat path=");
-                    slb.push_bytes(rest);
+                    slb.push_bytes(path);
                     slb.push_bytes(b" bytes=");
                     slb.push_u64(total as u64);
                     slb.push_bytes(b" text=\"");
@@ -187,7 +223,7 @@ pub fn exec_storage_vault_command(
                     engine.push_line(lb.as_bytes(), STYLE_WARN);
                     let mut slb = LineBuilder::new();
                     slb.push_bytes(b"[DRY-SHELL] CMD=cat path=");
-                    slb.push_bytes(rest);
+                    slb.push_bytes(path);
                     slb.push_bytes(b" err=");
                     slb.push_i64(code as i64);
                     emit_dbg(&slb);
@@ -196,8 +232,8 @@ pub fn exec_storage_vault_command(
             None
         }
         b"write" => {
-            let (path, payload) = split_first_token(rest);
-            if path.is_empty() || payload.is_empty() {
+            let (raw_path, payload) = split_first_token(rest);
+            if raw_path.is_empty() || payload.is_empty() {
                 engine.push_line(b"Usage: write </persist/name|/ram/name> <text>", STYLE_WARN);
                 let mut slb = LineBuilder::new();
                 slb.push_bytes(b"[DRY-SHELL] CMD=write usage_err rest=\"");
@@ -211,6 +247,12 @@ pub fn exec_storage_vault_command(
                 let _ = sys_write_debug(b"[DRY-SHELL] CMD=write err=no_vfs_cap\n");
                 return None;
             };
+            let mut norm = [0u8; 96];
+            let Some(nlen) = resolve_path(engine.cwd_bytes(), raw_path, &mut norm) else {
+                engine.push_line(b"write: invalid path", STYLE_WARN);
+                return None;
+            };
+            let path = &norm[..nlen];
             match vfs_create_file(vcap, path, 0) {
                 Ok(_) | Err(EEXIST) => {}
                 Err(code) => {
@@ -269,15 +311,21 @@ pub fn exec_storage_vault_command(
                 engine.push_line(b"rm: VFS unavailable", STYLE_WARN);
                 return None;
             };
-            match vfs_unlink_file(vcap, rest) {
+            let mut norm = [0u8; 96];
+            let Some(nlen) = resolve_path(engine.cwd_bytes(), rest, &mut norm) else {
+                engine.push_line(b"rm: invalid path", STYLE_WARN);
+                return None;
+            };
+            let path = &norm[..nlen];
+            match vfs_unlink_file(vcap, path) {
                 Ok(()) => {
                     let mut lb = LineBuilder::new();
                     lb.push_bytes(b"Unlinked ");
-                    lb.push_bytes(rest);
+                    lb.push_bytes(path);
                     engine.push_line(lb.as_bytes(), STYLE_OK);
                     let mut slb = LineBuilder::new();
                     slb.push_bytes(b"[DRY-SHELL] CMD=rm path=");
-                    slb.push_bytes(rest);
+                    slb.push_bytes(path);
                     slb.push_bytes(b" ok=true");
                     emit_dbg(&slb);
                 }
@@ -291,8 +339,8 @@ pub fn exec_storage_vault_command(
             None
         }
         b"ln" => {
-            let (src, dst) = split_first_token(rest);
-            if src.is_empty() || dst.is_empty() {
+            let (raw_src, raw_dst) = split_first_token(rest);
+            if raw_src.is_empty() || raw_dst.is_empty() {
                 engine.push_line(b"Usage: ln <src_path> <dst_path>", STYLE_WARN);
                 return None;
             }
@@ -300,6 +348,15 @@ pub fn exec_storage_vault_command(
                 engine.push_line(b"ln: VFS unavailable", STYLE_WARN);
                 return None;
             };
+            let (mut sbuf, mut dbuf) = ([0u8; 96], [0u8; 96]);
+            let (Some(slen), Some(dlen)) = (
+                resolve_path(engine.cwd_bytes(), raw_src, &mut sbuf),
+                resolve_path(engine.cwd_bytes(), raw_dst, &mut dbuf),
+            ) else {
+                engine.push_line(b"ln: invalid path", STYLE_WARN);
+                return None;
+            };
+            let (src, dst) = (&sbuf[..slen], &dbuf[..dlen]);
             match vfs_link_file(vcap, src, dst) {
                 Ok(ino) => {
                     let mut lb = LineBuilder::new();
