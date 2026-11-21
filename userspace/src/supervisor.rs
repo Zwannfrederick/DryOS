@@ -7,6 +7,7 @@
 
 use crate::abi_ext::{
     HWCHECK_MODE_DESKTOP_SAFE, HWCHECK_MODE_RECOVERY, HWCHECK_MODE_SAFE, IPC_OP_SUP_EXEC_VFS,
+    IPC_OP_SUP_GET_NET_CAP,
 };
 use crate::action::{AppId, DesktopAction};
 use crate::hwdiag::mgr::{DiagManager, DIAG_SCRATCH_CAP};
@@ -26,6 +27,7 @@ pub use crate::sup_ctx::AppState;
 use crate::sup_ctx::SupervisorCtx;
 use crate::sup_exec::handle_exec_vfs_ipc;
 use crate::sup_hw_services::{handle_hw_query_ipc, init_hw_services_and_persist, HwInitCaps};
+use crate::sup_net::{handle_get_net_cap_ipc, SupNetState};
 use crate::sup_nv_island::{
     handle_nv_supervisor_ipc, init_nvidia_island_service, teardown_nvidia_island_service,
 };
@@ -194,6 +196,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
             None
         };
     let mut lx_drm_live: Option<LxDrmLiveSession> = None;
+    let mut sup_net = SupNetState::new();
     let mut restarts = 0u64;
     let mut sup_rx = [0u8; MAX_IPC_EXTRA_BYTES];
 
@@ -698,6 +701,28 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     sys.tsc_mhz,
                 );
             }
+            crate::abi_ext::IPC_OP_SUP_LINUX_RUN => {
+                crate::sup_exec::handle_linux_run_ipc(
+                    sup_ep,
+                    reply_tok,
+                    ext.sender_badge,
+                    ctx.vfs_ep,
+                    ctx.vfs_sup_cap,
+                    &sup_rx[..rx_len],
+                    sys.tsc_mhz,
+                );
+            }
+            IPC_OP_SUP_GET_NET_CAP => {
+                handle_get_net_cap_ipc(
+                    sup_ep,
+                    reply_tok,
+                    ext.sender_badge,
+                    boot_info_addr,
+                    boot,
+                    ctx.vfs_sup_cap,
+                    &mut sup_net,
+                );
+            }
             IPC_OP_SUP_SHUTDOWN => {
                 if !is_action_badge_authorized(ext.sender_badge) {
                     ctx.unauth_rejects = ctx.unauth_rejects.wrapping_add(1);
@@ -784,6 +809,7 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
         teardown_live_gpu(live, disp_sup_cap);
     }
     teardown_nvidia_island_service();
+    sup_net.teardown();
 
     if let Err(code) = teardown_p3_core_services_with_hw(
         ctx.input_sup_cap,

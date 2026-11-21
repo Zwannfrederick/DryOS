@@ -109,6 +109,14 @@ path = "src/bin/dry_nv_island.rs"
 name = "dry-probe"
 path = "src/bin/dry_probe.rs"
 
+[[bin]]
+name = "dry-net"
+path = "src/bin/dry_net.rs"
+
+[[bin]]
+name = "dry-linux-abi"
+path = "src/bin/dry_linux_abi.rs"
+
 [profile.dev]
 panic = "abort"
 

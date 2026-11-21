@@ -16,8 +16,9 @@ use crate::cspace::{cspace_transfer, insert_root_cap, with_pinned_cap};
 use crate::ipc::{check_blocking_ipc_allowed, map_cap_err_to_sys};
 use crate::limine::{find_boot_module_index, get_boot_module_by_index};
 use crate::proc::fault::{bind_fault_endpoint, check_fault_ep_cap, SPAWN_FLAG_FAULT_EP};
+use crate::proc::redirect::SPAWN_FLAG_SYSCALL_REDIRECT;
 use crate::proc::{
-    kill_process, reclaim_process, slot_ref, spawn_elf_process_with, ProcError, ProcessHandle,
+    kill_process, reclaim_process, slot_ref, spawn_elf_process_core, ProcError, ProcessHandle,
     ProcessOutcome, ProcessState, ReclaimStatus, SpawnOptions, MAX_PROCESSES,
 };
 use crate::sched::{
@@ -115,11 +116,22 @@ pub fn sys_proc_spawn(
         _ => return Err(SysError::Perm),
     };
     let child_label = SecLabel::new(child_domain, child_flags, child_comp, 1);
-    // `FaultEndpoint`: `grant_cap1` stays in the parent's `CSpace` and is bound, not transferred.
-    let fault_ep = if (domain_and_comp & SPAWN_FLAG_FAULT_EP) != 0 {
+    let want_fault_ep = (domain_and_comp & SPAWN_FLAG_FAULT_EP) != 0;
+    let want_redirect_ep = (domain_and_comp & SPAWN_FLAG_SYSCALL_REDIRECT) != 0;
+    if want_fault_ep && want_redirect_ep {
+        return Err(SysError::Inval);
+    }
+    let fault_ep = if want_fault_ep {
         check_fault_ep_cap(parent_cspace, parent_subj, CapPtr(grant_cap1_raw))
             .map_err(map_cap_err_to_sys)?;
         Some(CapPtr(grant_cap1_raw))
+    } else {
+        None
+    };
+    let redirect_ep = if want_redirect_ep {
+        check_fault_ep_cap(parent_cspace, parent_subj, CapPtr(grant_cap1_raw))
+            .map_err(map_cap_err_to_sys)?;
+        Some((parent_cspace, parent_subj, CapPtr(grant_cap1_raw)))
     } else {
         None
     };
@@ -179,7 +191,7 @@ pub fn sys_proc_spawn(
                 }
                 _ => return Err(CapError::WrongObjectKind),
             };
-            match spawn_elf_process_with(
+            match spawn_elf_process_core(
                 elf_bytes,
                 SpawnOptions {
                     subj_label: child_label,
@@ -190,6 +202,7 @@ pub fn sys_proc_spawn(
                     user_fs_base: 0,
                     user_gs_base: 0,
                 },
+                redirect_ep,
                 |child_cs, _, _, _| {
                     let arg0 = if grant_cap0_raw != 0 {
                         let rights0 = CapRights((grant0_rights_badge & 0xffff) as u16);
@@ -208,7 +221,7 @@ pub fn sys_proc_spawn(
                     } else {
                         0
                     };
-                    let arg1 = if grant_cap1_raw != 0 && fault_ep.is_none() {
+                    let arg1 = if grant_cap1_raw != 0 && fault_ep.is_none() && redirect_ep.is_none() {
                         let rights1 = CapRights((grant1_rights & 0xffff) as u16);
                         let rcpt1 = cspace_transfer(
                             parent_cspace,

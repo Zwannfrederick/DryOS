@@ -6,7 +6,7 @@ use crate::abi_ext::IPC_OP_SUP_EXEC_VFS;
 use crate::persist_fs::PERSIST_MAX_EXTENT_BYTES;
 use crate::shell::{LineBuilder, ShellEngine};
 use crate::shell_ext::ensure_vfs_cap;
-use crate::surface::{STYLE_OK, STYLE_WARN};
+use crate::surface::{STYLE_DEFAULT, STYLE_OK, STYLE_WARN};
 use crate::vfs_mem::normalize_path;
 use crate::vfs_proto::{
     sys_ipc_call_extra, vfs_create_file, vfs_list_dir, vfs_mkdir, vfs_read_file, vfs_rename_file,
@@ -334,6 +334,77 @@ pub fn try_exec_vfs_tree_cmd(
                 Err(code) => {
                     let mut lb = LineBuilder::new();
                     lb.push_bytes(b"exec IPC error: ");
+                    lb.push_i64(code as i64);
+                    engine.push_line(lb.as_bytes(), STYLE_WARN);
+                }
+            }
+            true
+        }
+        b"linux-run" => {
+            if rest.is_empty() {
+                engine.push_line(b"Usage: linux-run </bin/prog.elf|/ram/prog.elf>", STYLE_WARN);
+                return true;
+            }
+            let mut norm = [0u8; 96];
+            let Some(nlen) = resolve_path(engine.cwd_bytes(), rest, &mut norm) else {
+                engine.push_line(b"linux-run: invalid path", STYLE_WARN);
+                return true;
+            };
+            let target = &norm[..nlen];
+            let mut rx = [0u8; MAX_IPC_EXTRA_BYTES];
+            match sys_ipc_call_extra(
+                sup_ep_cap,
+                crate::abi_ext::IPC_OP_SUP_LINUX_RUN,
+                [0; 4],
+                target,
+                &mut rx,
+                0,
+            ) {
+                Ok((tag, rx_len, rmrs)) if msg_tag_label(tag) == IPC_OP_PONG => {
+                    let rc = (rmrs[0] as i64) as i32;
+                    let pid = rmrs[1];
+                    let sc = rmrs[2];
+                    if rx_len > 0 {
+                        engine.push_line(&rx[..rx_len.min(128)], STYLE_DEFAULT);
+                    }
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"Linux ELF ");
+                    lb.push_bytes(target);
+                    lb.push_bytes(b" (pid=");
+                    lb.push_u64(pid);
+                    lb.push_bytes(b", rc=");
+                    lb.push_i64(rc as i64);
+                    lb.push_bytes(b", syscalls=");
+                    lb.push_u64(sc);
+                    lb.push_byte(b')');
+                    engine.push_line(lb.as_bytes(), if rc == 42 || rc == 0 { STYLE_OK } else { STYLE_WARN });
+
+                    let mut slb = LineBuilder::new();
+                    slb.push_bytes(b"[DRY-SHELL] CMD=linux-run path=");
+                    slb.push_bytes(target);
+                    slb.push_bytes(b" rc=");
+                    slb.push_i64(rc as i64);
+                    slb.push_bytes(b" pid=");
+                    slb.push_u64(pid);
+                    slb.push_bytes(b" syscalls=");
+                    slb.push_u64(sc);
+                    slb.push_bytes(b" out=\"");
+                    for &b in &rx[..rx_len.min(80)] {
+                        slb.push_byte(if (0x20..=0x7e).contains(&b) { b } else { b'.' });
+                    }
+                    slb.push_byte(b'"');
+                    emit_dbg(&slb);
+                }
+                Ok((_, _, rmrs)) => {
+                    let err = (rmrs[0] as i64) as isize;
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"linux-run error: ");
+                    lb.push_i64(err as i64);
+                    engine.push_line(lb.as_bytes(), STYLE_WARN);
+                }
+                Err(code) => {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"linux-run IPC error: ");
                     lb.push_i64(code as i64);
                     engine.push_line(lb.as_bytes(), STYLE_WARN);
                 }

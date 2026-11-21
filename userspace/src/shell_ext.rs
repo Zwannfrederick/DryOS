@@ -570,7 +570,20 @@ pub fn exec_storage_vault_command(
             None
         }
         _ => {
-            let _ = exec_sys_diag_command(sup_ep_cap, verb, rest, engine);
+            static CACHED_NET_CAP: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let mut net_cap = CACHED_NET_CAP.load(core::sync::atomic::Ordering::Relaxed);
+            if !crate::shell_net_cmds::try_exec_net_cmd(
+                verb,
+                rest,
+                sup_ep_cap,
+                &mut net_cap,
+                engine,
+            ) {
+                let _ = exec_sys_diag_command(sup_ep_cap, verb, rest, engine);
+            } else {
+                CACHED_NET_CAP.store(net_cap, core::sync::atomic::Ordering::Relaxed);
+            }
             None
         }
     }

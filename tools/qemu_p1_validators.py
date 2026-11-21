@@ -24,10 +24,18 @@ CHAR_TO_QCODE: dict[str, list[str]] = {
     **{chr(c): [chr(c)] for c in range(ord("0"), ord("9") + 1)},
     " ": ["spc"],
     "-": ["minus"],
+    "_": ["shift", "minus"],
     "=": ["equal"],
+    "+": ["shift", "equal"],
     "/": ["slash"],
     ".": ["dot"],
+    ">": ["shift", "dot"],
     ",": ["comma"],
+    "<": ["shift", "comma"],
+    ";": ["semicolon"],
+    ":": ["shift", "semicolon"],
+    "\\": ["backslash"],
+    "|": ["shift", "backslash"],
 }
 
 

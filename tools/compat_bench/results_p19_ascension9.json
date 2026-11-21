@@ -4,12 +4,24 @@
     "app_cycles": 5,
     "crash_cycles": 2,
     "leaked_frames": 0,
-    "wall_time_sec": 14.947
+    "wall_time_sec": 10.622
   },
   "p19b": {
     "probe_bytes": 12792,
     "persist_exec_ok": true,
     "leaked_frames": 0,
-    "wall_time_sec": 10.604
+    "wall_time_sec": 10.15
+  },
+  "p19c": {
+    "dns_port": 32905,
+    "http_port": 32943,
+    "leaked_frames": 0,
+    "wall_time_sec": 4.553
+  },
+  "p19d": {
+    "rc": 42,
+    "syscalls": 13,
+    "leaked_frames": 0,
+    "wall_time_sec": 3.738
   }
 }

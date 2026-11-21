@@ -493,6 +493,10 @@ extern "C" fn rust_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     let nr = frame.rax;
     let a0 = frame.rdi;
 
+    if cur_tcb.syscall_redirect.load(Ordering::Relaxed) {
+        return crate::proc::redirect::dispatch_redirected_syscall(pid, cur_slot, frame);
+    }
+
     // Fast path for stateless, non-blocking register syscalls (`SYS_ABI_PING`, `SYS_GET_TID`):
     // runs under `CLI` with `0` `LOCK` RMWs and `0` `STI/CLI` toggles while enforcing full
     // kill check, `RFLAGS` sanitization, and `validate_user_context`.

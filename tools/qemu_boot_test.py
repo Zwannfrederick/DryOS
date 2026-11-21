@@ -417,7 +417,18 @@ def build_userspace() -> list[pathlib.Path]:
     build_lx_compat_island(LX_DRM_ISLAND_DIR, "drm_bochs", "dry-lx-drm-bochs")
     build_lx_compat_island(LX_NET_ISLAND_DIR, "net_8139cp", "dry-lx-net")
     build_sdk_demo_island()
-    _pack_bin_tar(out_dir, (("dry-probe.elf", out_dir / "dry-probe"),))
+    import build_linux_test_bins
+
+    lx_hello_elf = build_linux_test_bins.build_lx_hello()
+    _pack_bin_tar(
+        out_dir,
+        (
+            ("dry-probe.elf", out_dir / "dry-probe"),
+            ("dry-net.elf", out_dir / "dry-net"),
+            ("dry-linux-abi.elf", out_dir / "dry-linux-abi"),
+            ("lx-hello.elf", lx_hello_elf),
+        ),
+    )
     bins = [out_dir / src_name for src_name, _ in USERSPACE_MODS]
     for b in bins:
         if not b.exists():

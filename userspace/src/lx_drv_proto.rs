@@ -35,6 +35,9 @@ pub const LX_DRM_OP_COMMIT_DAMAGE: u32 = 173;
 pub const LX_NET_OP_QUERY_INFO: u32 = 175;
 pub const LX_NET_OP_SEND_ARP: u32 = 176;
 pub const LX_NET_OP_POLL_RX_TX: u32 = 177;
+pub const LX_NET_OP_ATTACH_RAW_PAGE: u32 = 185;
+pub const LX_NET_OP_RAW_TX: u32 = 186;
+pub const LX_NET_OP_RAW_RX: u32 = 187;
 
 // `IoRingSharedPage` opcode processed by `dry-lx-rng.elf`
 pub const IORING_OP_RNG_READ: u8 = 17;

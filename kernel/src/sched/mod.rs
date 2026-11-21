@@ -109,6 +109,7 @@ pub struct KernelTcb {
     pub subj_label_raw: AtomicU64,
     pub user_fs_base: AtomicU64,
     pub user_gs_base: AtomicU64,
+    pub syscall_redirect: AtomicBool,
     pub ipc_deadline_tsc: AtomicU64,
     pub slot_free: AtomicBool,
     pub notif: Notification,
@@ -135,6 +136,7 @@ impl KernelTcb {
             subj_label_raw: AtomicU64::new(KERNEL_THREAD_LABEL_RAW),
             user_fs_base: AtomicU64::new(0),
             user_gs_base: AtomicU64::new(0),
+            syscall_redirect: AtomicBool::new(false),
             ipc_deadline_tsc: AtomicU64::new(0),
             slot_free: AtomicBool::new(false),
             notif: Notification::new(),
@@ -270,6 +272,7 @@ pub fn init_scheduler(online_cpus: usize) {
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         idle.user_fs_base.store(0, Ordering::Release);
         idle.user_gs_base.store(0, Ordering::Release);
+        idle.syscall_redirect.store(false, Ordering::Release);
         idle.ipc_deadline_tsc.store(0, Ordering::Release);
         idle.slot_free.store(false, Ordering::Release);
         idle.sched.init_idle_running(cpu);
@@ -301,6 +304,7 @@ pub fn init_scheduler(online_cpus: usize) {
             .store(KERNEL_THREAD_LABEL_RAW, Ordering::Release);
         w.user_fs_base.store(0, Ordering::Release);
         w.user_gs_base.store(0, Ordering::Release);
+        w.syscall_redirect.store(false, Ordering::Release);
         w.ipc_deadline_tsc.store(0, Ordering::Release);
         w.notif.reset();
         w.slot_free.store(true, Ordering::Release);
@@ -427,6 +431,7 @@ pub fn try_spawn_thread_bound(
             .store(pack_seclabel_u64(subj_label), Ordering::Release);
         w.user_fs_base.store(0, Ordering::Release);
         w.user_gs_base.store(0, Ordering::Release);
+        w.syscall_redirect.store(false, Ordering::Release);
         w.ipc_deadline_tsc.store(0, Ordering::Release);
         w.notif.reset();
         crate::fpu::reset_slot(slot);

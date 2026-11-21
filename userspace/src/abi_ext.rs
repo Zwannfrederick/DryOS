@@ -139,6 +139,41 @@ pub const SYS_VAULT_CTL: u64 = 31;
 pub const EXDEV: isize = -18;
 pub const ENOTEMPTY: isize = -39;
 pub const IPC_OP_SUP_EXEC_VFS: u32 = 148;
+pub const IPC_OP_SUP_GET_NET_CAP: u32 = 149;
+pub const IPC_OP_SUP_LINUX_RUN: u32 = 181;
+
+pub const SPAWN_FLAG_SYSCALL_REDIRECT: u64 = 1 << 49;
+pub const SYSCALL_REDIRECT_LABEL: u32 = 0x7fa8;
+pub const SYSCALL_REPLY_RET: u32 = 0x7fa9;
+pub const SYSCALL_REPLY_MEM_READ: u32 = 0x7faa;
+pub const SYSCALL_REPLY_MEM_WRITE: u32 = 0x7fab;
+pub const SYSCALL_REPLY_MAP_ANON: u32 = 0x7fac;
+pub const SYSCALL_REPLY_EXIT: u32 = 0x7fad;
+
+#[inline]
+pub fn sys_proc_spawn_with_redirect(
+    frame_cap: u64,
+    compartment_id: u16,
+    redirect_ep_cap: u64,
+    elf_len: usize,
+) -> Result<(u64, u64), isize> {
+    let dom_comp = ((compartment_id as u64) << 16) | (0xffffu64 << 32) | SPAWN_FLAG_SYSCALL_REDIRECT;
+    let g1_len = (elf_len as u64) << 32;
+    let (r0, pid) = raw_syscall6(
+        SYS_PROC_SPAWN,
+        frame_cap,
+        dom_comp,
+        0,
+        0,
+        redirect_ep_cap,
+        g1_len,
+    );
+    if r0 < 0 {
+        Err(r0)
+    } else {
+        Ok((r0 as u64, pid))
+    }
+}
 
 #[inline]
 pub fn sys_proc_spawn_with_len(

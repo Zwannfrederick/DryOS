@@ -19,8 +19,8 @@ use dry_userspace::island_proto::{
 };
 use dry_userspace::lx_compat_meta::bar_is_mmio;
 use dry_userspace::lx_drv_proto::{
-    IORING_OP_NET_POLL, LX_NET_OP_POLL_RX_TX, LX_NET_OP_QUERY_INFO, LX_NET_OP_SEND_ARP,
-    LX_OP_BIND_PCI,
+    IORING_OP_NET_POLL, LX_NET_OP_ATTACH_RAW_PAGE, LX_NET_OP_POLL_RX_TX, LX_NET_OP_QUERY_INFO,
+    LX_NET_OP_RAW_RX, LX_NET_OP_RAW_TX, LX_NET_OP_SEND_ARP, LX_OP_BIND_PCI,
 };
 use dry_userspace::shell::LineBuilder;
 use dry_userspace::{
@@ -32,7 +32,7 @@ use dry_userspace::{
     UserSysInfo, BADGE_SUPERVISOR, EBADCAP, EINVAL, EPERM, EREVOKED, IPC_OP_BOUND_NOTIF,
     IPC_OP_CRASH_UD2, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM, IPC_OP_EXIT_CLEAN, IPC_OP_PONG,
     IRQF_ONESHOT, RIGHT_GRANT, RIGHT_MAP, RIGHT_READ, RIGHT_REVOKE, RIGHT_WRITE,
-    VSPACE_MAP_OP_4K_RW,
+    VSPACE_MAP_OP_4K_RW, VSPACE_MAP_OP_UNMAP_4K,
 };
 
 const ZERO_DEV_INFO: UserPciDeviceInfo = UserPciDeviceInfo {
@@ -50,6 +50,7 @@ const ZERO_DEV_INFO: UserPciDeviceInfo = UserPciDeviceInfo {
 const BAR_MAP_BASE: u64 = 0x2100_0000;
 const BAR_MAP_STRIDE: u64 = 0x0100_0000;
 const ISLAND_RING_VADDR: u64 = 0x2400_0000;
+const RAW_PAGE_VADDR: u64 = 0x2410_0000;
 const DMA_ARENA_VADDR: u64 = 0x2800_0000;
 const TWO_MIB: u64 = 2 * 1024 * 1024;
 
@@ -104,6 +105,9 @@ extern "C" {
     fn dry_lx_net_poll_step(budget: i32, out: *mut DryLxNetStats) -> i32;
     fn dry_lx_net_get_stats(out: *mut DryLxNetStats);
     fn dry_lx_net_shutdown();
+    fn dry_lx_net_set_raw_mode(en: u8);
+    fn dry_lx_net_tx_raw(frame: *const u8, len: u32) -> i32;
+    fn dry_lx_net_rx_pop(out: *mut u8, cap: u32) -> i32;
 }
 
 struct SyncCell<T>(UnsafeCell<T>);
@@ -364,6 +368,7 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
     let mut generation = 0u64;
     let mut sq_notif = 0u64;
     let mut cq_notif = 0u64;
+    let mut raw_page_cap = 0u64;
     let mut pci_bound = false;
     let mut probe_info = DryLxNetProbeInfo::default();
 
@@ -614,6 +619,116 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     );
                 }
             }
+            LX_NET_OP_ATTACH_RAW_PAGE => {
+                if !is_broker && !is_session {
+                    if ext.transferred_cap != 0 {
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                    }
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                if raw_page_cap != 0 {
+                    // SAFETY: Detaching previously attached shared raw Ethernet bounce page.
+                    unsafe { dry_lx_net_set_raw_mode(0) };
+                    let _ = sys_vspace_map(raw_page_cap, RAW_PAGE_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+                    let _ = sys_cap_revoke(raw_page_cap, 1);
+                    raw_page_cap = 0;
+                }
+                if ext.transferred_cap != 0 {
+                    if sys_vspace_map(ext.transferred_cap, RAW_PAGE_VADDR, VSPACE_MAP_OP_4K_RW).is_err() {
+                        let _ = sys_cap_revoke(ext.transferred_cap, 1);
+                        reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                        continue;
+                    }
+                    raw_page_cap = ext.transferred_cap;
+                    // SAFETY: `RAW_PAGE_VADDR` is mapped 4 KiB RW; enable raw Ethernet passthrough.
+                    unsafe { dry_lx_net_set_raw_mode(u8::from(mrs[0] != 0)) };
+                }
+                if tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        drv_ep_cap,
+                        tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                        [u64::from(raw_page_cap != 0), 0, 0, 0],
+                    );
+                }
+            }
+            LX_NET_OP_RAW_TX => {
+                if !is_broker && !is_session {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                if !pci_bound || raw_page_cap == 0 || !(14..=1514).contains(&mrs[0]) {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                }
+                if mrs[3] != 0 && mrs[3] != generation {
+                    if tok != 0 {
+                        let _ = sys_ipc_reply_inline(
+                            drv_ep_cap,
+                            tok,
+                            pack_msg_tag(IPC_OP_ERR_STALE_GEN, 0, 2, 0),
+                            [(-EREVOKED) as u64, generation, 0, 0],
+                        );
+                    }
+                    continue;
+                }
+                // SAFETY: `RAW_PAGE_VADDR` holds `mrs[0]` bytes (`14..=1514`) inside 4 KiB RW mapping.
+                let rc = unsafe { dry_lx_net_tx_raw(RAW_PAGE_VADDR as *const u8, mrs[0] as u32) };
+                if rc != 0 {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                }
+                let mut st = DryLxNetStats::default();
+                // SAFETY: Pumps NAPI poll after raw frame transmit.
+                unsafe {
+                    let _ = dry_lx_net_poll_step(32, &mut st);
+                }
+                if tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        drv_ep_cap,
+                        tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 2, 0),
+                        [st.tx_packets, st.rx_packets, 0, 0],
+                    );
+                }
+            }
+            LX_NET_OP_RAW_RX => {
+                if !is_broker && !is_session {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
+                    continue;
+                }
+                if !pci_bound || raw_page_cap == 0 {
+                    reply_err(drv_ep_cap, tok, IPC_OP_ERR_INVAL, EINVAL);
+                    continue;
+                }
+                if mrs[3] != 0 && mrs[3] != generation {
+                    if tok != 0 {
+                        let _ = sys_ipc_reply_inline(
+                            drv_ep_cap,
+                            tok,
+                            pack_msg_tag(IPC_OP_ERR_STALE_GEN, 0, 2, 0),
+                            [(-EREVOKED) as u64, generation, 0, 0],
+                        );
+                    }
+                    continue;
+                }
+                let mut st = DryLxNetStats::default();
+                // SAFETY: Polls NAPI then pops up to 1 RX Ethernet frame into `RAW_PAGE_VADDR + 2048`.
+                let n = unsafe {
+                    let _ = dry_lx_net_poll_step(64, &mut st);
+                    dry_lx_net_rx_pop((RAW_PAGE_VADDR + 2048) as *mut u8, 2048)
+                };
+                let got = if n > 0 { n as u64 } else { 0 };
+                if tok != 0 {
+                    let _ = sys_ipc_reply_inline(
+                        drv_ep_cap,
+                        tok,
+                        pack_msg_tag(IPC_OP_PONG, 0, 3, 0),
+                        [got, st.rx_packets, st.tx_packets, 0],
+                    );
+                }
+            }
             MOCK_OP_SET_PARK_MODE => {
                 if !is_broker {
                     reply_err(drv_ep_cap, tok, IPC_OP_ERR_PERM, EPERM);
@@ -644,7 +759,14 @@ pub extern "C" fn _start(drv_ep_cap: u64, _arg1: u64) -> ! {
                     continue;
                 }
                 // SAFETY: Clean shutdown of `8139cp.c` + `mii.c` before revoking capabilities.
-                unsafe { dry_lx_net_shutdown() };
+                unsafe {
+                    dry_lx_net_set_raw_mode(0);
+                    dry_lx_net_shutdown();
+                }
+                if raw_page_cap != 0 {
+                    let _ = sys_vspace_map(raw_page_cap, RAW_PAGE_VADDR, VSPACE_MAP_OP_UNMAP_4K);
+                    let _ = sys_cap_revoke(raw_page_cap, 1);
+                }
                 for c in [DMA_CAP.swap(0, Ordering::AcqRel), IRQ_NOTIF.swap(0, Ordering::AcqRel)] {
                     if c != 0 {
                         let _ = sys_cap_revoke(c, 1);

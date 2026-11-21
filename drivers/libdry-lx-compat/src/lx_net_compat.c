@@ -43,6 +43,33 @@ static u64 g_arp_replies = 0ULL;
 static u64 g_udp_echo_pkts = 0ULL;
 static u16 g_ip_id = 1U;
 
+#define RAW_RX_RING_CAP 16U
+#define RAW_FRAME_MAX   1600U
+static u8 g_raw_mode = 0U;
+static u8 g_raw_rx[RAW_RX_RING_CAP][RAW_FRAME_MAX];
+static u16 g_raw_rx_len[RAW_RX_RING_CAP];
+static u8 g_raw_rx_head = 0U;
+static u8 g_raw_rx_tail = 0U;
+
+static void raw_rx_push(const struct sk_buff *skb) {
+    const u8 *mac = skb_mac_header(skb);
+    if (!mac || mac < skb->head || skb->data < mac) {
+        return;
+    }
+    size_t hdr = (size_t)(skb->data - mac);
+    size_t flen = hdr + (size_t)skb->len;
+    if (hdr > 64U || flen < 14U || flen > RAW_FRAME_MAX) {
+        return;
+    }
+    u8 next = (u8)((g_raw_rx_tail + 1U) % RAW_RX_RING_CAP);
+    if (next == g_raw_rx_head) {
+        g_raw_rx_head = (u8)((g_raw_rx_head + 1U) % RAW_RX_RING_CAP);
+    }
+    dry_lx_memcpy(g_raw_rx[g_raw_rx_tail], mac, flen);
+    g_raw_rx_len[g_raw_rx_tail] = (u16)flen;
+    g_raw_rx_tail = next;
+}
+
 u32 ether_crc(int length, unsigned char *data) {
     u32 crc = ~0U;
     for (int i = 0; i < length; i++) {
@@ -364,6 +391,11 @@ static void handle_ipv4_udp_rx(struct net_device *dev, const struct ethhdr *eth,
 
 int netif_receive_skb(struct sk_buff *skb) {
     if (!skb) return 0;
+    if (g_raw_mode != 0U) {
+        raw_rx_push(skb);
+        dev_kfree_skb_any(skb);
+        return 0;
+    }
     struct net_device *dev = skb->dev ? skb->dev : g_registered_netdev;
     if (dev) {
         const struct ethhdr *eth = (const struct ethhdr *)skb_mac_header(skb);
@@ -397,6 +429,9 @@ int32_t dry_lx_net_probe(u16 vendor_id, u16 device_id, u16 subvendor, u16 subdev
     g_gw_mac_known = 0U;
     g_arp_replies = 0ULL;
     g_udp_echo_pkts = 0ULL;
+    g_raw_mode = 0U;
+    g_raw_rx_head = 0U;
+    g_raw_rx_tail = 0U;
 
     dry_lx_pci_init_device(&g_net_pdev, vendor_id, device_id, subvendor, subdevice,
                            bdf, revision, dev_flags, bars);
@@ -490,4 +525,34 @@ void dry_lx_net_shutdown(void) {
             drv->remove(&g_net_pdev);
         }
     }
+}
+
+void dry_lx_net_set_raw_mode(u8 en) {
+    g_raw_mode = en ? 1U : 0U;
+    if (en == 0U) {
+        g_raw_rx_head = 0U;
+        g_raw_rx_tail = 0U;
+    }
+}
+
+int32_t dry_lx_net_tx_raw(const u8 *frame, u32 len) {
+    if (!frame || !g_registered_netdev || !g_registered_netdev->running || len < 14U || len > 1514U) {
+        return -EINVAL;
+    }
+    return tx_raw_frame(g_registered_netdev, frame, (size_t)len);
+}
+
+int32_t dry_lx_net_rx_pop(u8 *out, u32 cap) {
+    if (!out || g_raw_rx_head == g_raw_rx_tail) {
+        return 0;
+    }
+    u16 flen = g_raw_rx_len[g_raw_rx_head];
+    u8 next = (u8)((g_raw_rx_head + 1U) % RAW_RX_RING_CAP);
+    if ((u32)flen > cap) {
+        g_raw_rx_head = next;
+        return -EINVAL;
+    }
+    dry_lx_memcpy(out, g_raw_rx[g_raw_rx_head], flen);
+    g_raw_rx_head = next;
+    return (int32_t)flen;
 }

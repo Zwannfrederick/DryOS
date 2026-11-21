@@ -103,7 +103,8 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"gpufault" => ShellCommand::GpuFault,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
         b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"pwd" | b"cd" | b"mkdir"
-        | b"rmdir" | b"cp" | b"mv" | b"exec" | b"dmesg" | b"lspci" | b"lsusb" | b"lsblk"
+        | b"rmdir" | b"cp" | b"mv" | b"exec" | b"linux-run" | b"ifconfig" | b"ping" | b"nslookup" | b"httpget"
+        | b"dmesg" | b"lspci" | b"lsusb" | b"lsblk"
         | b"nvme" | b"drvctl" | b"uname" | b"free" | b"mounts" | b"vault-status"
         | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
         | b"corrupt-sb0-test" => {
@@ -577,7 +578,11 @@ impl ShellEngine {
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings|editor|calc>", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
         self.push_line(
-            b"  ls|cd|pwd|mkdir|rmdir|cat|write|cp|mv|rm|ln|sync|exec  VFS ops",
+            b"  ls|cd|pwd|mkdir|rmdir|cat|write|cp|mv|rm|ln|sync|exec|linux-run  VFS",
+            STYLE_DEFAULT,
+        );
+        self.push_line(
+            b"  ifconfig | ping <ip> | nslookup <host> | httpget <url>  Net",
             STYLE_DEFAULT,
         );
         self.push_line(b"  dmesg|lspci|lsusb|lsblk|nvme|drvctl|uname|free|mounts  Sys", STYLE_DEFAULT);

@@ -253,5 +253,8 @@ int32_t dry_lx_net_send_arp_who_has(u32 target_ip_be);
 int32_t dry_lx_net_poll_step(int budget, struct dry_lx_net_stats *out);
 void dry_lx_net_get_stats(struct dry_lx_net_stats *out);
 void dry_lx_net_shutdown(void);
+void dry_lx_net_set_raw_mode(u8 en);
+int32_t dry_lx_net_tx_raw(const u8 *frame, u32 len);
+int32_t dry_lx_net_rx_pop(u8 *out, u32 cap);
 
 #endif /* _DRY_LINUX_NETDEVICE_H */

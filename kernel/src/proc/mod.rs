@@ -19,6 +19,7 @@
 pub mod bench;
 pub mod elf;
 pub mod fault;
+pub mod redirect;
 pub mod supervisor;
 pub mod tests;
 
@@ -157,10 +158,13 @@ pub(crate) struct ProcessSlot {
     pub(crate) fault_ep_cspace: AtomicU16,
     pub(crate) fault_ep_cap_raw: AtomicU64,
     pub(crate) fault_ep_label_raw: AtomicU64,
+    pub(crate) redirect_ep_cspace: AtomicU16,
+    pub(crate) redirect_ep_cap_raw: AtomicU64,
+    pub(crate) redirect_ep_label_raw: AtomicU64,
     pub(crate) syscall_entries: AtomicU64,
     exit_code: AtomicI32,
     pub(crate) subj_label_raw: AtomicU64,
-    vs_cap_raw: AtomicU64,
+    pub(crate) vs_cap_raw: AtomicU64,
     tcb_cap_raw: AtomicU64,
     pub(crate) tcb_tid_raw: AtomicU32,
     pub(crate) parent_pid: AtomicU32,
@@ -170,7 +174,7 @@ pub(crate) struct ProcessSlot {
     initial_rflags: AtomicU64,
     arg0: AtomicU64,
     arg1: AtomicU64,
-    user_fs_base: AtomicU64,
+    pub(crate) user_fs_base: AtomicU64,
     user_gs_base: AtomicU64,
     fault_vec: AtomicU64,
     fault_err: AtomicU64,
@@ -199,6 +203,9 @@ impl ProcessSlot {
             fault_ep_cspace: AtomicU16::new(0),
             fault_ep_cap_raw: AtomicU64::new(0),
             fault_ep_label_raw: AtomicU64::new(0),
+            redirect_ep_cspace: AtomicU16::new(0),
+            redirect_ep_cap_raw: AtomicU64::new(0),
+            redirect_ep_label_raw: AtomicU64::new(0),
             syscall_entries: AtomicU64::new(0),
             exit_code: AtomicI32::new(0),
             subj_label_raw: AtomicU64::new(0),
@@ -283,6 +290,18 @@ fn destroy_cspace_owned_resources(cspace_id: CSpaceId, subj_label: SecLabel, vs_
 pub fn spawn_elf_process_with<F>(
     elf_bytes: &[u8],
     opts: SpawnOptions,
+    setup: F,
+) -> Result<SpawnedProcessInfo, ProcError>
+where
+    F: FnOnce(CSpaceId, SecLabel, CapPtr, VSpaceHandle) -> Result<(u64, u64), CapError>,
+{
+    spawn_elf_process_core(elf_bytes, opts, None, setup)
+}
+
+pub(crate) fn spawn_elf_process_core<F>(
+    elf_bytes: &[u8],
+    opts: SpawnOptions,
+    redirect_ep: Option<(CSpaceId, SecLabel, CapPtr)>,
     setup: F,
 ) -> Result<SpawnedProcessInfo, ProcError>
 where
@@ -444,6 +463,8 @@ where
     w_tcb.process_id.store(pid, Ordering::Release);
     w_tcb.user_fs_base.store(opts.user_fs_base, Ordering::Release);
     w_tcb.user_gs_base.store(opts.user_gs_base, Ordering::Release);
+    let redir_armed = crate::proc::redirect::bind_redirect_endpoint(slot, redirect_ep);
+    w_tcb.syscall_redirect.store(redir_armed, Ordering::Release);
 
     slot.tcb_tid_raw.store(tid.raw(), Ordering::Release);
     slot.tcb_cap_raw.store(tcb_cap.0, Ordering::Release);
