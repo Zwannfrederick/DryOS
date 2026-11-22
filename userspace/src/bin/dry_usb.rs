@@ -116,80 +116,157 @@ impl UsbState {
             let Ok(slot_id) = self.hc.enable_slot() else {
                 continue;
             };
-            if self.hc.address_device(slot_id, port + 1, speed).is_err() {
-                self.hc.disable_slot(slot_id);
-                continue;
-            }
-            self.active_slots = self.active_slots.saturating_add(1);
+            self.enumerate_device_slot(slot_id, port + 1, 0, speed, 0, 0, true);
+        }
+    }
 
-            if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0100, 0, 8).is_err() {
-                continue;
-            }
-            let mps0 = self.hc.ctrl_bounce_slice()[7];
-            if speed == 1 && mps0 != 8 && mps0 >= 8 {
-                let _ = self.hc.eval_ep0_mps(slot_id, u16::from(mps0));
-            }
-            if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0100, 0, 18).is_err() {
-                continue;
-            }
-            let dev_vid = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[8], self.hc.ctrl_bounce_slice()[9]]);
-            let dev_pid = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[10], self.hc.ctrl_bounce_slice()[11]]);
+    #[allow(clippy::too_many_arguments)]
+    fn enumerate_device_slot(
+        &mut self,
+        slot_id: u8,
+        root_port_1based: u8,
+        route_string: u32,
+        speed: u8,
+        tt_hub_slot: u8,
+        tt_port: u8,
+        allow_hub_recurse: bool,
+    ) {
+        if self
+            .hc
+            .address_device_routed(slot_id, root_port_1based, route_string, speed, tt_hub_slot, tt_port)
+            .is_err()
+        {
+            self.hc.disable_slot(slot_id);
+            return;
+        }
+        self.active_slots = self.active_slots.saturating_add(1);
 
-            if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0200, 0, 9).is_err() {
-                continue;
-            }
-            let cfg_total = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[2], self.hc.ctrl_bounce_slice()[3]]).clamp(9, 512);
-            if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0200, 0, cfg_total).is_err() {
-                continue;
-            }
-            let mut raw_cfg = [0u8; 512];
-            raw_cfg[..cfg_total as usize].copy_from_slice(&self.hc.ctrl_bounce_slice()[..cfg_total as usize]);
-            let mut ifaces = [ParsedInterface::EMPTY; 4];
-            let (cfg_val, n_if) = parse_config_interfaces(&raw_cfg[..cfg_total as usize], &mut ifaces);
-            if n_if == 0 {
-                continue;
-            }
+        if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0100, 0, 8).is_err() {
+            return;
+        }
+        let mps0 = self.hc.ctrl_bounce_slice()[7];
+        if speed == 1 && mps0 != 8 && mps0 >= 8 {
+            let _ = self.hc.eval_ep0_mps(slot_id, u16::from(mps0));
+        }
+        if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0100, 0, 18).is_err() {
+            return;
+        }
+        let dev_class = self.hc.ctrl_bounce_slice()[4];
+        let dev_proto = self.hc.ctrl_bounce_slice()[6];
+        let dev_vid = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[8], self.hc.ctrl_bounce_slice()[9]]);
+        let dev_pid = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[10], self.hc.ctrl_bounce_slice()[11]]);
 
-            // Pick primary recognized interface on this slot (HID Kbd / Mouse / MSC BOT).
-            let mut chosen = ifaces[0];
-            for item in ifaces[..n_if].iter() {
-                if (item.class_code == USB_CLASS_HID
-                    && item.subclass == USB_SUBCLASS_BOOT
-                    && (item.proto == USB_PROTO_KBD || item.proto == USB_PROTO_MOUSE))
-                    || (item.class_code == USB_CLASS_MASS_STORAGE
-                        && item.subclass == USB_SUBCLASS_SCSI
-                        && item.proto == USB_PROTO_BOT)
-                {
-                    chosen = *item;
-                    break;
+        if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0200, 0, 9).is_err() {
+            return;
+        }
+        let cfg_total = u16::from_le_bytes([self.hc.ctrl_bounce_slice()[2], self.hc.ctrl_bounce_slice()[3]]).clamp(9, 512);
+        if self.hc.control_xfer(slot_id, 0x80, 0x06, 0x0200, 0, cfg_total).is_err() {
+            return;
+        }
+        let mut raw_cfg = [0u8; 512];
+        raw_cfg[..cfg_total as usize].copy_from_slice(&self.hc.ctrl_bounce_slice()[..cfg_total as usize]);
+        let mut ifaces = [ParsedInterface::EMPTY; 4];
+        let (cfg_val, n_if) = parse_config_interfaces(&raw_cfg[..cfg_total as usize], &mut ifaces);
+        if n_if == 0 {
+            return;
+        }
+
+        // Pick primary recognized interface on this slot (HID Kbd / Mouse / MSC BOT / Hub).
+        let mut chosen = ifaces[0];
+        for item in ifaces[..n_if].iter() {
+            if (item.class_code == USB_CLASS_HID
+                && item.subclass == USB_SUBCLASS_BOOT
+                && (item.proto == USB_PROTO_KBD || item.proto == USB_PROTO_MOUSE))
+                || (item.class_code == USB_CLASS_MASS_STORAGE
+                    && item.subclass == USB_SUBCLASS_SCSI
+                    && item.proto == USB_PROTO_BOT)
+                || item.class_code == dry_userspace::usb::USB_CLASS_HUB
+            {
+                chosen = *item;
+                break;
+            }
+        }
+
+        let mut configured = 0u8;
+        if let Ok((in_ep, out_ep)) = self.hc.configure_interface_eps(slot_id, speed, &chosen) {
+            if self.hc.control_xfer(slot_id, 0x00, 0x09, u16::from(cfg_val), 0, 0).is_ok() {
+                configured = 1;
+                self.bind_driver(slot_id, &chosen, in_ep, out_ep);
+            }
+        } else if dev_class == dry_userspace::usb::USB_CLASS_HUB
+            && self.hc.control_xfer(slot_id, 0x00, 0x09, u16::from(cfg_val), 0, 0).is_ok()
+        {
+            configured = 1;
+        }
+
+        if (self.device_count as usize) < self.devices.len() {
+            let enc_port = if route_string == 0 {
+                root_port_1based
+            } else {
+                ((root_port_1based & 0x0f) << 4) | (tt_port & 0x0f)
+            };
+            self.devices[self.device_count as usize] = UsbDeviceSummary {
+                port: enc_port,
+                slot_id,
+                speed,
+                class_code: chosen.class_code,
+                subclass: chosen.subclass,
+                proto: chosen.proto,
+                configured,
+                iface_num: chosen.iface_num,
+                vendor_id: dev_vid,
+                product_id: dev_pid,
+                ep_in_addr: chosen.ep_in_addr,
+                ep_out_addr: chosen.ep_out_addr,
+                _pad: 0,
+            };
+            self.device_count += 1;
+        }
+
+        let is_hub = dev_class == dry_userspace::usb::USB_CLASS_HUB
+            || chosen.class_code == dry_userspace::usb::USB_CLASS_HUB;
+        if is_hub && configured == 1 && allow_hub_recurse {
+            if let Ok(info) = dry_userspace::usb::hub::hub_read_descriptor(&mut self.hc, slot_id, speed) {
+                let mtt = speed == 3 && dev_proto == 2;
+                let _ = self.hc.configure_hub_slot(slot_id, info.nbr_ports, speed, mtt);
+                for ds_port in 1..=info.nbr_ports {
+                    let Some(child_speed) = dry_userspace::usb::hub::hub_power_and_reset_port(
+                        &mut self.hc,
+                        slot_id,
+                        speed,
+                        ds_port,
+                        info.pwr_on_ms,
+                    ) else {
+                        continue;
+                    };
+                    self.connected_ports = self.connected_ports.saturating_add(1);
+                    let Ok(child_slot) = self.hc.enable_slot() else {
+                        continue;
+                    };
+                    let mut hlb = LineBuilder::new();
+                    hlb.push_bytes(b"[DRY-USB] HUB_CASCADE root_port=");
+                    hlb.push_u64(u64::from(root_port_1based));
+                    hlb.push_bytes(b" hub_slot=");
+                    hlb.push_u64(u64::from(slot_id));
+                    hlb.push_bytes(b" ds_port=");
+                    hlb.push_u64(u64::from(ds_port));
+                    hlb.push_bytes(b" child_slot=");
+                    hlb.push_u64(u64::from(child_slot));
+                    hlb.push_bytes(b" speed=");
+                    hlb.push_u64(u64::from(child_speed));
+                    log_line(&hlb);
+
+                    let child_tt_hub = if speed == 3 && child_speed <= 2 { slot_id } else { 0 };
+                    self.enumerate_device_slot(
+                        child_slot,
+                        root_port_1based,
+                        u32::from(ds_port & 0x0f),
+                        child_speed,
+                        child_tt_hub,
+                        ds_port,
+                        false,
+                    );
                 }
-            }
-
-            let mut configured = 0u8;
-            if let Ok((in_ep, out_ep)) = self.hc.configure_interface_eps(slot_id, speed, &chosen) {
-                if self.hc.control_xfer(slot_id, 0x00, 0x09, u16::from(cfg_val), 0, 0).is_ok() {
-                    configured = 1;
-                    self.bind_driver(slot_id, &chosen, in_ep, out_ep);
-                }
-            }
-
-            if (self.device_count as usize) < self.devices.len() {
-                self.devices[self.device_count as usize] = UsbDeviceSummary {
-                    port: port + 1,
-                    slot_id,
-                    speed,
-                    class_code: chosen.class_code,
-                    subclass: chosen.subclass,
-                    proto: chosen.proto,
-                    configured,
-                    iface_num: chosen.iface_num,
-                    vendor_id: dev_vid,
-                    product_id: dev_pid,
-                    ep_in_addr: chosen.ep_in_addr,
-                    ep_out_addr: chosen.ep_out_addr,
-                    _pad: 0,
-                };
-                self.device_count += 1;
             }
         }
     }

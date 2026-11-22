@@ -455,6 +455,174 @@ def _run_p19d_linux_abi_static_elf(
         disk_path.unlink(missing_ok=True)
 
 
+def _run_p19e_usb_hub_and_i2c_hid_island(
+    kernel_elf: pathlib.Path,
+    build_dir: pathlib.Path,
+    ovmf_code: pathlib.Path,
+    ovmf_vars: pathlib.Path,
+    write_mbr_esp_image: Callable[..., None],
+) -> dict[str, Any]:
+    disk_path = build_dir / "disk_p19e_hub.img"
+    _create_raw_disk(disk_path, size_mib=4)
+    esp_img = build_dir / "esp_p19e_hub.img"
+    write_mbr_esp_image(
+        esp_img,
+        kernel_elf,
+        "console=com1 desktop4=1 dry_qemu_test_no_iommu=1",
+        resolution="1280x800x32",
+    )
+    t0 = time.monotonic()
+    usb_hub_args = _virtio_blk_args(disk_path) + [
+        "-device",
+        "qemu-xhci,id=xhci0",
+        "-device",
+        "usb-hub,id=usbhub0,bus=xhci0.0,port=1",
+        "-device",
+        "usb-kbd,id=usbkbd0,bus=xhci0.0,port=1.1",
+    ]
+    h = _DesktopSessionHarness(
+        "p19e_usb_hub_i2c_hid",
+        esp_img,
+        ovmf_code,
+        ovmf_vars,
+        build_dir,
+        smp=2,
+        expect_fb=True,
+        mem="384M",
+        extra_qemu_args=usb_hub_args,
+    )
+    try:
+        qmp = h.boot_to_desktop_ready()
+        hub_ln = h.wait_for("[DRY-USB] HUB_CASCADE root_port=", wait_s=20.0)
+
+        idx = len(h.serial_lines)
+        qmp.type_ascii("i2c-hid-test")
+        qmp.send_qcodes(["ret"])
+        h.wait_for("[DRY-I2C-HID-TEST] PASS gen=2 dx=12 dy=-7", start_idx=idx, wait_s=20.0)
+        h.wait_for("[DRY-SHELL] CMD=i2c-hid-test gen=2 dx=12 dy=-7", start_idx=idx, wait_s=20.0)
+
+        qmp.type_ascii("shutdown")
+        qmp.send_qcodes(["ret"])
+        serial_out, skv = h.finish_and_verify(require_mouse_irqs=False)
+        if "[DRY-PANIC]" in serial_out or skv.get("leaked_frames", -1) != 0:
+            raise RuntimeError(f"[p19e] Panic or frame leak: {skv!r}")
+        elapsed = round(time.monotonic() - t0, 3)
+        print(
+            f"[PASS] p19e_usb_hub_and_i2c_hid_island: {hub_ln.strip()} i2c_hid_gen=2 "
+            f"leaked_frames=0 ({elapsed:.2f}s)."
+        )
+        return {
+            "hub_cascade_line": hub_ln.strip(),
+            "i2c_hid_gen": 2,
+            "leaked_frames": skv["leaked_frames"],
+            "wall_time_sec": elapsed,
+        }
+    finally:
+        h.close()
+        disk_path.unlink(missing_ok=True)
+
+
+def _run_p19f_desktop_clipboard_pipes_editor(
+    kernel_elf: pathlib.Path,
+    build_dir: pathlib.Path,
+    ovmf_code: pathlib.Path,
+    ovmf_vars: pathlib.Path,
+    write_mbr_esp_image: Callable[..., None],
+) -> dict[str, Any]:
+    disk_path = build_dir / "disk_p19f_desk.img"
+    _create_raw_disk(disk_path, size_mib=4)
+    esp_img = build_dir / "esp_p19f_desk.img"
+    write_mbr_esp_image(
+        esp_img,
+        kernel_elf,
+        "console=com1 desktop4=1 dry_qemu_test_no_iommu=1",
+        resolution="1280x800x32",
+    )
+    t0 = time.monotonic()
+    h = _DesktopSessionHarness(
+        "p19f_desk_clip_pipe_edit",
+        esp_img,
+        ovmf_code,
+        ovmf_vars,
+        build_dir,
+        smp=2,
+        expect_fb=True,
+        mem="384M",
+        extra_qemu_args=_virtio_blk_args(disk_path),
+    )
+    try:
+        qmp = h.boot_to_desktop_ready()
+
+        for cmd, marker in (
+            ("clip set DRYOS_CLIP_OK", '[DRY-SHELL] CMD=clip op=set len=13 text="DRYOS_CLIP_OK"'),
+            ("clip get", '[DRY-SHELL] CMD=clip op=get len=13 text="DRYOS_CLIP_OK"'),
+            ("echo line1 > /ram/pipe.txt", "[DRY-SHELL] CMD=redir op=> path=/ram/pipe.txt bytes=6"),
+            ("echo line2 >> /ram/pipe.txt", "[DRY-SHELL] CMD=redir op=>> path=/ram/pipe.txt bytes=6"),
+            ("cat /ram/pipe.txt", '[DRY-SHELL] CMD=cat path=/ram/pipe.txt bytes=12 text="line1.line2.'),
+            ("ls /bin | wc", "[DRY-SHELL] CMD=pipe filter=wc "),
+            ("echo a | cat", "[DRY-SHELL] CMD=unsupported_posix op=0x7c"),
+        ):
+            idx = len(h.serial_lines)
+            qmp.type_ascii(cmd)
+            qmp.send_qcodes(["ret"])
+            h.wait_for(marker, start_idx=idx, wait_s=15.0)
+
+        idx_grep = len(h.serial_lines)
+        qmp.type_ascii("ls /bin | grep dry")
+        qmp.send_qcodes(["ret"])
+        grep_ln = h.wait_for("[DRY-SHELL] CMD=pipe filter=grep ", start_idx=idx_grep, wait_s=15.0)
+        out_lines = int(grep_ln.split("out_lines=")[1].split()[0])
+        if out_lines < 4:
+            raise RuntimeError(f"[p19f] Expected >=4 grep matches in /bin, got {grep_ln!r}")
+
+        idx_ed = len(h.serial_lines)
+        qmp.type_ascii("open editor /ram/pipe.txt")
+        qmp.send_qcodes(["ret"])
+        h.wait_for("[DRY-EDITOR] OPEN path=/ram/pipe.txt bytes=12", start_idx=idx_ed, wait_s=15.0)
+
+        qmp.send_qcodes(["up"])
+        idx_cp = len(h.serial_lines)
+        qmp.send_qcodes(["ctrl", "c"])
+        h.wait_for("[DRY-EDITOR] CLIP_COPY len=5", start_idx=idx_cp, wait_s=10.0)
+
+        idx_co = len(h.serial_lines)
+        qmp.send_qcodes(["ctrl", "o"])
+        h.wait_for("[DRY-EDITOR] OPEN path=/persist/notes.txt bytes=0", start_idx=idx_co, wait_s=10.0)
+
+        idx_pa = len(h.serial_lines)
+        qmp.send_qcodes(["ctrl", "v"])
+        h.wait_for("[DRY-EDITOR] CLIP_PASTE len=5", start_idx=idx_pa, wait_s=10.0)
+
+        idx_sv = len(h.serial_lines)
+        qmp.send_qcodes(["ctrl", "s"])
+        h.wait_for("[DRY-EDITOR] SAVED path=/persist/notes.txt bytes=5", start_idx=idx_sv, wait_s=10.0)
+
+        qmp.send_qcodes(["alt", "1"])
+        time.sleep(0.15)
+        idx_cat = len(h.serial_lines)
+        qmp.type_ascii("cat /persist/notes.txt")
+        qmp.send_qcodes(["ret"])
+        h.wait_for('[DRY-SHELL] CMD=cat path=/persist/notes.txt bytes=5 text="line2"', start_idx=idx_cat, wait_s=10.0)
+        qmp.type_ascii("shutdown")
+        qmp.send_qcodes(["ret"])
+        serial_out, skv = h.finish_and_verify(require_mouse_irqs=False)
+        if "[DRY-PANIC]" in serial_out or skv.get("leaked_frames", -1) != 0:
+            raise RuntimeError(f"[p19f] Panic or frame leak: {skv!r}")
+        elapsed = round(time.monotonic() - t0, 3)
+        print(
+            f"[PASS] p19f_desktop_clipboard_pipes_editor: clip=13 grep_out={out_lines} "
+            f"editor_pipe_saved=true leaked_frames=0 ({elapsed:.2f}s)."
+        )
+        return {
+            "grep_out_lines": out_lines,
+            "leaked_frames": skv["leaked_frames"],
+            "wall_time_sec": elapsed,
+        }
+    finally:
+        h.close()
+        disk_path.unlink(missing_ok=True)
+
+
 def run_p19_ascension9_suite(
     kernel_elf: pathlib.Path,
     build_dir: pathlib.Path,
@@ -468,14 +636,24 @@ def run_p19_ascension9_suite(
     res_b = _run_p19b_vfs_tree_and_dynamic_exec(kernel_elf, build_dir, ovmf_code, ovmf_vars, write_mbr_esp_image)
     res_c = _run_p19c_net_tcp_http_dns(kernel_elf, build_dir, ovmf_code, ovmf_vars, write_mbr_esp_image)
     res_d = _run_p19d_linux_abi_static_elf(kernel_elf, build_dir, ovmf_code, ovmf_vars, write_mbr_esp_image)
+    res_e = _run_p19e_usb_hub_and_i2c_hid_island(kernel_elf, build_dir, ovmf_code, ovmf_vars, write_mbr_esp_image)
+    res_f = _run_p19f_desktop_clipboard_pipes_editor(kernel_elf, build_dir, ovmf_code, ovmf_vars, write_mbr_esp_image)
     out_path = root_dir / "tools" / "compat_bench" / "results_p19_ascension9.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(
-            {"milestone": "Ascension-9.0", "p19a": res_a, "p19b": res_b, "p19c": res_c, "p19d": res_d},
+            {
+                "milestone": "Ascension-9.0",
+                "p19a": res_a,
+                "p19b": res_b,
+                "p19c": res_c,
+                "p19d": res_d,
+                "p19e": res_e,
+                "p19f": res_f,
+            },
             indent=2,
         )
         + "\n",
         encoding="utf-8",
     )
-    return 4
+    return 6

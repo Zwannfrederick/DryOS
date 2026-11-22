@@ -712,6 +712,16 @@ pub fn run_p3_desktop_session(boot_info_addr: u64, boot: &RootInitBootInfo) -> !
                     sys.tsc_mhz,
                 );
             }
+            crate::abi_ext::IPC_OP_SUP_I2C_HID_TEST => {
+                crate::sup_exec::handle_i2c_hid_test_ipc(
+                    sup_ep,
+                    reply_tok,
+                    ext.sender_badge,
+                    ctx.vfs_sup_cap,
+                    boot.broker_mod_cap,
+                    sys.tsc_mhz,
+                );
+            }
             IPC_OP_SUP_GET_NET_CAP => {
                 handle_get_net_cap_ipc(
                     sup_ep,

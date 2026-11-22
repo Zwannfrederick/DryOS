@@ -422,24 +422,93 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                 let mut wants_self_exit = false;
                 let mut trigger_crash_after_present = false;
                 let mut post_present_action: Option<DesktopAction> = None;
+                let mut exec_wants_break = false;
+                let pipe_parsed = dry_userspace::shell_pipe::parse_pipe_or_redir(cmd_slice);
+                let mark_pushed = if pipe_parsed.is_some() {
+                    engine.mark_output().0
+                } else {
+                    0
+                };
 
+                {
+                    let mut exec_one = |one_cmd: &[u8]| {
                 if dry_userspace::shell_diag_cmds::try_exec_dry_cmd(
-                    cmd_slice,
+                    one_cmd,
                     sup_ep_cap,
                     engine,
                     debug_line,
                 ) {
                     // Handled by shared `hwdiag` diagnostic command dispatcher.
                 } else if dry_userspace::shell_gpu_cmds::try_exec_gpu_cmd(
-                    cmd_slice,
+                    one_cmd,
                     sup_ep_cap,
                     engine,
                     debug_line,
                 ) {
                     // Handled by Mandatory NVIDIA / GPU CLI bridge.
                 } else {
-                match parse_command(cmd_slice) {
+                match parse_command(one_cmd) {
                     ShellCommand::Empty => {}
+                    ShellCommand::Clip(rest) => {
+                        let mut s = 0usize;
+                        while s < rest.len() && rest[s] == b' ' {
+                            s += 1;
+                        }
+                        let trimmed = &rest[s..];
+                        if let Some(text) = trimmed.strip_prefix(b"set ") {
+                            match dry_userspace::wm_ipc::wm_clipboard_set(disp_ep_cap, text) {
+                                Ok(n) => {
+                                    let mut lb = LineBuilder::new();
+                                    lb.push_bytes(b"Clipboard set (");
+                                    lb.push_u64(n as u64);
+                                    lb.push_bytes(b" bytes)");
+                                    engine.push_line(lb.as_bytes(), dry_userspace::surface::STYLE_OK);
+                                    let mut slb = LineBuilder::new();
+                                    slb.push_bytes(b"[DRY-SHELL] CMD=clip op=set len=");
+                                    slb.push_u64(n as u64);
+                                    slb.push_bytes(b" text=\"");
+                                    for &b in text.iter().take(48) {
+                                        slb.push_byte(if (0x20..=0x7e).contains(&b) { b } else { b'.' });
+                                    }
+                                    slb.push_byte(b'"');
+                                    debug_line(&slb);
+                                }
+                                Err(e) => {
+                                    let mut lb = LineBuilder::new();
+                                    lb.push_bytes(b"clip set error: ");
+                                    lb.push_i64(e as i64);
+                                    engine.push_line(lb.as_bytes(), dry_userspace::surface::STYLE_WARN);
+                                }
+                            }
+                        } else if trimmed == b"get" || trimmed.is_empty() {
+                            let mut cbuf = [0u8; dry_userspace::MAX_IPC_EXTRA_BYTES];
+                            match dry_userspace::wm_ipc::wm_clipboard_get(disp_ep_cap, &mut cbuf) {
+                                Ok(n) => {
+                                    engine.push_line(&cbuf[..n], dry_userspace::surface::STYLE_OK);
+                                    let mut slb = LineBuilder::new();
+                                    slb.push_bytes(b"[DRY-SHELL] CMD=clip op=get len=");
+                                    slb.push_u64(n as u64);
+                                    slb.push_bytes(b" text=\"");
+                                    for &b in cbuf[..n].iter().take(48) {
+                                        slb.push_byte(if (0x20..=0x7e).contains(&b) { b } else { b'.' });
+                                    }
+                                    slb.push_byte(b'"');
+                                    debug_line(&slb);
+                                }
+                                Err(e) => {
+                                    let mut lb = LineBuilder::new();
+                                    lb.push_bytes(b"clip get error: ");
+                                    lb.push_i64(e as i64);
+                                    engine.push_line(lb.as_bytes(), dry_userspace::surface::STYLE_WARN);
+                                }
+                            }
+                        } else {
+                            engine.push_line(
+                                b"Usage: clip set <text> | clip get",
+                                dry_userspace::surface::STYLE_WARN,
+                            );
+                        }
+                    }
                     ShellCommand::Help => {
                         engine.format_help();
                         let _ = sys_write_debug(b"[DRY-SHELL] CMD=help ok=true\n");
@@ -592,11 +661,34 @@ pub extern "C" fn _start(sup_ep_cap: u64, init_input_ep_cap: u64) -> ! {
                                 trigger_crash_after_present = true;
                             }
                             if out.wants_break {
-                                break;
+                                exec_wants_break = true;
                             }
                         }
                     }
                 }
+                }
+                };
+                if let Some(ref parsed) = pipe_parsed {
+                    exec_one(parsed.lhs());
+                } else {
+                    exec_one(cmd_slice);
+                }
+                }
+                if exec_wants_break {
+                    break;
+                }
+                if let Some(parsed) = pipe_parsed {
+                    let mut cap_lines = [[0u8; dry_userspace::surface::TERM_COLS]; 32];
+                    let mut cap_lens = [0u8; 32];
+                    let n = engine.take_lines_since(mark_pushed, &mut cap_lines, &mut cap_lens);
+                    dry_userspace::shell_pipe::finish_pipe_or_redir(
+                        &parsed,
+                        sup_ep_cap,
+                        &mut cached_vfs_cap,
+                        &cap_lines[..n],
+                        &cap_lens[..n],
+                        engine,
+                    );
                 }
 
                 let _ = sys_sysinfo(&mut sys);

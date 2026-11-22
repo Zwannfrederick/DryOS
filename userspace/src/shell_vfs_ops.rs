@@ -411,6 +411,50 @@ pub fn try_exec_vfs_tree_cmd(
             }
             true
         }
+        b"i2c-hid-test" => {
+            match crate::sys_ipc_call_inline(
+                sup_ep_cap,
+                crate::pack_msg_tag(crate::abi_ext::IPC_OP_SUP_I2C_HID_TEST, 0, 1, 0),
+                [0; 4],
+                0,
+            ) {
+                Ok((tag, _, rmrs)) if msg_tag_label(tag) == IPC_OP_PONG => {
+                    let gen = rmrs[0];
+                    let dx = (rmrs[1] as i64) as i16;
+                    let dy = (rmrs[2] as i64) as i16;
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"i2c-hid-test PASS: gen=");
+                    lb.push_u64(gen);
+                    lb.push_bytes(b" dx=");
+                    lb.push_i64(i64::from(dx));
+                    lb.push_bytes(b" dy=");
+                    lb.push_i64(i64::from(dy));
+                    engine.push_line(lb.as_bytes(), STYLE_OK);
+
+                    let mut slb = LineBuilder::new();
+                    slb.push_bytes(b"[DRY-SHELL] CMD=i2c-hid-test gen=");
+                    slb.push_u64(gen);
+                    slb.push_bytes(b" dx=");
+                    slb.push_i64(i64::from(dx));
+                    slb.push_bytes(b" dy=");
+                    slb.push_i64(i64::from(dy));
+                    emit_dbg(&slb);
+                }
+                Ok((_, _, rmrs)) => {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"i2c-hid-test failed: ");
+                    lb.push_i64(rmrs[0] as i64);
+                    engine.push_line(lb.as_bytes(), STYLE_WARN);
+                }
+                Err(code) => {
+                    let mut lb = LineBuilder::new();
+                    lb.push_bytes(b"i2c-hid-test IPC error: ");
+                    lb.push_i64(code as i64);
+                    engine.push_line(lb.as_bytes(), STYLE_WARN);
+                }
+            }
+            true
+        }
         _ => false,
     }
 }

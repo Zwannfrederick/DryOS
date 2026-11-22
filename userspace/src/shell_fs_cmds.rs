@@ -59,7 +59,49 @@ pub fn try_exec_ext_cmd(
 ) -> Option<ShellExtOutcome> {
     let mut out = ShellExtOutcome::default();
     match cmd {
-        ShellCommand::OpenApp(arg) => match AppId::from_name(arg) {
+        ShellCommand::OpenApp(arg) => {
+            let mut app_name: &[u8] = arg;
+            if let Some(raw_target) = arg.strip_prefix(b"editor ") {
+                let mut tstart = 0usize;
+                while tstart < raw_target.len() && raw_target[tstart] == b' ' {
+                    tstart += 1;
+                }
+                let mut tend = raw_target.len();
+                while tend > tstart && raw_target[tend - 1] == b' ' {
+                    tend -= 1;
+                }
+                let raw_path = &raw_target[tstart..tend];
+                if !raw_path.is_empty() {
+                    if let Some(vcap) = crate::shell_ext::ensure_vfs_cap(sup_ep_cap, cached_vfs_cap) {
+                        let mut norm = [0u8; 96];
+                        if let Some(nlen) =
+                            crate::shell_vfs_ops::resolve_path(engine.cwd_bytes(), raw_path, &mut norm)
+                        {
+                            match crate::vfs_proto::vfs_create_file(
+                                vcap,
+                                b"/ram/.editor_target",
+                                0,
+                            ) {
+                                Ok(_) | Err(crate::EEXIST) => {
+                                    let _ = crate::vfs_proto::vfs_write_small(
+                                        vcap,
+                                        b"/ram/.editor_target",
+                                        &norm[..nlen],
+                                        false,
+                                    );
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                    app_name = b"editor";
+                }
+            } else if arg == b"editor" {
+                if let Some(vcap) = crate::shell_ext::ensure_vfs_cap(sup_ep_cap, cached_vfs_cap) {
+                    let _ = crate::vfs_proto::vfs_unlink_file(vcap, b"/ram/.editor_target");
+                }
+            }
+            match AppId::from_name(app_name) {
             Some(app) => match call_sup_action(sup_ep_cap, DesktopAction::LaunchOrFocusApp(app)) {
                 Ok(rmrs) => {
                     let mut lb = LineBuilder::new();
@@ -97,7 +139,8 @@ pub fn try_exec_ext_cmd(
                 b"Usage: open <terminal|lifestation|files|settings|editor|calc>",
                 STYLE_WARN,
             ),
-        },
+            }
+        }
         ShellCommand::CloseApp(arg) => match AppId::from_name(arg) {
             Some(app) => {
                 if app == AppId::Terminal {

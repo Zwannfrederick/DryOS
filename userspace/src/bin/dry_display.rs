@@ -34,7 +34,7 @@ use dry_userspace::wm_ipc::{
 };
 use dry_userspace::{
     msg_tag_label, pack_msg_tag, rdtsc_user, read_cs_ss, sys_cap_query, sys_cap_revoke, sys_exit,
-    sys_fb_map, sys_frame_alloc, sys_ipc_recv_ext, sys_ipc_reply_inline, sys_ipc_send_inline,
+    sys_fb_map, sys_frame_alloc, sys_ipc_reply_inline, sys_ipc_send_inline,
     sys_notify_signal, sys_vspace_map, sys_write_debug, UserCapInfo, UserFbInfo, UserIpcRecvExt,
     BADGE_INPUT_SVC, BADGE_SUPERVISOR, ETIMEDOUT, IPC_OP_ERR_INVAL, IPC_OP_ERR_PERM,
     IPC_OP_EXIT_CLEAN, IPC_OP_INPUT_EVENT, IPC_OP_PONG, IPC_OP_SURFACE_ATTACH,
@@ -234,7 +234,14 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
     loop {
         let recv_timeout = wm.next_dpms_recv_timeout_tsc(rdtsc_user());
         let mut ext = UserIpcRecvExt::default();
-        let (tag, reply_tok, mrs) = match sys_ipc_recv_ext(disp_ep_cap, 0, recv_timeout, &mut ext) {
+        let mut extra_buf = [0u8; dry_userspace::MAX_IPC_EXTRA_BYTES];
+        let (tag, extra_len, mrs) = match dry_userspace::vfs_proto::sys_ipc_recv_extra(
+            disp_ep_cap,
+            0,
+            recv_timeout,
+            &mut extra_buf,
+            &mut ext,
+        ) {
             Ok(v) => v,
             Err(ETIMEDOUT) => {
                 let now_tsc = rdtsc_user();
@@ -254,6 +261,7 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
             }
             Err(_) => break,
         };
+        let reply_tok = ext.reply_token;
         let op = msg_tag_label(tag);
         match op {
             IPC_OP_SURFACE_ATTACH => {
@@ -895,7 +903,16 @@ pub extern "C" fn _start(disp_ep_cap: u64, fb_cap: u64) -> ! {
                 sys_exit(0);
             }
             _ => {
-                if handle_wm_admin_op(op, disp_ep_cap, reply_tok, mrs, &ext, wm, comp) {
+                if handle_wm_admin_op(
+                    op,
+                    disp_ep_cap,
+                    reply_tok,
+                    mrs,
+                    &ext,
+                    &extra_buf[..extra_len],
+                    wm,
+                    comp,
+                ) {
                     continue;
                 }
                 if reply_tok != 0 {

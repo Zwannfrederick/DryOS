@@ -43,7 +43,11 @@ const RAM_PATH: &[u8] = b"/ram/notes.txt";
 
 struct EditorState {
     vfs_ep: u64,
+    disp_ep: u64,
     persist_ok: bool,
+    custom_path: [u8; 96],
+    custom_path_len: usize,
+    path_idx: u8,
     lines: [[u8; MAX_LINE_COLS]; MAX_LINES],
     lens: [u8; MAX_LINES],
     line_count: usize,
@@ -57,10 +61,14 @@ struct EditorState {
 }
 
 impl EditorState {
-    const fn new(vfs_ep: u64, persist_ok: bool) -> Self {
+    const fn new(vfs_ep: u64, disp_ep: u64, persist_ok: bool) -> Self {
         Self {
             vfs_ep,
+            disp_ep,
             persist_ok,
+            custom_path: [0; 96],
+            custom_path_len: 0,
+            path_idx: 0,
             lines: [[0; MAX_LINE_COLS]; MAX_LINES],
             lens: [0; MAX_LINES],
             line_count: 1,
@@ -80,8 +88,104 @@ impl EditorState {
         self.status_len = n;
     }
 
-    fn active_path(&self) -> &'static [u8] {
-        if self.persist_ok { PERSIST_PATH } else { RAM_PATH }
+    fn active_path(&self) -> &[u8] {
+        if self.custom_path_len > 0 {
+            &self.custom_path[..self.custom_path_len]
+        } else if self.persist_ok {
+            PERSIST_PATH
+        } else {
+            RAM_PATH
+        }
+    }
+
+    fn copy_active_path(&self, out: &mut [u8; 96]) -> usize {
+        let src = self.active_path();
+        let n = src.len().min(out.len());
+        out[..n].copy_from_slice(&src[..n]);
+        n
+    }
+
+    fn set_custom_path(&mut self, path: &[u8]) {
+        let n = path.len().min(self.custom_path.len());
+        self.custom_path[..n].copy_from_slice(&path[..n]);
+        self.custom_path_len = n;
+    }
+
+    fn open_active_file(&mut self) -> bool {
+        let mut pbuf = [0u8; 96];
+        let plen = self.copy_active_path(&mut pbuf);
+        let path = &pbuf[..plen];
+        if self.vfs_ep != 0 {
+            let mut raw = [0u8; MAX_DOC_BYTES];
+            if let Ok((n, _)) = vfs_read_file(self.vfs_ep, path, 0, &mut raw) {
+                self.load_bytes(&raw[..n]);
+                self.set_status(b"Opened file");
+                let mut lb = LineBuilder::new();
+                lb.push_bytes(b"[DRY-EDITOR] OPEN path=");
+                lb.push_bytes(path);
+                lb.push_bytes(b" bytes=");
+                lb.push_u64(n as u64);
+                app_log_line(&lb);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn cycle_open_path(&mut self) {
+        self.path_idx = (self.path_idx + 1) % 3;
+        let next: &[u8] = match self.path_idx {
+            1 => if self.persist_ok { PERSIST_PATH } else { RAM_PATH },
+            2 => RAM_PATH,
+            _ => b"/ram/welcome.txt",
+        };
+        self.set_custom_path(next);
+        if !self.open_active_file() {
+            self.load_bytes(b"");
+            self.set_status(b"Ready (new buffer)");
+            let mut pbuf = [0u8; 96];
+            let plen = self.copy_active_path(&mut pbuf);
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-EDITOR] OPEN path=");
+            lb.push_bytes(&pbuf[..plen]);
+            lb.push_bytes(b" bytes=0");
+            app_log_line(&lb);
+        }
+    }
+
+    fn copy_line_to_clip(&mut self) {
+        let len = self.lens[self.cur_row] as usize;
+        let line = self.lines[self.cur_row];
+        let mut lb = LineBuilder::new();
+        if dry_userspace::wm_ipc::wm_clipboard_set(self.disp_ep, &line[..len]).is_ok() {
+            self.set_status(b"Copied current line to clipboard");
+            lb.push_bytes(b"[DRY-EDITOR] CLIP_COPY len=");
+            lb.push_u64(len as u64);
+            app_log_line(&lb);
+        } else {
+            self.set_status(b"Clipboard copy failed");
+        }
+    }
+
+    fn paste_from_clip(&mut self) {
+        let mut buf = [0u8; dry_userspace::MAX_IPC_EXTRA_BYTES];
+        match dry_userspace::wm_ipc::wm_clipboard_get(self.disp_ep, &mut buf) {
+            Ok(n) => {
+                for &b in &buf[..n] {
+                    if b == b'\n' {
+                        self.insert_newline();
+                    } else if (0x20..=0x7e).contains(&b) {
+                        self.insert_char(b);
+                    }
+                }
+                self.set_status(b"Pasted from clipboard");
+                let mut lb = LineBuilder::new();
+                lb.push_bytes(b"[DRY-EDITOR] CLIP_PASTE len=");
+                lb.push_u64(n as u64);
+                app_log_line(&lb);
+            }
+            Err(_) => self.set_status(b"Clipboard paste failed"),
+        }
     }
 
     fn load_bytes(&mut self, raw: &[u8]) {
@@ -114,12 +218,31 @@ impl EditorState {
 
     fn load_initial(&mut self) {
         if self.vfs_ep != 0 {
-            let mut raw = [0u8; MAX_DOC_BYTES];
-            if let Ok((n, _)) = vfs_read_file(self.vfs_ep, self.active_path(), 0, &mut raw) {
-                self.load_bytes(&raw[..n]);
-                self.set_status(b"Loaded existing notes");
-                return;
+            let mut tbuf = [0u8; 96];
+            if let Ok((mut tn, _)) = vfs_read_file(self.vfs_ep, b"/ram/.editor_target", 0, &mut tbuf) {
+                while tn > 0 && matches!(tbuf[tn - 1], b' ' | b'\n' | b'\r') {
+                    tn -= 1;
+                }
+                if tn > 0 {
+                    self.set_custom_path(&tbuf[..tn]);
+                }
+                let _ = dry_userspace::vfs_proto::vfs_unlink_file(self.vfs_ep, b"/ram/.editor_target");
             }
+        }
+        if self.open_active_file() {
+            return;
+        }
+        if self.custom_path_len > 0 {
+            self.load_bytes(b"");
+            self.set_status(b"New custom buffer");
+            let mut pbuf = [0u8; 96];
+            let plen = self.copy_active_path(&mut pbuf);
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-EDITOR] OPEN path=");
+            lb.push_bytes(&pbuf[..plen]);
+            lb.push_bytes(b" bytes=0");
+            app_log_line(&lb);
+            return;
         }
         self.load_bytes(
             b"DRY Glass Notes\nPersistent scratchpad (/persist/notes.txt)\nPress Ctrl+S or click [Save] to flush.\n",
@@ -154,7 +277,9 @@ impl EditorState {
                 n += 1;
             }
         }
-        let path = self.active_path();
+        let mut pbuf = [0u8; 96];
+        let plen = self.copy_active_path(&mut pbuf);
+        let path = &pbuf[..plen];
         match vfs_create_file(self.vfs_ep, path, 0) {
             Ok(_) | Err(EEXIST) => {}
             Err(_) => {
@@ -180,16 +305,12 @@ impl EditorState {
                 idx += 1;
             }
         }
-        if self.persist_ok {
+        if path.starts_with(b"/persist") {
             let _ = vfs_sync(self.vfs_ep);
         }
         self.dirty_doc = false;
         self.last_bytes = n;
-        self.set_status(if self.persist_ok {
-            b"Saved & synced to /persist/notes.txt"
-        } else {
-            b"Saved to volatile /ram/notes.txt"
-        });
+        self.set_status(b"Saved & synced buffer");
 
         let mut lb = LineBuilder::new();
         lb.push_bytes(b"[DRY-EDITOR] SAVED path=");
@@ -309,6 +430,19 @@ impl EditorState {
             if ev.ascii == 0x11 || ev.ascii == b'q' || ev.ascii == b'Q' || scan7 == 0x10 {
                 return (false, true);
             }
+            if ev.ascii == 0x03 || ev.ascii == b'c' || ev.ascii == b'C' || scan7 == 0x2e {
+                self.copy_line_to_clip();
+                return (true, false);
+            }
+            if ev.ascii == 0x16 || ev.ascii == b'v' || ev.ascii == b'V' || scan7 == 0x2f {
+                self.paste_from_clip();
+                self.ensure_cursor_visible(win);
+                return (true, false);
+            }
+            if ev.ascii == 0x0f || ev.ascii == b'o' || ev.ascii == b'O' || scan7 == 0x18 {
+                self.cycle_open_path();
+                return (true, false);
+            }
         }
         if ev.keycode == KEY_ESC {
             return (false, true);
@@ -355,13 +489,15 @@ impl EditorState {
     }
 
     fn render_frame(&mut self, win: &mut PixelAppWindow, scratch_open: bool, step: PointerStep) -> EditorAction {
+        let mut pbuf = [0u8; 96];
+        let plen = self.copy_active_path(&mut pbuf);
+        let total = self.total_bytes();
         let mut line_slices: [&[u8]; MAX_LINES] = [&[]; MAX_LINES];
         for (r, slot) in line_slices.iter_mut().enumerate().take(self.line_count) {
             let len = (self.lens[r] as usize).min(MAX_LINE_COLS);
             *slot = &self.lines[r][..len];
         }
-        let path = self.active_path();
-        let total = self.total_bytes();
+        let path = &pbuf[..plen];
         let mut view = EditorView {
             path,
             persist_ok: self.persist_ok,
@@ -449,7 +585,7 @@ pub extern "C" fn _start(sup_ep_cap: u64, _arg1: u64) -> ! {
     let init_flags = PixelAppWindow::query_theme_flags(sup_ep_cap);
     let mut win = PixelAppWindow::alloc_and_map(EDITOR_SURF_VADDR, WIN_W, WIN_H, init_flags)
         .unwrap_or_else(|_| sys_exit(243));
-    let mut ed = EditorState::new(vfs_ep, persist_ok);
+    let mut ed = EditorState::new(vfs_ep, disp_ep_cap, persist_ok);
     ed.load_initial();
     let _ = ed.render_frame(&mut win, false, PointerStep::default());
     win.publish_initial();

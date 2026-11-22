@@ -7,6 +7,7 @@ use crate::abi_ext::{sys_dev_map_window, sys_dma_alloc, sys_dma_alloc_2m};
 use crate::{rdtsc_user, sys_cap_revoke, sys_yield, ENOSPC, ETIMEDOUT};
 
 pub mod hid;
+pub mod hub;
 pub mod log_svc;
 pub mod msc;
 pub mod xhci;
@@ -17,6 +18,7 @@ pub const USB_PROTO_KBD: u8 = 0x01;
 pub const USB_PROTO_MOUSE: u8 = 0x02;
 
 pub const USB_CLASS_MASS_STORAGE: u8 = 0x08;
+pub const USB_CLASS_HUB: u8 = 0x09;
 pub const USB_SUBCLASS_SCSI: u8 = 0x06;
 pub const USB_PROTO_BOT: u8 = 0x50;
 

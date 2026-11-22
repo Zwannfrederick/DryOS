@@ -138,12 +138,14 @@ pub fn try_gpu_present_or_fallback(wm: &mut WindowManager, bbox: Rect) -> Option
 
 /// Handle `WM_TOGGLE_TILING`, `WM_BIND_SUP_NOTIF`, `WM_POLL_ACTION`, `WM_FOCUS_OWNER`, and `WM_QUERY_STATE`.
 /// Returns `true` if `op` was handled here.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_wm_admin_op(
     op: u32,
     disp_ep_cap: u64,
     reply_tok: u64,
     mrs: [u64; 4],
     ext: &UserIpcRecvExt,
+    extra_data: &[u8],
     wm: &mut WindowManager,
     comp: &mut DesktopCompositor,
 ) -> bool {
@@ -543,7 +545,96 @@ pub fn handle_wm_admin_op(
             }
             true
         }
+        crate::abi_ext::IPC_OP_WM_CLIP_SET => {
+            if ext.sender_badge == 0 {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            let n = extra_data
+                .len()
+                .min(crate::MAX_IPC_EXTRA_BYTES)
+                .min(wm.clip_buf.len());
+            wm.clip_buf[..n].copy_from_slice(&extra_data[..n]);
+            wm.clip_len = n as u16;
+            let mut lb = LineBuilder::new();
+            lb.push_bytes(b"[DRY-WM] CLIP_SET len=");
+            lb.push_u64(n as u64);
+            wm_log_line(&lb);
+            if reply_tok != 0 {
+                let _ = sys_ipc_reply_inline(
+                    disp_ep_cap,
+                    reply_tok,
+                    pack_msg_tag(IPC_OP_PONG, 0, 1, 0),
+                    [n as u64, 0, 0, 0],
+                );
+            }
+            true
+        }
+        crate::abi_ext::IPC_OP_WM_CLIP_GET => {
+            if ext.sender_badge == 0 {
+                wm.unauthorized_rejects = wm.unauthorized_rejects.wrapping_add(1);
+                reply_err(disp_ep_cap, reply_tok, IPC_OP_ERR_PERM);
+                return true;
+            }
+            let n = (wm.clip_len as usize)
+                .min(crate::MAX_IPC_EXTRA_BYTES)
+                .min(wm.clip_buf.len());
+            if reply_tok != 0 {
+                let _ = crate::vfs_proto::sys_ipc_reply_extra(
+                    disp_ep_cap,
+                    reply_tok,
+                    IPC_OP_PONG,
+                    [n as u64, 0, 0, 0],
+                    &wm.clip_buf[..n],
+                );
+            }
+            true
+        }
         _ => false,
+    }
+}
+
+pub fn wm_clipboard_set(disp_ep: u64, data: &[u8]) -> Result<usize, isize> {
+    if disp_ep == 0 {
+        return Err(crate::EINVAL);
+    }
+    let take = data.len().min(crate::MAX_IPC_EXTRA_BYTES);
+    let mut rx = [0u8; crate::MAX_IPC_EXTRA_BYTES];
+    let (tag, _, mrs) = crate::vfs_proto::sys_ipc_call_extra(
+        disp_ep,
+        crate::abi_ext::IPC_OP_WM_CLIP_SET,
+        [0; 4],
+        &data[..take],
+        &mut rx,
+        0,
+    )?;
+    if msg_tag_label(tag) == IPC_OP_PONG {
+        Ok((mrs[0] as usize).min(crate::MAX_IPC_EXTRA_BYTES))
+    } else {
+        Err(crate::EPERM)
+    }
+}
+
+pub fn wm_clipboard_get(
+    disp_ep: u64,
+    out: &mut [u8; crate::MAX_IPC_EXTRA_BYTES],
+) -> Result<usize, isize> {
+    if disp_ep == 0 {
+        return Err(crate::EINVAL);
+    }
+    let (tag, rx_len, _) = crate::vfs_proto::sys_ipc_call_extra(
+        disp_ep,
+        crate::abi_ext::IPC_OP_WM_CLIP_GET,
+        [0; 4],
+        &[],
+        out,
+        0,
+    )?;
+    if msg_tag_label(tag) == IPC_OP_PONG {
+        Ok(rx_len.min(crate::MAX_IPC_EXTRA_BYTES))
+    } else {
+        Err(crate::EPERM)
     }
 }
 

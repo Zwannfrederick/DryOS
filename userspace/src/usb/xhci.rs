@@ -445,7 +445,20 @@ impl XhciController {
         let _ = self.submit_cmd(0, 0, ((slot_id as u32) << 24) | (TRB_DISABLE_SLOT << 10), 500);
     }
 
+    #[inline]
     pub fn address_device(&mut self, slot_id: u8, port_1based: u8, speed: u8) -> Result<(), isize> {
+        self.address_device_routed(slot_id, port_1based, 0, speed, 0, 0)
+    }
+
+    pub fn address_device_routed(
+        &mut self,
+        slot_id: u8,
+        port_1based: u8,
+        route_string: u32,
+        speed: u8,
+        tt_hub_slot: u8,
+        tt_port: u8,
+    ) -> Result<(), isize> {
         let idx = (slot_id as usize) - 1;
         unsafe {
             core::ptr::write_bytes(self.dev_ctx_vas[idx] as *mut u8, 0, 2048);
@@ -463,10 +476,22 @@ impl XhciController {
         let ep0_pa = self.ep0_rings[idx].pa;
         let slot_ctx = DMA_INCTX_VA + self.ctx_sz as u64;
         let ep0_ctx = DMA_INCTX_VA + (self.ctx_sz as u64) * 2;
+        let tt_dw2 = if tt_hub_slot != 0 && speed <= 2 {
+            u32::from(tt_hub_slot) | (u32::from(tt_port) << 8)
+        } else {
+            0
+        };
         unsafe {
             w32(DMA_INCTX_VA, 0x04, 0x3); // Input Control Add Flags: A0 + A1
-            w32(slot_ctx, 0x00, (1 << 27) | ((speed as u32) << 20)); // Context Entries=1
+            w32(
+                slot_ctx,
+                0x00,
+                (1 << 27) | ((speed as u32) << 20) | (route_string & 0x000f_ffff),
+            ); // Context Entries=1
             w32(slot_ctx, 0x04, (port_1based as u32) << 16);
+            if tt_dw2 != 0 {
+                w32(slot_ctx, 0x08, tt_dw2);
+            }
             w32(ep0_ctx, 0x04, (mps0 << 16) | (4 << 3) | (3 << 1)); // Control EP, CErr=3
             w64(ep0_ctx, 0x08, ep0_pa | 1); // TR Deq + DCS=1
             w32(ep0_ctx, 0x10, 8);
@@ -479,6 +504,52 @@ impl XhciController {
             1000,
         )?;
         if cc != CC_SUCCESS { Err(EIO) } else { Ok(()) }
+    }
+
+    pub fn configure_hub_slot(
+        &mut self,
+        slot_id: u8,
+        nbr_ports: u8,
+        speed: u8,
+        mtt: bool,
+    ) -> Result<(), isize> {
+        let slot_src = self.dev_ctx_vas[(slot_id as usize) - 1];
+        let dw0_old = unsafe { r32(slot_src, 0x00) };
+        let dw1_old = unsafe { r32(slot_src, 0x04) };
+        let dw2_old = unsafe { r32(slot_src, 0x08) };
+        let mtt_bit = if mtt && speed == 3 { 1u32 << 25 } else { 0 };
+        let entries = (dw0_old >> 27).max(1);
+        let new_dw0 = (dw0_old & !(0x1f << 27) & !(0x3 << 25))
+            | (entries << 27)
+            | (1u32 << 26)
+            | mtt_bit;
+        let new_dw1 = (dw1_old & 0x00ff_ffff) | (u32::from(nbr_ports) << 24);
+
+        unsafe { core::ptr::write_bytes(DMA_INCTX_VA as *mut u8, 0, 4096) };
+        let slot_dst = DMA_INCTX_VA + self.ctx_sz as u64;
+        unsafe {
+            w32(DMA_INCTX_VA, 0x04, 1); // A0: Slot Context
+            w32(slot_dst, 0x00, new_dw0);
+            w32(slot_dst, 0x04, new_dw1);
+            w32(slot_dst, 0x08, dw2_old);
+        }
+        let pa = self.inctx_pa;
+        let (cc, _) = self.submit_cmd(
+            pa as u32,
+            (pa >> 32) as u32,
+            ((slot_id as u32) << 24) | (TRB_CONFIG_EP << 10),
+            1000,
+        )?;
+        if cc == CC_SUCCESS {
+            return Ok(());
+        }
+        let (cc2, _) = self.submit_cmd(
+            pa as u32,
+            (pa >> 32) as u32,
+            ((slot_id as u32) << 24) | (TRB_EVAL_CTX << 10),
+            1000,
+        )?;
+        if cc2 != CC_SUCCESS { Err(EIO) } else { Ok(()) }
     }
 
     pub fn eval_ep0_mps(&mut self, slot_id: u8, mps0: u16) -> Result<(), isize> {
@@ -552,11 +623,15 @@ impl XhciController {
         let slot_src = self.dev_ctx_vas[(slot_id as usize) - 1];
         let dw0_old = unsafe { r32(slot_src, 0x00) } & 0x07ff_ffff;
         let dw1_old = unsafe { r32(slot_src, 0x04) };
+        let dw2_old = unsafe { r32(slot_src, 0x08) };
         let slot_dst = DMA_INCTX_VA + self.ctx_sz as u64;
         unsafe {
             w32(DMA_INCTX_VA, 0x04, add_flags);
             w32(slot_dst, 0x00, dw0_old | ((max_dci as u32) << 27));
             w32(slot_dst, 0x04, dw1_old);
+            if dw2_old != 0 {
+                w32(slot_dst, 0x08, dw2_old);
+            }
         }
 
         let pa = self.inctx_pa;

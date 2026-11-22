@@ -353,6 +353,44 @@ def build_sdk_demo_island() -> pathlib.Path:
     return dst_bin
 
 
+def build_i2c_hid_island() -> pathlib.Path:
+    """Compile standalone MIT/Apache-2.0 `dry-i2c-hid` Touchpad Driver Island (`dry-driver-sdk`)."""
+    hid_dir = ROOT / "drivers" / "i2c-hid-island"
+    linker_script = ROOT / "drivers" / "sdk-example-pci" / "linker.ld"
+    base_env = userspace_cargo_env()
+    hid_env = {
+        **base_env,
+        "RUSTFLAGS": base_env["RUSTFLAGS"].replace(
+            str(USERSPACE_DIR / "linker_user.ld"), str(linker_script)
+        ),
+    }
+    print("[QEMU-TEST] Running cargo clippy (-D warnings) on dry-i2c-hid...")
+    subprocess.check_call(
+        [
+            "cargo", "clippy", "--offline", "--manifest-path", str(hid_dir / "Cargo.toml"),
+            "-Z", "build-std=core,compiler_builtins", "--target", "x86_64-unknown-none",
+            "--features", "island-bin", "--bin", "dry-i2c-hid",
+            "--", "-D", "warnings",
+        ],
+        env=hid_env,
+    )
+    print("[QEMU-TEST] Building release ELF64 dry-i2c-hid (dry-driver-sdk ABI v1)...")
+    subprocess.check_call(
+        [
+            "cargo", "build", "--offline", "--manifest-path", str(hid_dir / "Cargo.toml"),
+            "-Z", "build-std=core,compiler_builtins", "--target", "x86_64-unknown-none",
+            "--features", "island-bin", "--bin", "dry-i2c-hid",
+            "--release",
+        ],
+        env=hid_env,
+    )
+    src_bin = hid_dir / "target" / "x86_64-unknown-none" / "release" / "dry-i2c-hid"
+    dst_bin = USERSPACE_DIR / "target" / "x86_64-unknown-none" / "release" / "dry-i2c-hid"
+    dst_bin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_bin, dst_bin)
+    return dst_bin
+
+
 def _pack_bin_tar(out_dir: pathlib.Path, entries: tuple[tuple[str, pathlib.Path], ...]) -> pathlib.Path:
     """Pack stripped `/bin` tools into a single <=2 MiB POSIX USTAR archive (`dry-bin.tar`)."""
     tar_path = out_dir / "dry-bin.tar"
@@ -417,6 +455,7 @@ def build_userspace() -> list[pathlib.Path]:
     build_lx_compat_island(LX_DRM_ISLAND_DIR, "drm_bochs", "dry-lx-drm-bochs")
     build_lx_compat_island(LX_NET_ISLAND_DIR, "net_8139cp", "dry-lx-net")
     build_sdk_demo_island()
+    build_i2c_hid_island()
     import build_linux_test_bins
 
     lx_hello_elf = build_linux_test_bins.build_lx_hello()
@@ -426,6 +465,7 @@ def build_userspace() -> list[pathlib.Path]:
             ("dry-probe.elf", out_dir / "dry-probe"),
             ("dry-net.elf", out_dir / "dry-net"),
             ("dry-linux-abi.elf", out_dir / "dry-linux-abi"),
+            ("dry-i2c-hid.elf", out_dir / "dry-i2c-hid"),
             ("lx-hello.elf", lx_hello_elf),
         ),
     )

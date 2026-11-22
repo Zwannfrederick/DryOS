@@ -141,6 +141,9 @@ pub const ENOTEMPTY: isize = -39;
 pub const IPC_OP_SUP_EXEC_VFS: u32 = 148;
 pub const IPC_OP_SUP_GET_NET_CAP: u32 = 149;
 pub const IPC_OP_SUP_LINUX_RUN: u32 = 181;
+pub const IPC_OP_WM_CLIP_SET: u32 = 182;
+pub const IPC_OP_WM_CLIP_GET: u32 = 183;
+pub const IPC_OP_SUP_I2C_HID_TEST: u32 = 184;
 
 pub const SPAWN_FLAG_SYSCALL_REDIRECT: u64 = 1 << 49;
 pub const SYSCALL_REDIRECT_LABEL: u32 = 0x7fa8;

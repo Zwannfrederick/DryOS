@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Standalone Intel LPSS I2C-HID Touchpad Driver Island (`dry-i2c-hid.elf`).
+
+[workspace]
+
+[package]
+name = "dry-i2c-hid"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "dry_i2c_hid_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dry-i2c-hid"
+path = "src/main.rs"
+required-features = ["island-bin"]
+
+[features]
+default = []
+island-bin = ["dep:dry-userspace"]
+
+[dependencies]
+dry-driver-sdk = { path = "../dry-driver-sdk" }
+dry-userspace = { path = "../../userspace", optional = true }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 1
+panic = "abort"

@@ -43,6 +43,7 @@ pub mod shell_ext;
 pub mod shell_fs_cmds;
 pub mod shell_gpu_cmds;
 pub mod shell_net_cmds;
+pub mod shell_pipe;
 pub mod shell_sys_cmds;
 pub mod shell_vfs_ops;
 pub mod sup_audit;

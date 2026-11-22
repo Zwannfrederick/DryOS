@@ -77,6 +77,8 @@ pub struct WindowManager {
     pub broker_in_data_path: bool,
     pub back_caps: [u64; 8],
     pub glass: GlassState,
+    pub clip_buf: [u8; 512],
+    pub clip_len: u16,
 }
 
 impl WindowManager {
@@ -136,6 +138,8 @@ impl WindowManager {
             broker_in_data_path: false,
             back_caps: [0; 8],
             glass: GlassState::new(),
+            clip_buf: [0; 512],
+            clip_len: 0,
         }
     }
 

@@ -40,6 +40,7 @@ pub enum ShellCommand<'a> {
     SecAudit,
     GpuFault,
     Shutdown,
+    Clip(&'a [u8]),
     StorageVault(&'a [u8], &'a [u8]),
     UnsupportedPosix(u8),
     Unknown(&'a [u8]),
@@ -102,8 +103,10 @@ pub fn parse_command(raw: &[u8]) -> ShellCommand<'_> {
         b"sec-audit" => ShellCommand::SecAudit,
         b"gpufault" => ShellCommand::GpuFault,
         b"shutdown" | b"exit" => ShellCommand::Shutdown,
+        b"clip" => ShellCommand::Clip(rest),
         b"ls" | b"cat" | b"write" | b"rm" | b"ln" | b"sync" | b"pwd" | b"cd" | b"mkdir"
-        | b"rmdir" | b"cp" | b"mv" | b"exec" | b"linux-run" | b"ifconfig" | b"ping" | b"nslookup" | b"httpget"
+        | b"rmdir" | b"cp" | b"mv" | b"exec" | b"linux-run" | b"i2c-hid-test"
+        | b"ifconfig" | b"ping" | b"nslookup" | b"httpget"
         | b"dmesg" | b"lspci" | b"lsusb" | b"lsblk"
         | b"nvme" | b"drvctl" | b"uname" | b"free" | b"mounts" | b"vault-status"
         | b"vault-unlock" | b"vault-lock" | b"vault-passwd" | b"vault-test"
@@ -357,6 +360,7 @@ pub struct ShellEngine {
     lines: [[SurfaceCell; TERM_COLS]; SCROLLBACK_CAP],
     head: usize,
     count: usize,
+    total_pushed: usize,
     scroll_up: usize,
     hist_buf: [[u8; MAX_INPUT_LEN]; HIST_CAP],
     hist_lens: [u8; HIST_CAP],
@@ -378,6 +382,7 @@ impl ShellEngine {
             lines: [[SurfaceCell::BLANK; TERM_COLS]; SCROLLBACK_CAP],
             head: 0,
             count: 0,
+            total_pushed: 0,
             scroll_up: 0,
             hist_buf: [[0; MAX_INPUT_LEN]; HIST_CAP],
             hist_lens: [0; HIST_CAP],
@@ -547,6 +552,7 @@ impl ShellEngine {
     }
 
     fn alloc_scroll_slot(&mut self) -> usize {
+        self.total_pushed = self.total_pushed.wrapping_add(1);
         if self.count < SCROLLBACK_CAP {
             let idx = (self.head + self.count) % SCROLLBACK_CAP;
             self.count += 1;
@@ -556,6 +562,40 @@ impl ShellEngine {
             self.head = (self.head + 1) % SCROLLBACK_CAP;
             idx
         }
+    }
+
+    #[inline]
+    pub const fn mark_output(&self) -> (usize, usize) {
+        (self.total_pushed, self.count)
+    }
+
+    pub fn take_lines_since(
+        &mut self,
+        mark_pushed: usize,
+        out: &mut [[u8; TERM_COLS]],
+        lens: &mut [u8],
+    ) -> usize {
+        let pushed = self.total_pushed.wrapping_sub(mark_pushed).min(self.count);
+        if pushed == 0 {
+            return 0;
+        }
+        let start_off = self.count - pushed;
+        let copy_n = pushed.min(out.len()).min(lens.len());
+        for j in 0..copy_n {
+            let slot = (self.head + start_off + j) % SCROLLBACK_CAP;
+            let row = &self.lines[slot];
+            let mut end = TERM_COLS;
+            while end > 0 && (row[end - 1].ch == b' ' || row[end - 1].ch == 0) {
+                end -= 1;
+            }
+            for c in 0..end {
+                out[j][c] = row[c].ch;
+            }
+            lens[j] = end as u8;
+        }
+        self.count -= pushed;
+        self.full_dirty = true;
+        copy_n
     }
 
     fn push_raw_row(&mut self, slice: &[u8], style: u8) {
@@ -571,11 +611,12 @@ impl ShellEngine {
         self.push_line(b"DRY Native Terminal Commands (real kernel/service APIs):", STYLE_ACCENT);
         self.push_line(b"  help              Command summary & desktop shortcuts", STYLE_DEFAULT);
         self.push_line(b"  clear | history   Clear viewport | show 16-entry command history", STYLE_DEFAULT);
-        self.push_line(b"  echo <text>       Print literal text (no POSIX/bash expansion)", STYLE_DEFAULT);
+        self.push_line(b"  echo <text>       Print literal text (| grep/head/wc, >, >> supported)", STYLE_DEFAULT);
         self.push_line(b"  sysinfo | uptime  Live CPU, APIC, RAM, IPC, IRQ & TSC telemetry", STYLE_DEFAULT);
         self.push_line(b"  ps                Live Ring 3 process table (SYS_PROC_LIST)", STYLE_DEFAULT);
         self.push_line(b"  apps              Registered native apps & supervisor state", STYLE_DEFAULT);
         self.push_line(b"  open|close|restart <terminal|lifestation|files|settings|editor|calc>", STYLE_DEFAULT);
+        self.push_line(b"  clip set|get      Shared desktop clipboard IPC | Ctrl+C/V/O in Editor", STYLE_DEFAULT);
         self.push_line(b"  tile              Toggle Floating / Tiling window layout", STYLE_DEFAULT);
         self.push_line(
             b"  ls|cd|pwd|mkdir|rmdir|cat|write|cp|mv|rm|ln|sync|exec|linux-run  VFS",
@@ -585,7 +626,7 @@ impl ShellEngine {
             b"  ifconfig | ping <ip> | nslookup <host> | httpget <url>  Net",
             STYLE_DEFAULT,
         );
-        self.push_line(b"  dmesg|lspci|lsusb|lsblk|nvme|drvctl|uname|free|mounts  Sys", STYLE_DEFAULT);
+        self.push_line(b"  dmesg|lspci|lsusb|lsblk|nvme|drvctl|i2c-hid-test|uname|free|mounts", STYLE_DEFAULT);
         self.push_line(b"  vault-status|vault-unlock|vault-lock|vault-passwd  DRY Vault", STYLE_DEFAULT);
         self.push_line(b"  gpufault|blank|lock|reboot|poweroff|shutdown|suspend  System", STYLE_DEFAULT);
         self.push_line(b"Keys: Up/Down hist | PgUp/PgDn scroll | Alt+1..6 apps | Alt+Space", STYLE_MUTED);
