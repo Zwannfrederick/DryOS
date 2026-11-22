@@ -1,53 +1,51 @@
 # DRY OS — Sıfır-Bağlam Mühendislik Devir Teslim Kılavuzu (`HANDOVER.md`)
 
-> **Son Güncelleme:** 20 Kasım 2026 (`Project Ascension 8.0` on `ascension-8.0`: `29/32` Ring-3 Modülü, M1 `c7faf46` HWVAL `256 MiB` Live USB + 5-Kapılı FAT32 `DRYOS_LOGS`, M2 `30bec64` Güvenlik/Mimari Sertleştirme, M3 `a883d1a` Driver Island ABI v1 + `dry-driver-sdk`, M4 `af957da` GPU Sertleştirme + Zorunlu NVIDIA Seviye-1 Adası [`BLOCKED`/`N/A`], M5 Kıyaslama & Doğrulama Raporları — **`164/164` QEMU + `--p18-only` `21/21` + `--p17-only` `4/4` + `--p3-matrix` `5/5` + `dry-driver-sdk` `5/5` PASS**)  
+> **Son Güncelleme:** 22 Kasım 2026 (`Project Ascension 9.0` on `ascension-9.0`: `30/32` Modül [`29` ELF + `dry-bin.tar`], M1 `5187395` Stabilizasyon & `-j` Paralel Koşucu, M2 `88441d5` Frame2M VFS Dinamik Exec & `/bin` USTAR, M3 `233a26d` `dry-net` TCP/IP & `dry-linux-abi` Statik ELF64, M4 `35ea9cb` xHCI Hub Cascade, `i2c-hid` SDK Adası, Pano IPC, Kabuk Boru/Yönlendirme & Editör Yolları, M5 HWVAL v0.9.0 Live USB & Raporlar — **`170/170` QEMU `-j 4` + `--p19-only` `6/6` + `--p18-only` `21/21` + `--p17-only` `4/4` + `--p3-matrix` `5/5` + `7/7` SDK PASS**)  
 > **İlke:** *Minimum Overhead. Maximum Useful Work. Correctness first. Security always. Performance measured.*
 
 ---
 
 ## SONRAKİ OTURUM — YARINKİ AJANLAR (GPT / CLAUDE / KODLAMA AJANI) BURADAN BAŞLA
 
-1. **Projenin Mevcut Durumu ve Kesinleşmiş Mimari Karar (`ADR-016` .. `ADR-026`):**
-   - DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + **`29/32`** adet statik `CPL=3` ELF64 kullanıcı alanı ikilisi; `MAX_LATCHED_MODULES = 32`).
-   - `Ascension 7.0` (`b0387ab`) ve **`Project Ascension 8.0` (`ascension-8.0`, M1..M5)** tamamlanmıştır: `256 MiB` 3-bölümlü HWVAL GPT USB (`DRYOS_ESP` + `DRYOS_PERSIST` + `DRYOS_LOGS` FAT32), 5-kapılı xHCI USB MSC köken doğrulaması (`0x1f`) ve SHA-256 read-back doğrulamalı FAT32+LFN günlük yazıcısı, ortak `hwdiag` çerçevesi (`5` Limine profili, `15` `dry` komutu, `13` sesyon dosyası + `manifest.sha256`, `tools/retrieve_dryos_logs.py`), M2 çekirdek/userspace güvenlik & mimari sertleştirmeleri (`ARCHITECTURE_AUDIT.md`, `SECURITY_AUDIT.md`), Driver Island ABI v1 (`0x0001_0000`) + bağımsız `drivers/dry-driver-sdk/` + `dry-sdk-demo.elf` (`#28/32`), `ALLOW_PHYSICAL_GPU_WRITES = false`, ve zorunlu fail-closed NVIDIA Seviye-1 kontrol adası (`dry-nv-island.elf`, `#29/32`, `SecDomain::Userspace`, sıfır MMIO/DMA, yalnızca `nvidia_exp=1` kipinde başlatılır, `14` önkoşul, dürüst `nvidia-smi` / `-L` / `-q` / `dry gpu ...` CLI [`BLOCKED` / `N/A`] ve `7+1` `nvidia_exp/` USB paketi).
-   - **Kesin Epistemik Dürüstlük & Mimari Kural (`ADR-005`, `ADR-016..026`):** **`kernel/src/` (`Ring 0`) içinde `0` satır C/Linux ABI/GPL/OpenRM veya UI kodu vardır** (`0` `.c`/`.h`/`.S`, `0` GPL eşleşmesi); `rust_syscall_dispatch = 248 B` (`sub $0xf8,%rsp <= 256 B`) korunmuştur; hiçbir kaynak dosya `1,000` satıra ulaşmaz (en yüksek `963` satır). Tüm çalışma anı testleri `VERIFIED_QEMU` (`llvmpipe` dahildir) veya `PROTOTYPE` (konak IPC süreçleri) düzeyindedir; **`VERIFIED_HARDWARE` sayısı `0`dır**. Fiziksel Lenovo `82K1` boot (`IMPLEMENTED_UNTESTED`), Intel `Iris Xe` (`8086:9a49` `PARTIAL`), NVIDIA `RTX 3050 Ti` (`10de:25a0`, Seviye 1 **`BLOCKED`** / OpenRM+CUDA `UNSUPPORTED`) ve AMD-Vi SLPT (`UNSUPPORTED`) dürüstçe sınırlandırılmıştır.
-2. **Son Doğrulanmış Commit Zinciri (`ascension-8.0`, taban `ascension-7.0` @ `b0387ab`):**
-   - **`5673c9c` .. `b0387ab`** — `Project Ascension 7.0` (`M-A..M-G`, `143/143` QEMU, Virgl `llvmpipe`, `--p17-only` `4/4`)
-   - **`c7faf46`** — `Ascension 8.0 M1`: Bootable 3-part GPT HWVAL Live USB, 5-gate xHCI ancestry, `#![no_std]` FAT32+LFN logger, shared `hwdiag`, `15` `dry` commands, `retrieve_dryos_logs.py`, `p18a`/`p18b`/`9/9 p18c`
-   - **`30bec64`** — `Ascension 8.0 M2`: Kernel/userspace architecture & security hardening (`ARCHITECTURE_AUDIT.md`, `SECURITY_AUDIT.md`, `p18d_security_hardening`)
-   - **`a883d1a`** — `Ascension 8.0 M3`: Driver Island ABI v1 + standalone `drivers/dry-driver-sdk/` + `dry-sdk-demo.elf` (`#28/32`, `p18e`), gap analysis & SDK docs
-   - **`af957da`** — `Ascension 8.0 M4`: GPU hardening (`ALLOW_PHYSICAL_GPU_WRITES = false`, `virtio_gpu.rs` bounds) + Mandatory NVIDIA Driver Island Level 1 (`dry-nv-island.elf` `#29/32`, `nvidia-smi` / `dry gpu ...`, `nvidia_exp/` 7+1 export, `p18nv`/`p18f`/`6/6 p18g`, `GPU_COMPATIBILITY_STATUS.md`, `ADR-026`)
-   - **`HEAD`** — `Ascension 8.0 M5`: Benchmarks (`PERFORMANCE_COMPARISON.md` §4), `HARDWARE_VALIDATION_GUIDE.md`, `HARDWARE_DIAGNOSTIC_COMMANDS.md`, `HARDWARE_LOG_SCHEMA.md`, `ASCENSION_8_0_{FINAL_REPORT,VALIDATION_MATRIX}.md` & tam regresyon doğrulaması
-3. **Son Doğrulanmış Test Kanıtları (`20 Kasım 2026`, `ascension-8.0`):**
-   - `python3 tools/qemu_boot_test.py` (**`164/164 PASS`**, `p18` `21/21` & `p17` `4/4` & `p16` `4/4` dahil, `leaked_frames=0`).
-   - `python3 tools/qemu_boot_test.py --p3-matrix` (**`5/5 PASS`**: `1cpu/256M` `5.09s`, `2cpu/256M` `4.17s`, `4cpu/512M` `5.17s`, `8cpu/1G` `5.26s`, `20cpu/2G` `6.63s`, `leaked_frames=0`).
-   - `python3 tools/qemu_boot_test.py --p17-only` (**`4/4 PASS`**: `p17a` `5.21s`, `p17b` `5.04s`, `p17c` `4.36s`, `p17d` `15.52s` Virgl `llvmpipe`, `leaked_frames=0`).
-   - `python3 tools/qemu_boot_test.py --p18-only` (**`21/21 PASS`**: `p18a` `12.84s`, `p18b` `12.79s`, `9/9 p18c` `61.33s`, `p18d` `10.02s`, `p18e` `7.41s`, `p18nv/safe_gating`, `p18f` `10.18s`, `6/6 p18g` `60.87s`; `fsck.fat -n` clean, `leaked_frames=0`).
-   - `python3 tools/build_live_usb_image.py --build --hwval --verify-boot --output kernel/build/dryos-ascension8-hardware-validation.img` (**`PASS`**: `268,435,456 B` / `256 MiB`, `29/32` modül, `DRYOS_LOGS` `194,527` sektör FAT32, `7.316s`, `13` dosya + `manifest.sha256` + `fsck.fat -n`, SHA-256 `c267a74e7c0620f15018651134dfe2ae82518cc7d866515488b2fce1056e0a8f`; eski `ascension{4..7}` imajları korundu).
-   - `cargo test --manifest-path drivers/dry-driver-sdk/Cargo.toml` (**`5/5 PASS`**) & hijyen (`max_loc=963 < 1000`, `rust_syscall_dispatch=248 B <= 256 B`, `0` C/GPL dosyası `kernel/src/`).
+1. **Projenin Mevcut Durumu ve Kesinleşmiş Mimari Karar (`ADR-016` .. `ADR-027`):**
+   - DRY OS; `x86-64` üzerinde çalışan, yetenek (*capability*) yönelimli, `no_std` Rust mikroçekirdeğidir (`dry-kernel` + **`30/32`** Limine modülü: `29` statik `CPL=3` ELF64 ikilisi + `/bin` `dry-bin.tar` USTAR arşivi [`112,640 B`, `5` ELF]; `MAX_LATCHED_MODULES = 32`).
+   - `Ascension 8.0` ve **`Project Ascension 9.0` (`ascension-9.0`, M1..M5)** tamamlanmıştır: `256 MiB` 3-bölümlü HWVAL v0.9.0 GPT USB (`DRYOS_ESP` + `DRYOS_PERSIST` + `DRYOS_LOGS` FAT32), 5-kapılı xHCI USB MSC köken doğrulaması (`0x1f`) ve SHA-256 read-back doğrulamalı FAT32+LFN günlük yazıcısı, ortak `hwdiag` çerçevesi, Driver Island ABI v1 SDK + `dry-nv-island.elf` (fail-closed Seviye 1 `BLOCKED`/`N/A`), `Frame2M` VFS dinamik ELF yürütme + hiyerarşik VFS (`pwd/cd/mkdir/rmdir/cp/mv/exec`), kullanıcı alanı `dry-net.elf` TCP/UDP/DHCP/DNS/HTTP/1.0 yığını (`ifconfig/ping/nslookup/httpget`), çekirdek `SYSCALL` yönlendirmesi + `dry-linux-abi.elf` (statik `ET_EXEC` `lx-hello.elf`, `13` Linux syscall, `rc=42`), xHCI 1-seviye hub zinciri (`userspace/src/usb/hub.rs`), dış-ağaç korumalı `drivers/i2c-hid-island/` (`ALLOW_PHYSICAL_I2C_WRITES = false`, `i2c-hid-test`, `#UD gen=2`), compositor pano IPC (`182/183`, `clip set/get`, `Ctrl+C`/`Ctrl+V`), kabuk boru/yönlendirme (`>`, `>>`, `| grep`/`head`/`wc`) ve editör özel yol desteği (`open editor <path>`, `Ctrl+O`).
+   - **Kesin Epistemik Dürüstlük & Mimari Kural (`ADR-005`, `ADR-016..027`):** **`kernel/src/` (`Ring 0`) içinde `0` satır C/Linux ABI/GPL/OpenRM veya UI kodu vardır** (`0` `.c`/`.h`/`.S`/`.s`); `0` yeni çekirdek syscall eklenmiştir (`rust_syscall_dispatch = 248 B <= 256 B`); hiçbir kaynak dosya `1,000` satıra ulaşmaz (en yüksek `963` satır); `0` yeni harici Cargo paketi eklenmiştir. Tüm çalışma anı testleri `VERIFIED_QEMU` (`llvmpipe` dahildir) veya `PROTOTYPE` düzeyindedir; **`VERIFIED_HARDWARE` sayısı `0`dır**. Fiziksel Lenovo `82K1` boot (`IMPLEMENTED_UNTESTED`), fiziksel Wi-Fi (`AX201`) / `r8168` (`UNSUPPORTED`), fiziksel LPSS I2C-HID MMIO yazımları (`PARTIAL`, `ALLOW_PHYSICAL_I2C_WRITES = false`), dinamik `ET_DYN`/glibc Linux ELF'leri (`UNSUPPORTED`), Intel `Iris Xe` (`PARTIAL`), NVIDIA `RTX 3050 Ti` (`BLOCKED`/`UNSUPPORTED`) ve AMD-Vi SLPT (`UNSUPPORTED`) dürüstçe sınırlandırılmıştır.
+2. **Son Doğrulanmış Commit Zinciri (`ascension-9.0`, taban `ascension-8.0`):**
+   - **`5187395`** — `Ascension 9.0 M1`: `900+` LOC sıcak dosya sadeleştirme, paralel QEMU koşucusu (`-j N`) & `p19a` stabilite soak testi
+   - **`88441d5`** — `Ascension 9.0 M2`: `Frame2M` VFS dinamik ELF spawning (`SPAWN_FLAG_VFS_ELF`), `/bin` USTAR arşivi (`dry-bin.tar`) & hiyerarşik VFS (`p19b`)
+   - **`233a26d`** — `Ascension 9.0 M3`: `dry-net.elf` TCP/UDP/DNS/HTTP yığını (`p19c`) ve çekirdek `SYSCALL` yönlendirme + `dry-linux-abi.elf` statik ELF64 çalışma zamanı (`p19d`)
+   - **`35ea9cb`** — `Ascension 9.0 M4`: xHCI 1-seviye hub zinciri, korumalı `drivers/i2c-hid-island/` SDK adası (`p19e`), compositor pano IPC (`182/183`), kabuk boru/yönlendirme ve editör özel yolları (`p19f`)
+   - **`HEAD`** — `Ascension 9.0 M5`: HWVAL v0.9.0 Live USB (`dryos-ascension9-hardware-validation.img`, SHA-256 `f3614385...`), `170/170` `-j 4` regresyonu, `ASCENSION_9_0_{FINAL_REPORT,VALIDATION_MATRIX}.md`, `ADR-027`, `R-27` ve güncel operatör belgeleri
+3. **Son Doğrulanmış Test Kanıtları (`22 Kasım 2026`, `ascension-9.0`):**
+   - `python3 tools/qemu_boot_test.py -j 4` (**`170/170 PASS`** in **`342.79 s`**, `p19` `6/6`, `p18` `21/21`, `p17` `4/4`, `p16` `4/4` dahil, `leaked_frames=0`).
+   - `python3 tools/qemu_boot_test.py --p3-matrix` (**`5/5 PASS`**: `1cpu/256M` `5.67 s`, `2cpu/256M` `5.58 s`, `4cpu/512M` `5.51 s`, `8cpu/1G` `5.92 s`, `20cpu/2G` `9.96 s`, `leaked_frames=0`).
+   - `python3 tools/qemu_boot_test.py --p19-only` (**`6/6 PASS`**: `p19a` `11.153 s`, `p19b` `15.382 s`, `p19c` `7.799 s`, `p19d` `6.816 s`, `p19e` `5.541 s`, `p19f` `11.441 s`, `leaked_frames=0`).
+   - `python3 tools/build_live_usb_image.py --build --hwval --verify-boot` (**`PASS`**: `kernel/build/dryos-ascension9-hardware-validation.img`, `268,435,456 B` / `256 MiB`, `30/32` modül, `DRYOS_LOGS` `194,527` sektör FAT32, `6.254 s`, `13` dosya + `manifest.sha256` + `fsck.fat -n`, SHA-256 `f3614385538a3ba953b3fdec3317504254b3d2a679b1b954f77315f0108bf463`; eski `ascension{4..8}` imajları korundu).
+   - `cargo test --offline` (`dry-driver-sdk` **`5/5 PASS`** + `i2c-hid-island --lib` **`2/2 PASS`**) & hijyen (`max_loc=963 < 1000`, `rust_syscall_dispatch=248 B <= 256 B`, `0` C/GPL dosyası `kernel/src/`).
 4. **Kesinleştirilmiş Sonraki Milestone Sırası:**
-   1. **Fiziksel Lenovo `82K1` İlk Boot Doğrulaması (`READY FOR USER PHYSICAL EXECUTION`):** Kullanıcı tarafından [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md) ile `dryos-ascension8-hardware-validation.img` (`c267a74e...`) USB testi ve ardından `python3 tools/retrieve_dryos_logs.py` ile `/hardware-tests/<session-id>/` raporlarının incelenmesi.
-   2. **`Faz 3A–3B` (`PLANNED`):** `H2` `igc`/`e1000e`/`r8168` (`10ec:8168`) NIC adaları ve `FaultEndpoint` + `ET_DYN` PIE üzerinde `dry-linux-abi` (`musl` ELF64).
+   1. **Fiziksel Lenovo `82K1` İlk Boot Doğrulaması (`READY FOR USER PHYSICAL EXECUTION`):** Kullanıcı tarafından [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md) ile `dryos-ascension9-hardware-validation.img` (`f3614385...`) USB testi ve ardından `python3 tools/retrieve_dryos_logs.py` ile `/hardware-tests/<session-id>/` raporlarının incelenmesi.
+   2. **`Faz 3A–3B Devamı` (`PLANNED`):** Dinamik `ET_DYN` PIE/glibc `dry-linux-abi` desteği ve fiziksel `r8168`/`AX201`/LPSS I2C donanım sürücü adaları.
    3. **`Faz 4 / P5` (`PLANNED`):** Intel Iris Xe GGTT/ring/DPCD `165 Hz` modesetting, AMD-Vi SLPT/IOTLB ve cross-VM `DMA-BUF` / VFIO üzerinden RTX 3050 Ti GPU MicroVM.
 5. **Açık Riskler (Özet):**
-   - **`R-22 / R-25`:** Fiziksel Lenovo `82K1` çoklu-DRHD `VT-d`, xHCI zamanlaması, eDP `165 Hz` ve cross-VM `DMA-BUF` sıfır-kopya sınırı (`T5` yalnızca konak POSIX SHM içindedir).
-   - **`R-23`:** Fiziksel `Iris Xe` (`8086:9a49` `PARTIAL`), `RTX 3050 Ti` (`10de:25a0` `4/4/9/5/149`, `53.53 MiB` `ucodes_ga10x.bin`, modeset/CUDA `UNSUPPORTED`) ve AMD `IVRS` SLPT (`UNSUPPORTED`).
-   - **`R-11 / R-24`:** `rust_syscall_dispatch = 248 B` (`<= 256 B`), `--p3-matrix 5/5` & `--p13-only 25/25` `MITIGATED`.
+   - **`R-27`:** Fiziksel `AX201` Wi-Fi / `r8168` NIC, fiziksel LPSS I2C-HID MMIO yazımları (`ALLOW_PHYSICAL_I2C_WRITES = false`), dinamik `ET_DYN` Linux ELF sınırı ve gerçek `82K1` bare-metal ölçüm ihtiyacı.
+   - **`R-22 / R-25 / R-26`:** Fiziksel Lenovo `82K1` çoklu-DRHD `VT-d`, xHCI zamanlaması, eDP `165 Hz`, NVIDIA Seviye 2–3 önkoşulları ve cross-VM `DMA-BUF` sıfır-kopya sınırı (`T5` yalnızca konak POSIX SHM içindedir).
+   - **`R-23`:** Fiziksel `Iris Xe` (`8086:9a49` `PARTIAL`), `RTX 3050 Ti` (`10de:25a0` Seviye 1 `BLOCKED`) ve AMD `IVRS` SLPT (`UNSUPPORTED`).
 6. **İlk Okunması Gereken Belgeler:**
-   1. `docs/ASCENSION_7_0_FINAL_REPORT.md`, `docs/ASCENSION_7_0_VALIDATION_MATRIX.md`, `docs/PHYSICAL_USB_TEST_OPERATOR_GUIDE.md`
-   2. `docs/ASCENSION_7_0_HARDWARE_READINESS.md`, `docs/HARDWARE_GPU_READINESS.md`, `docs/INTEL_IRIS_XE_COMPATIBILITY.md`, `docs/NVIDIA_GA107_COMPATIBILITY.md`, `docs/GPU_ACCELERATION_RESULTS.md`, `docs/PERFORMANCE_COMPARISON.md`
-   3. `HANDOVER.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001..025`), `ROADMAP.md`, `RISK_REGISTER.md`
+   1. `docs/ASCENSION_9_0_FINAL_REPORT.md`, `docs/ASCENSION_9_0_VALIDATION_MATRIX.md`, `docs/HARDWARE_VALIDATION_GUIDE.md`, `docs/HARDWARE_DIAGNOSTIC_COMMANDS.md`
+   2. `docs/ASCENSION_8_0_FINAL_REPORT.md`, `docs/GPU_COMPATIBILITY_STATUS.md`, `docs/PERFORMANCE_COMPARISON.md`
+   3. `HANDOVER.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001..027`), `ROADMAP.md`, `RISK_REGISTER.md`
 7. **İlk Çalıştırılması Gereken Komutlar:**
    ```bash
    git status -s && git log --oneline -n 10
-   python3 tools/qemu_boot_test.py
-   python3 tools/qemu_boot_test.py --p17-only
+   python3 tools/qemu_boot_test.py -j 4
+   python3 tools/qemu_boot_test.py --p19-only
    python3 tools/qemu_boot_test.py --p3-matrix
-   python3 tools/probe_virtio_gpu_3d.py --live-qemu
-   python3 tools/microvm_gpu_proto/run_a7_perf_suite.py
-   python3 tools/build_live_usb_image.py --output kernel/build/dryos-ascension7-live-usb.img --build --verify-boot
+   cargo test --offline --manifest-path drivers/dry-driver-sdk/Cargo.toml
+   cargo test --offline --manifest-path drivers/i2c-hid-island/Cargo.toml --lib
+   python3 tools/build_live_usb_image.py --build --hwval --verify-boot
    ```
-   *(Kritik Kural: `experiments/h1-sched/src/{runqueue,sync}.rs` ve `docs/*.png` içindeki önceden mevcut değişikliklere **kesinlikle dokunma**, `git add` veya `git checkout` uygulama.)*
+   *(Kritik Kural: `experiments/h1-sched/src/{runqueue,sync}.rs`, `docs/*.png`, `docs/screenshots/**`, ilgisiz `tools/compat_bench/*.json` ve `drivers/*/Cargo.lock` içindeki önceden mevcut değişikliklere **kesinlikle dokunma**, `git add` veya `git checkout` uygulama.)*
 
 ### Yarınki Ajanlar İçin Başlangıç Talimatları
 

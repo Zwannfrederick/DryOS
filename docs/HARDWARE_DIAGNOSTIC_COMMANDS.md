@@ -55,3 +55,19 @@ Backed by [userspace/src/nvidia_island/](../userspace/src/nvidia_island/prereq.r
 | `dry gpu nvidia export` | Triggers `IPC_OP_SUP_NV_EXPORT` to write and read-back verify the `7+1` `nvidia_exp/` file bundle to `DRYOS_LOGS` (`VERIFIED files=8 (7 data + manifest.sha256)` or `BLOCKED`). |
 
 Note: Under default `safe` mode (`p18nv/safe_gating`), `nvidia_exp_optin` (`#14`) is unmet, `dry-nv-island.elf` remains **unspawned**, and all NVIDIA commands honestly return `BLOCKED` (`spawned=0`).
+
+---
+
+## 4. Ascension 9.0 Interactive Shell, VFS, Network, Linux ABI & Ergonomics Commands
+
+| Command | Scope / Behavior | Notes & Safety |
+| :--- | :--- | :--- |
+| `pwd`, `cd`, `mkdir`, `rmdir`, `cp`, `mv` | Hierarchical VFS path navigation and file manipulation on `/ram` and writable `/persist`. | Enforces `owner_comp` write isolation (`INV-SEC`); `/bin` and `/boot` stay read-only. |
+| `exec <path>` | Dynamically spawns an ELF64 binary from `/bin` (`dry-bin.tar`) or `/persist` via `Frame2M` (`SPAWN_FLAG_VFS_ELF`). | Zero new kernel syscalls; validated in `p19b` (`exec /bin/dry-probe.elf`). |
+| `linux-run <path>` | Launches `dry-linux-abi.elf` (`SPAWN_FLAG_SYSCALL_REDIRECT`) to run a static `ET_EXEC` x86-64 Linux ELF (e.g., `linux-run /bin/lx-hello.elf`). | Supports static `ET_EXEC` ELFs (`p19d`: `13` syscalls, `rc=42`); dynamic `ET_DYN`/glibc ELFs unsupported. |
+| `ifconfig`, `ping`, `nslookup`, `httpget` | Userspace TCP/UDP/DHCP/ARP/ICMP/DNS/HTTP/1.0 commands backed by `dry-net.elf` over `dry-lx-net` (`8139cp`). | `VERIFIED_QEMU` (`p19c`); physical `AX201` Wi-Fi / `r8168` Ethernet remain `UNSUPPORTED`. |
+| `i2c-hid-test` | Spawns out-of-tree SDK island `dry-i2c-hid.elf` (`ABI v1`), validates report parsing and `#UD` `gen=2` recovery. | Safe passive island (`ALLOW_PHYSICAL_I2C_WRITES = false`, zero physical LPSS I2C MMIO writes). |
+| `clip set <text>`, `clip get` | Reads/writes the `dry-display` compositor clipboard buffer (`IPC_OP_WM_CLIP_SET=182` / `IPC_OP_WM_CLIP_GET=183`, max `512 B`). | Shared with `dry-editor` (`Ctrl+C` / `Ctrl+V`). |
+| `>`, `>>`, `\| grep`, `\| head`, `\| wc` | Shell output redirection and bounded single-stage pipelines (`userspace/src/shell_pipe.rs`). | Unsupported RHS verbs (e.g. `\| cat`) keep strict `UnsupportedPosix(b'\|')` rejection (`--p3-only`). |
+| `open editor [<path>]` | Opens `dry-editor` on a specific path (or default notes); `Ctrl+O` cycles `/persist/notes.txt`, `/ram/notes.txt`, `/ram/welcome.txt`. | Respects VFS compartment write isolation (`p19f`). |
+

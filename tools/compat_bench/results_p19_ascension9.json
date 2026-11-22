@@ -4,35 +4,35 @@
     "app_cycles": 5,
     "crash_cycles": 2,
     "leaked_frames": 0,
-    "wall_time_sec": 10.46
+    "wall_time_sec": 11.153
   },
   "p19b": {
     "probe_bytes": 12792,
     "persist_exec_ok": true,
     "leaked_frames": 0,
-    "wall_time_sec": 10.559
+    "wall_time_sec": 15.382
   },
   "p19c": {
-    "dns_port": 38169,
-    "http_port": 43257,
+    "dns_port": 35125,
+    "http_port": 39347,
     "leaked_frames": 0,
-    "wall_time_sec": 4.691
+    "wall_time_sec": 7.799
   },
   "p19d": {
     "rc": 42,
     "syscalls": 13,
     "leaked_frames": 0,
-    "wall_time_sec": 3.256
+    "wall_time_sec": 6.816
   },
   "p19e": {
     "hub_cascade_line": "[DRY-USB] HUB_CASCADE root_port=5 hub_slot=1 ds_port=1 child_slot=2 speed=1",
     "i2c_hid_gen": 2,
     "leaked_frames": 0,
-    "wall_time_sec": 3.558
+    "wall_time_sec": 5.541
   },
   "p19f": {
     "grep_out_lines": 4,
     "leaked_frames": 0,
-    "wall_time_sec": 7.516
+    "wall_time_sec": 11.441
   }
 }

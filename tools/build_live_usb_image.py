@@ -40,7 +40,7 @@ from qemu_p2_validators import _DesktopQmpClient  # noqa: E402
 from qemu_p13_usb_persist_validators import _format_dryfs_v1_bytes, _write_gpt_image  # noqa: E402
 
 DEFAULT_IMG = BUILD_DIR / "dryos-ascension6-live-usb.img"
-HWVAL_IMG = BUILD_DIR / "dryos-ascension8-hardware-validation.img"
+HWVAL_IMG = BUILD_DIR / "dryos-ascension9-hardware-validation.img"
 OUT_JSON = ROOT / "tools" / "compat_bench" / "results_live_usb_boot.json"
 HWVAL_OUT_JSON = ROOT / "tools" / "compat_bench" / "results_hwval_usb_boot.json"
 SECTOR_BYTES = 512
@@ -100,27 +100,27 @@ def _limine_hwval_conf_text(disk_guid_hex: str, default_extra: str = "", default
     sfx = f" {default_extra.strip()}" if default_extra.strip() else ""
     entries = [
         (
-            "DRY OS v0.8.0 - SAFE AUTO CHECK (Default, Passive)",
+            "DRY OS v0.9.0 - SAFE AUTO CHECK (Default, Passive)",
             "1280x800x32",
             f"live_usb=1 desktop=1 storage=ro hwcheck=auto hwcheck_mode=safe usb_disk_guid={disk_guid_hex}{sfx}",
         ),
         (
-            "DRY OS v0.8.0 - DESKTOP SAFE MODE (GOP Only, No GPU Driver Init)",
+            "DRY OS v0.9.0 - DESKTOP SAFE MODE (GOP Only, No GPU Driver Init)",
             "1280x800x32",
             f"live_usb=1 desktop=1 storage=ro hwcheck_mode=desktop_safe usb_disk_guid={disk_guid_hex}{sfx}",
         ),
         (
-            "DRY OS v0.8.0 - EXTENDED DIAGNOSTICS (Bounded, Non-Destructive)",
+            "DRY OS v0.9.0 - EXTENDED DIAGNOSTICS (Bounded, Non-Destructive)",
             "1280x800x32",
             f"live_usb=1 desktop=1 storage=ro hwcheck=auto hwcheck_mode=extended usb_disk_guid={disk_guid_hex}{sfx}",
         ),
         (
-            "DRY OS v0.8.0 - RECOVERY / LOG VIEWER (No Hardware Init Tests)",
+            "DRY OS v0.9.0 - RECOVERY / LOG VIEWER (No Hardware Init Tests)",
             "1280x800x32",
             f"live_usb=1 desktop=1 storage=ro hwcheck_mode=recovery usb_disk_guid={disk_guid_hex}{sfx}",
         ),
         (
-            "DRY OS v0.8.0 - NVIDIA DRIVER EXPERIMENTAL (MicroVM Level 1 Gated)",
+            "DRY OS v0.9.0 - NVIDIA DRIVER EXPERIMENTAL (MicroVM Level 1 Gated)",
             "1280x800x32",
             f"live_usb=1 desktop=1 storage=ro hwcheck=auto hwcheck_mode=nvidia_exp nvidia_exp=1 usb_disk_guid={disk_guid_hex}{sfx}",
         ),
@@ -426,8 +426,8 @@ def build_hwval_usb_image(
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     img_path.parent.mkdir(parents=True, exist_ok=True)
 
-    disk_guid_raw = guid_override if guid_override is not None else uuid.uuid5(uuid.NAMESPACE_OID, "dry-ascension8-hwval-usb").bytes_le
-    boot_guid_raw = uuid.uuid5(uuid.NAMESPACE_OID, "dry-ascension8-hwval-usb").bytes_le
+    disk_guid_raw = guid_override if guid_override is not None else uuid.uuid5(uuid.NAMESPACE_OID, "dry-ascension9-hwval-usb").bytes_le
+    boot_guid_raw = uuid.uuid5(uuid.NAMESPACE_OID, "dry-ascension9-hwval-usb").bytes_le
     total_sectors = size_mib * SECTORS_PER_MIB
     esp_sectors = esp_mib * SECTORS_PER_MIB
     persist_sectors = persist_mib * SECTORS_PER_MIB
@@ -446,7 +446,7 @@ def build_hwval_usb_image(
     conf_path.write_text(_limine_hwval_conf_text(boot_guid_raw.hex(), limine_extra, default_entry_idx), encoding="utf-8")
 
     manifest = {
-        "release": "Project Ascension 8.0 (v0.8.0)",
+        "release": "Project Ascension 9.0 (v0.9.0)",
         "edition": "Hardware Validation Edition",
         "image_size_mib": size_mib,
         "total_sectors": total_sectors,
@@ -820,7 +820,7 @@ def verify_usb_xhci_boot(img_path: pathlib.Path, meta: dict[str, Any]) -> dict[s
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hwval", action="store_true", help="Build Ascension 8.0 Hardware Validation Edition (3-partition GPT with DRYOS_LOGS)")
+    parser.add_argument("--hwval", action="store_true", help="Build Ascension 9.0 Hardware Validation Edition (3-partition GPT with DRYOS_LOGS)")
     parser.add_argument("--build", action="store_true", help="Force rebuild of kernel and all userspace ELFs")
     parser.add_argument("--output", type=pathlib.Path, default=None, help="Output Live USB GPT image path")
     parser.add_argument("--size-mib", type=int, default=None, help="Total GPT disk image size in MiB")

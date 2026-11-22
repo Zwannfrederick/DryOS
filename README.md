@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="assets/brand/dryos-lockup-boot.svg" alt="DRY OS — Project Ascension 8.0" width="540">
+  <img src="assets/brand/dryos-lockup-boot.svg" alt="DRY OS — Project Ascension 9.0" width="540">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Architecture-x86--64%20Capability%20Microkernel-1d4ed8?style=flat-square" alt="Architecture">
   <img src="https://img.shields.io/badge/Language-no__std%20Rust-0f766e?style=flat-square" alt="Language">
   <img src="https://img.shields.io/badge/Desktop-DRY%20Glass%202.1-334155?style=flat-square" alt="Desktop">
-  <img src="https://img.shields.io/badge/Release-Project%20Ascension%208.0%20(ascension--8.0)-1e293b?style=flat-square" alt="Release">
+  <img src="https://img.shields.io/badge/Release-Project%20Ascension%209.0%20(ascension--9.0)-1e293b?style=flat-square" alt="Release">
   <a href="LICENSING.md"><img src="https://img.shields.io/badge/License-Apache--2.0%20OR%20MIT%20%7C%20GPL--2.0%20Islands-475569?style=flat-square" alt="License"></a>
 </p>
 
-# DRY OS — Project Ascension 8.0 (`v0.8.0-dev` on `ascension-8.0`)
+# DRY OS — Project Ascension 9.0 (`v0.9.0-dev` on `ascension-9.0`)
 
-**A clean-slate x86-64 capability microkernel OS in Rust with fail-closed vendor-neutral IOMMU (`DMAR`/`IVRS`), 64-slot ACPI ECAM PCI discovery, scatter-gather IOVA DMA, a vendor-neutral Ring-3 `dry-gpu-svc` + GOP-to-KMS handover FSM, decoupled `libdry-lx-compat`, standalone `dry-driver-sdk` (Driver Island ABI v1), mandatory fail-closed NVIDIA Level-1 control island (`dry-nv-island.elf`), shared `hwdiag` framework (`15` `dry` + `7` GPU/NVIDIA CLI commands), `DRY Glass 2.1` desktop, Ring-3 xHCI USB HID/BOT + RO NVMe storage, and a `256 MiB` 3-part GPT HWVAL UEFI Live USB with 5-gate ancestry verification and crash-safe FAT32 log persistence (`DRYOS_LOGS`).**
+**A clean-slate x86-64 capability microkernel OS in Rust (`0` C/GPL lines in Ring 0, `248 B` syscall stack frame) with fail-closed vendor-neutral IOMMU (`DMAR`/`IVRS`), 64-slot ACPI ECAM PCI discovery, scatter-gather IOVA DMA, Frame2M VFS dynamic ELF spawning + `/bin` USTAR archive (`30/32` modules), Ring-3 `dry-net` TCP/UDP/DHCP/DNS/HTTP stack, kernel `SYSCALL` redirect + `dry-linux-abi` static Linux ELF64 runtime, xHCI 1-level USB hub cascade, guarded `i2c-hid` ABI v1 SDK island, compositor clipboard IPC, shell pipes/redirection, `DRY Glass 2.1` desktop, mandatory fail-closed NVIDIA Level-1 control island (`dry-nv-island.elf`), shared `hwdiag` framework, and a `256 MiB` 3-part GPT HWVAL v0.9.0 Live USB (`DRYOS_LOGS`).**
 
-> **Verification Scope (`Ascension 8.0`):** Automated CI/QEMU/OVMF suites pass end-to-end (**`164/164`** unified checks including `--p18-only` `21/21`, `--p17-only` `4/4`, `--p16-only` `4/4`, `--p3-matrix` `5/5` up to `20 vCPU`, `--p13-only` `25/25`, `dry-driver-sdk` `cargo test` `5/5`, and `256 MiB` HWVAL GPT Live USB `--verify-boot` under QEMU `intel-iommu` `xHCI` [`7.316s`, `13` FAT32 SHA-256 files + `fsck.fat -n` clean, `leaked_frames=0`]). Physical Lenovo `82K1` bare-metal USB boot (`IMPLEMENTED_UNTESTED`), native Intel Iris Xe / NVIDIA RTX 3050 Ti modesetting & CUDA (`BLOCKED`), and cross-VM `DMA-BUF` zero-copy remain explicitly gated (**`0` `VERIFIED_HARDWARE` claims**) — see [docs/ASCENSION_8_0_FINAL_REPORT.md](docs/ASCENSION_8_0_FINAL_REPORT.md) and [docs/ASCENSION_8_0_VALIDATION_MATRIX.md](docs/ASCENSION_8_0_VALIDATION_MATRIX.md).
+> **Verification Scope (`Ascension 9.0`):** Automated CI/QEMU/OVMF suites pass end-to-end (**`170/170`** unified checks in `342.79 s` with `-j 4`, including `--p19-only` `6/6`, `--p18-only` `21/21`, `--p17-only` `4/4`, `--p16-only` `4/4`, `--p3-matrix` `5/5` up to `20 vCPU`, `--p13-only` `25/25`, `dry-driver-sdk` `5/5` + `i2c-hid-island` `2/2` host unit tests, and `256 MiB` HWVAL v0.9.0 GPT Live USB `--verify-boot` under QEMU `intel-iommu` `xHCI` [`6.254 s`, SHA-256 `f3614385...`, `13` FAT32 SHA-256 files + `fsck.fat -n` clean, `leaked_frames=0`]). Physical Lenovo `82K1` bare-metal USB boot (`IMPLEMENTED_UNTESTED`), physical Wi-Fi (`AX201`) / `r8168` NIC, physical LPSS I2C-HID MMIO writes (`ALLOW_PHYSICAL_I2C_WRITES = false`), dynamic `ET_DYN` Linux ELFs, native Intel Iris Xe / NVIDIA RTX 3050 Ti modesetting & CUDA (`PARTIAL`/`BLOCKED`), and cross-VM `DMA-BUF` remain explicitly gated (**`0` `VERIFIED_HARDWARE` claims**) — see [docs/ASCENSION_9_0_FINAL_REPORT.md](docs/ASCENSION_9_0_FINAL_REPORT.md) and [docs/ASCENSION_9_0_VALIDATION_MATRIX.md](docs/ASCENSION_9_0_VALIDATION_MATRIX.md).
 
 ---
 
@@ -129,13 +129,14 @@ python3 tools/build_vector_assets.py --verify
 ### 2. Offline Release Build, SDK Tests & QEMU Verification Gates
 
 ```bash
-# Offline release build + Clippy (-D warnings) for kernel, 29 userspace modules, SDK & GPL islands
+# Offline release build + Clippy (-D warnings) for kernel, 30/32 modules (29 ELFs + dry-bin.tar), SDK & GPL islands
 python3 tools/qemu_boot_test.py --build-only
 
-# Standalone Driver Island ABI v1 SDK unit tests (5/5 PASS)
-cargo test --manifest-path drivers/dry-driver-sdk/Cargo.toml
+# Standalone Driver Island ABI v1 SDK & i2c-hid island unit tests (7/7 PASS)
+cargo test --offline --manifest-path drivers/dry-driver-sdk/Cargo.toml
+cargo test --offline --manifest-path drivers/i2c-hid-island/Cargo.toml --lib
 
-# Individual subsystem & Project Ascension 5.0..8.0 QEMU/OVMF gates
+# Individual subsystem & Project Ascension 5.0..9.0 QEMU/OVMF gates
 python3 tools/qemu_boot_test.py --p8-only            # VT-d DMAR/SLPT, MSI/MSI-X, SG DMA (IOVA!=HPA), >4 GiB / <4K BAR
 python3 tools/qemu_boot_test.py --p11-only           # DRY Glass 2.1 adaptive strip, Alt+W, HiDPI
 python3 tools/qemu_boot_test.py --p12-only           # Linux v6.18 bochs.c DRM island + RO PRIME + GOP coexist
@@ -145,19 +146,19 @@ python3 tools/qemu_boot_test.py --p15-only           # 118 SVGs & 100%/125%/150%
 python3 tools/qemu_boot_test.py --p16-only           # Ascension 6.0: fail-closed IOMMU/IVRS, gpu_svc, onboarding, MicroVM/3D probes
 python3 tools/qemu_boot_test.py --p17-only           # Ascension 7.0: multi-crash GPU recovery, volatile boot, SMP-4 VT-d, Virgl 3D (4/4 PASS)
 python3 tools/qemu_boot_test.py --p18-only           # Ascension 8.0: HWVAL 3-part USB, 9/9 faults, M2 security, SDK ABI v1, NVIDIA Level-1 (21/21 PASS)
+python3 tools/qemu_boot_test.py --p19-only           # Ascension 9.0: soak, Frame2M VFS exec, dry-net, dry-linux-abi, xHCI hub + i2c-hid, clip/pipes (6/6 PASS)
 python3 tools/qemu_boot_test.py --p3-matrix          # 1..20 vCPU / 256M..2G RAM SMP matrix (5/5 PASS)
 
-# Full deterministic QEMU/OVMF suite (164/164 PASS, leaked_frames=0)
-python3 tools/qemu_boot_test.py
+# Full deterministic parallel QEMU/OVMF suite (170/170 PASS in 342.79s with -j 4, leaked_frames=0)
+python3 tools/qemu_boot_test.py -j 4
 ```
 
 ### 3. Hardware Validation Live USB Builder, Log Retrieval & Read-Only Auditors
 
 ```bash
-# Build 256 MiB 3-partition GPT HWVAL Live USB (96 MiB DRYOS_ESP + 64 MiB DRYOS_PERSIST + DRYOS_LOGS FAT32, 29 ELFs)
-# Output: kernel/build/dryos-ascension8-hardware-validation.img (QEMU-verified 7.316s, leaked_frames=0)
-python3 tools/build_live_usb_image.py --build --hwval --verify-boot \
-  --output kernel/build/dryos-ascension8-hardware-validation.img
+# Build 256 MiB 3-partition GPT HWVAL v0.9.0 Live USB (96 MiB DRYOS_ESP + 64 MiB DRYOS_PERSIST + DRYOS_LOGS FAT32, 30/32 modules)
+# Output: kernel/build/dryos-ascension9-hardware-validation.img (QEMU-verified 6.254s, leaked_frames=0)
+python3 tools/build_live_usb_image.py --build --hwval --verify-boot
 
 # Inspect host DRYOS_LOGS USB partitions read-only & extract/verify 13-file SHA-256 bundles
 python3 tools/retrieve_dryos_logs.py --list-candidates
@@ -170,7 +171,7 @@ python3 tools/microvm_gpu_proto/run_a7_perf_suite.py
 python3 tools/probe_virtio_gpu_3d.py --live-qemu
 ```
 
-**Bare-Metal Physical USB Note:** QEMU/OVMF `--verify-boot` tests emulated `intel-iommu` + `qemu-xhci`, not real silicon IOMMU or laptop ACPI/xHCI quirks. To execute bare-metal testing safely on real hardware, follow [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md): verify SHA-256 (`c267a74e...`), inspect removable USB devices via `lsblk` and `/dev/disk/by-id/usb-*`, write `kernel/build/dryos-ascension8-hardware-validation.img` only to a removable USB stick, and retrieve reports read-only via `tools/retrieve_dryos_logs.py`.
+**Bare-Metal Physical USB Note:** QEMU/OVMF `--verify-boot` tests emulated `intel-iommu` + `qemu-xhci`, not real silicon IOMMU or laptop ACPI/xHCI quirks. To execute bare-metal testing safely on real hardware, follow [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md): verify SHA-256 (`f3614385...`), inspect removable USB devices via `lsblk` and `/dev/disk/by-id/usb-*`, write `kernel/build/dryos-ascension9-hardware-validation.img` only to a removable USB stick, and retrieve reports read-only via `tools/retrieve_dryos_logs.py`.
 
 ---
 
@@ -201,14 +202,15 @@ DRY OS maintains a strict **galvanic license boundary** ([LICENSING.md](LICENSIN
 
 ## Documentation Index
 
-- [docs/ASCENSION_8_0_FINAL_REPORT.md](docs/ASCENSION_8_0_FINAL_REPORT.md) & [docs/ASCENSION_8_0_VALIDATION_MATRIX.md](docs/ASCENSION_8_0_VALIDATION_MATRIX.md) — Project Ascension 8.0 executive summary, 7-label ledger, `164/164` + `21/21` `--p18-only` + `5/5` SMP + `5/5` SDK verification matrix
-- [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md), [docs/HARDWARE_DIAGNOSTIC_COMMANDS.md](docs/HARDWARE_DIAGNOSTIC_COMMANDS.md) & [docs/HARDWARE_LOG_SCHEMA.md](docs/HARDWARE_LOG_SCHEMA.md) — `256 MiB` 3-part GPT HWVAL USB flashing & retrieval guide, `15` `dry` + `7` GPU/NVIDIA CLI commands, and FAT32 `hardware-tests/` + `nvidia_exp/` schemas
+- [docs/ASCENSION_9_0_FINAL_REPORT.md](docs/ASCENSION_9_0_FINAL_REPORT.md) & [docs/ASCENSION_9_0_VALIDATION_MATRIX.md](docs/ASCENSION_9_0_VALIDATION_MATRIX.md) — Project Ascension 9.0 executive summary, 7-label ledger, `170/170` (`-j 4`) + `6/6` `--p19-only` + `21/21` `--p18-only` + `5/5` SMP + `7/7` SDK verification matrix
+- [docs/ASCENSION_8_0_FINAL_REPORT.md](docs/ASCENSION_8_0_FINAL_REPORT.md) & [docs/ASCENSION_8_0_VALIDATION_MATRIX.md](docs/ASCENSION_8_0_VALIDATION_MATRIX.md) — Historical Project Ascension 8.0 final report & validation matrix
+- [docs/HARDWARE_VALIDATION_GUIDE.md](docs/HARDWARE_VALIDATION_GUIDE.md), [docs/HARDWARE_DIAGNOSTIC_COMMANDS.md](docs/HARDWARE_DIAGNOSTIC_COMMANDS.md) & [docs/HARDWARE_LOG_SCHEMA.md](docs/HARDWARE_LOG_SCHEMA.md) — `256 MiB` 3-part GPT HWVAL v0.9.0 USB flashing & retrieval guide, `dry` + GPU/NVIDIA + Ascension 9.0 CLI commands, and FAT32 `hardware-tests/` + `nvidia_exp/` schemas
 - [docs/ARCHITECTURE_AUDIT.md](docs/ARCHITECTURE_AUDIT.md) & [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) — Milestone 2 kernel/userspace architectural & security hardening audit (`p18d`)
 - [docs/LINUX_WINDOWS_GAP_ANALYSIS.md](docs/LINUX_WINDOWS_GAP_ANALYSIS.md), [docs/DRIVER_COMPATIBILITY_ROADMAP.md](docs/DRIVER_COMPATIBILITY_ROADMAP.md), [docs/DRIVER_ISLAND_SDK.md](docs/DRIVER_ISLAND_SDK.md) & [docs/GPU_COMPATIBILITY_STATUS.md](docs/GPU_COMPATIBILITY_STATUS.md) — Compatibility gap analysis, Driver Island ABI v1 SDK spec (`p18e`), and Mandatory NVIDIA Level-1 (`BLOCKED`) status (`p18f`/`p18g`)
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Privilege boundaries, syscall ABI (`248 B`), `29/32` Ring-3 compartments, fail-closed `IommuOps`, `dry-gpu-svc`, `INV-DISK-SAFE-01/02`
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Privilege boundaries, syscall ABI (`248 B`), `30/32` Ring-3 modules (`29` ELFs + `dry-bin.tar`), fail-closed `IommuOps`, `dry-gpu-svc`, `dry-net`, `dry-linux-abi`, `INV-DISK-SAFE-01/02`
 - [HANDOVER.md](HANDOVER.md) & [ROADMAP.md](ROADMAP.md) — Engineering handover guide, milestone ledger, and next phase queue
-- [DECISIONS.md](DECISIONS.md) — Architecture Decision Records (`ADR-001` through `ADR-026`)
-- [RISK_REGISTER.md](RISK_REGISTER.md) & [LICENSING.md](LICENSING.md) — Risk mitigations (`R-01`–`R-26`) and dual-license isolation architecture
+- [DECISIONS.md](DECISIONS.md) — Architecture Decision Records (`ADR-001` through `ADR-027`)
+- [RISK_REGISTER.md](RISK_REGISTER.md) & [LICENSING.md](LICENSING.md) — Risk mitigations (`R-01`–`R-27`) and dual-license isolation architecture
 - [docs/ASCENSION_7_0_FINAL_REPORT.md](docs/ASCENSION_7_0_FINAL_REPORT.md) & [docs/ASCENSION_7_0_VALIDATION_MATRIX.md](docs/ASCENSION_7_0_VALIDATION_MATRIX.md) — Historical Project Ascension 7.0 final report & validation matrix
 - [docs/GPU_ACCELERATION_RESULTS.md](docs/GPU_ACCELERATION_RESULTS.md) & [docs/PERFORMANCE_COMPARISON.md](docs/PERFORMANCE_COMPARISON.md) — Virgl (`llvmpipe`), dirty-rect clipping, `T0`–`T5` GPU IPC benchmarks, and Ascension 8.0 system/HWVAL measurements
 - [docs/ASCENSION_6_0_VALIDATION_MATRIX.md](docs/ASCENSION_6_0_VALIDATION_MATRIX.md) & [docs/ASCENSION_5_0_VALIDATION_MATRIX.md](docs/ASCENSION_5_0_VALIDATION_MATRIX.md) — Preserved Ascension `5.0`/`6.0` verification matrices & digests

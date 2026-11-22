@@ -88,3 +88,24 @@ All tiers were measured back-to-back on the **same Linux host**, **same `1920x10
 | **SMP / RAM Scaling Matrix (`--p3-matrix`)** | **`5 / 5 PASS`** | `1cpu/256M` **`5.09 s`** (`hlt=567`) · `2cpu/256M` **`4.17 s`** (`hlt=1,249`) · `4cpu/512M` **`5.17 s`** (`hlt=2,578`) · `8cpu/1G` **`5.26 s`** (`hlt=5,260`) · `20cpu/2G` **`6.63 s`** (`hlt=13,447`), all `leaked_frames = 0` | Linear scaling, `0` leaks |
 | **Reliability & Virgl 3D Suite (`--p17-only`)** | **`4 / 4 PASS`** | `p17a` **`5.212 s`** (`gen=1->2->3`, `quiesce=4`) · `p17b` **`5.043 s`** (`persist=0`) · `p17c` **`4.358 s`** (`smp=4`, `vtd_faults=2`, `quiesces=5`) · `p17d` **`15.521 s`** (`Virgl` `llvmpipe`, `px=0xffff0000`, `neg_err=0x1205`) | `leaked_frames = 0` |
 | **Full Unified QEMU Regression** | **`164 / 164 PASS`** | `58` Legacy + `9` P1 + `14` P2 + `6` P3 + `3` P4 + `2` 2C-0 + `1` 2C-1 + `1` GPU + `1` 2C-2 + `9` Glass/2.0/2.1 + `1` LxDRM + `25` USB/NVMe + `1` LxNet + `4` Brand + `4` Ascension 6.0 + `4` Ascension 7.0 + `21` Ascension 8.0 | Zero failures, `29/32` slots |
+
+---
+
+## 5. Project Ascension 9.0 Living-OS, Parallel Regression & HWVAL v0.9.0 Summary (`VERIFIED_QEMU`)
+
+> [!IMPORTANT]
+> **Measurement Scope Boundary (`hardware_verified = false`):** All timings below were measured on **QEMU/KVM + OVMF** (`ascension-9.0`, `v0.9.0-dev`). Physical bare-metal benchmarks on the target **Lenovo IdeaPad Gaming 3 15IHU6 (`82K1`)** remain **`IMPLEMENTED_UNTESTED`** until executed manually by the operator.
+
+| Workload / Suite (`ascension-9.0`) | Observed Duration | Key Measured Results / Invariants | Source |
+| :--- | :---: | :--- | :--- |
+| **HWVAL v0.9.0 `256 MiB` Live USB `--verify-boot`** | **`6.254 s`** | `30/32` modules (`29` ELFs + `dry-bin.tar` `112,640 B`), passive check (`pass=20 fail=0 skip=2 blocked=2`), `13` FAT32 SHA-256 files + `fsck.fat -n`, `esp_and_persist_untouched=true`, `leaked_frames=0`, SHA-256 `f3614385...` | [results_hwval_usb_boot.json](../tools/compat_bench/results_hwval_usb_boot.json) |
+| **`p19a` M1 Desktop Lifecycle & Crash Soak** | **`11.153 s`** | `app_cycles=5`, `crash_cycles=2`, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **`p19b` M2 Frame2M VFS Exec & `/bin` USTAR** | **`15.382 s`** | `probe_bytes=12792`, `persist_exec_ok=true`, `pwd/cd/mkdir/rmdir/cp/mv/exec`, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **`p19c` M3 Userspace `dry-net` TCP/UDP/DNS/HTTP** | **`7.799 s`** | DHCP/ARP/ICMP + `dns_port=35125` + `http_port=39347` over `8139cp` island, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **`p19d` M3 `dry-linux-abi` Static ELF64 (`lx-hello.elf`)** | **`6.816 s`** | `SPAWN_FLAG_SYSCALL_REDIRECT`, `0` new kernel syscalls, `syscalls=13`, `rc=42`, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **`p19e` M4 xHCI Hub Cascade & `dry-i2c-hid` Island** | **`5.541 s`** | `HUB_CASCADE root_port=5 hub_slot=1 ds_port=1 child_slot=2 speed=1`, `i2c_hid_gen=2`, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **`p19f` M4 Clipboard IPC, Shell Pipes & Editor Paths** | **`11.441 s`** | `IPC_OP_WM_CLIP_SET/GET`, `>`/`>>`/`\| grep` (`grep_out_lines=4`)/`head`/`wc`, `Ctrl+C`/`Ctrl+O`/`Ctrl+V`/`Ctrl+S`, `leaked_frames=0` | [results_p19_ascension9.json](../tools/compat_bench/results_p19_ascension9.json) |
+| **SMP / RAM Scaling Matrix (`--p3-matrix`)** | **`5 / 5 PASS`** | `1cpu/256M` **`5.67 s`** (`hlt=548`) · `2cpu/256M` **`5.58 s`** (`hlt=1,216`) · `4cpu/512M` **`5.51 s`** (`hlt=2,588`) · `8cpu/1G` **`5.92 s`** (`hlt=4,547`) · `20cpu/2G` **`9.96 s`** (`hlt=7,573`), all `leaked_frames=0` | `--p3-matrix` |
+| **Full Parallel Unified QEMU Regression (`-j 4`)** | **`170 / 170 PASS`** | **`342.79 s`** wall time (`jobs=4`, `30/32` modules, `rust_syscall_dispatch = 248 B`, `max_loc = 963 < 1,000`, `0` C/GPL in `kernel/src/`) | `qemu_boot_test.py -j 4` |
+| **Host SDK Unit Suites (`dry-driver-sdk` + `i2c-hid-island`)** | **`7 / 7 PASS`** | `dry-driver-sdk` (`5/5`) + `i2c-hid-island --lib` (`2/2`, `ALLOW_PHYSICAL_I2C_WRITES = false`) | `cargo test --offline` |
+
